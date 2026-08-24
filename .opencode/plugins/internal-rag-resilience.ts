@@ -2,8 +2,14 @@ import type { Plugin } from "@opencode-ai/plugin"
 import { readFile } from "node:fs/promises"
 import { join } from "node:path"
 const py = process.platform === "win32" ? "python" : "python3"
+
 export const InternalRagResilience: Plugin = async ({ worktree }) => {
   const script = join(worktree, ".agents", "skills", "internal-rag", "irag.py")
+
+  // H3: debounce — at least 60s between auto-checkpoints, count skipped
+  let lastAutoCheckpoint = 0
+  let skippedCount = 0
+
   const cp = async (reason: string, phase?: string) => {
     try {
       const c = [py, script, "checkpoint", "--reason", reason]
@@ -12,16 +18,33 @@ export const InternalRagResilience: Plugin = async ({ worktree }) => {
       await p.exited
     } catch {}
   }
+
+  const debouncedCp = async (reason: string, phase?: string) => {
+    const now = Date.now()
+    const minInterval = 60_000 // 60 seconds
+    if (now - lastAutoCheckpoint < minInterval) {
+      skippedCount++
+      return
+    }
+    const effectiveReason = skippedCount > 0
+      ? `${reason} (debounced: ${skippedCount} edits skipped)`
+      : reason
+    lastAutoCheckpoint = now
+    skippedCount = 0
+    await cp(effectiveReason, phase)
+  }
+
   const compact = async () => {
     try {
       const p = Bun.spawn([py, script, "compact"], { cwd: worktree, stdout: "ignore", stderr: "ignore" })
       await p.exited
     } catch {}
   }
+
   return {
     "tool.execute.after": async (input, _output) => {
       if (["edit", "write", "apply_patch"].includes(input.tool)) {
-        await cp(`opencode-auto-after-${input.tool}`)
+        await debouncedCp(`opencode-auto-after-${input.tool}`)
       }
     },
     event: async ({ event }) => {

@@ -1,5 +1,32 @@
 # Changelog
 
+## 1.0.3 — 2026-08-24
+
+Quality and intelligence release.
+
+### Recency boost (H1)
+- BM25 and embeddings scoring now gives a small boost to recently created/updated memories (<7 days: +0.3 BM25, +0.03 embeddings; <30 days: +0.1/+0.01).
+
+### Conflict detection (H2)
+- `remember` now detects potential conflicts with active memories of the same type/scope (body token overlap >= 50%).
+- Warns and suggests `supersede` instead. `--force` overrides.
+
+### Plugin debounce (H3)
+- OpenCode resilience plugin now debounces auto-checkpoints (min 60s between, counts skipped edits).
+
+### Batch remember (H4)
+- `remember-batch <file.json>` — create multiple memories from a JSON array.
+
+### Clean command (H5)
+- `clean [--force]` — permanently delete all files from `archive/` (forgotten memories).
+
+### Config validation (H6)
+- `config --validate` — checks config values (ranges, types, unknown sections).
+
+### Memory access tracking (H7)
+- `search` and `context` now write `last_accessed` to memory frontmatter.
+- `doctor` reports how many memories have never been accessed (archive candidates).
+
 ## 1.0.2 — 2026-08-24
 
 Quality and reliability release.

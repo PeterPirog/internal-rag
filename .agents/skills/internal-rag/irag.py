@@ -24,7 +24,7 @@ import unicodedata
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-VERSION = "1.0.2"
+VERSION = "1.0.3"
 
 ALLOWED_TYPES = {"decision", "knowledge", "constraint", "gotcha", "failure", "hypothesis", "session"}
 ALLOWED_STATUS = {"active", "tentative", "superseded", "invalid", "archived"}
@@ -843,6 +843,25 @@ TYPE_PRIORITY = {
 }
 
 
+def recency_boost(fm: Dict[str, Any]) -> float:
+    """H1: Small score boost for recently created/updated memories."""
+    date_str = str(fm.get("updated") or fm.get("created") or "")
+    if not date_str:
+        return 0.0
+    try:
+        mem_date = dt.date.fromisoformat(date_str[:10])
+    except Exception:
+        return 0.0
+    age_days = (dt.date.today() - mem_date).days
+    if age_days < 0:
+        age_days = 0
+    if age_days <= 7:
+        return 0.3
+    if age_days <= 30:
+        return 0.1
+    return 0.0
+
+
 def bm25_search(query: str, candidates: List[Tuple[Path, str, Dict[str, Any]]],
                 limit: int, cfg: Dict[str, Any]) -> List[Tuple[float, Path, Dict[str, Any], str, List[str]]]:
     k1 = 1.5
@@ -892,6 +911,7 @@ def bm25_search(query: str, candidates: List[Tuple[Path, str, Dict[str, Any]]],
             score -= 100.0
         mtype = str(fm.get("type", "")).lower()
         score += TYPE_PRIORITY.get(mtype, 0.0)
+        score += recency_boost(fm)
         if score > 0:
             scored.append((score, i, matched))
     scored.sort(key=lambda x: -x[0])
@@ -963,6 +983,20 @@ def embeddings_search(query: str, candidates: List[Tuple[Path, str, Dict[str, An
         return None
 
 
+def _mark_accessed(paths: List[Path]) -> None:
+    """H7: Update last_accessed timestamp in frontmatter of returned memories."""
+    for p in paths:
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+            fm = parse_fm(text)
+            fm["last_accessed"] = today()
+            body_start = text.find("\n---", 4)
+            body = text[body_start + 4:].lstrip("\n") if body_start >= 0 else text
+            p.write_text(write_fm(fm) + "\n" + body, encoding="utf-8")
+        except Exception:
+            pass
+
+
 def search(query: str, limit: int = 8, types: Optional[List[str]] = None,
            statuses: Optional[List[str]] = None) -> List[Tuple[float, Path, Dict[str, Any], str]]:
     return _search_with_cfg(query, limit, load_config(), types, statuses)
@@ -993,9 +1027,13 @@ def _search_with_cfg(query: str, limit: int, cfg: Dict[str, Any],
         return []
     emb = embeddings_search(query, cands, limit, cfg)
     if emb is not None:
-        return [(s, p, fm, sn) for s, p, fm, sn, _ in emb]
+        result = [(s, p, fm, sn) for s, p, fm, sn, _ in emb]
+        _mark_accessed([p for _, p, _, _ in result])
+        return result
     bm = bm25_search(query, cands, limit, cfg)
-    return [(s, p, fm, sn) for s, p, fm, sn, _ in bm]
+    result = [(s, p, fm, sn) for s, p, fm, sn, _ in bm]
+    _mark_accessed([p for _, p, _, _ in result])
+    return result
 
 
 def _matched_for(fm: Dict[str, Any], query: str = "") -> List[str]:
@@ -1059,6 +1097,14 @@ def remember(args) -> None:
             print(f"  {d}", file=sys.stderr)
         print("Use --force to create anyway, or `update` the existing memory.", file=sys.stderr)
         return
+    # H2: conflict detection for decision/knowledge/constraint
+    conflicts = _find_conflicts(args.type, args.body, args.scope)
+    if conflicts and not getattr(args, "force", False):
+        print("WARNING: potential conflict with active memory of same type/scope:", file=sys.stderr)
+        for c in conflicts:
+            print(f"  {c}", file=sys.stderr)
+        print("Consider `supersede` instead. Use --force to create anyway.", file=sys.stderr)
+        return
     status = "tentative" if args.type == "hypothesis" and args.status == "active" else args.status
     folder = RAG / TYPE_DIR[args.type]
     folder.mkdir(parents=True, exist_ok=True)
@@ -1105,6 +1151,46 @@ def remember(args) -> None:
     print(path.relative_to(ROOT))
 
 
+def remember_batch(args) -> int:
+    """H4: Batch-create memories from a JSON file.
+    JSON format: [{"type":"decision","title":"...","body":"...","tags":"a,b",...}, ...]"""
+    src = Path(args.file).expanduser().resolve()
+    if not src.is_file():
+        print(f"Batch file not found: {src}", file=sys.stderr)
+        return 1
+    try:
+        items = json.loads(src.read_text(encoding="utf-8"))
+    except Exception as e:
+        print(f"Invalid JSON: {e}", file=sys.stderr)
+        return 1
+    if not isinstance(items, list):
+        print("Expected a JSON array of memory objects.", file=sys.stderr)
+        return 1
+    created = 0
+    skipped = 0
+    for item in items:
+        if not isinstance(item, dict) or not item.get("type") or not item.get("title") or not item.get("body"):
+            print(f"SKIP: invalid entry (needs type, title, body): {item.get('title', '?')}", file=sys.stderr)
+            skipped += 1
+            continue
+        class _BatchArgs:
+            type = item.get("type", "knowledge")
+            status = item.get("status", "active")
+            title = item.get("title", "untitled")
+            scope = item.get("scope", "")
+            tags = item.get("tags", "")
+            evidence = item.get("evidence", "")
+            body = item.get("body", "")
+            consequence = item.get("consequence", "")
+            links = item.get("links", "")
+            force = True
+            allow_secret = False
+        remember(_BatchArgs())
+        created += 1
+    print(f"Batch complete: {created} created, {skipped} skipped.")
+    return 0
+
+
 def _find_duplicates(title: str, mtype: str, threshold: float = 0.7) -> List[str]:
     """Find existing memories with similar title (Jaccard on tokens)."""
     title_toks = set(tokenize(title))
@@ -1129,6 +1215,56 @@ def _find_duplicates(title: str, mtype: str, threshold: float = 0.7) -> List[str
         if jaccard >= threshold:
             dupes.append(f"{p.relative_to(ROOT)} (title: {existing_title}, similarity: {jaccard:.0%})")
     return dupes
+
+
+def _find_conflicts(mtype: str, body: str, scope: str) -> List[str]:
+    """H2: Detect potential conflicts with active memories of same type/scope.
+    Heuristic: same type + overlapping scope + significant body token overlap."""
+    if mtype not in ("decision", "knowledge", "constraint"):
+        return []
+    body_toks = set(tokenize(body))
+    if not body_toks:
+        return []
+    scope_set = set(x.strip() for x in (scope or "").split(",") if x.strip())
+    conflicts: List[str] = []
+    for p in memory_files():
+        fm = parse_fm(p.read_text(encoding="utf-8", errors="replace"))
+        if str(fm.get("type", "")).lower() != mtype.lower():
+            continue
+        if str(fm.get("status", "")).lower() != "active":
+            continue
+        # Check scope overlap
+        existing_scopes = fm.get("scope", [])
+        if isinstance(existing_scopes, str):
+            existing_scopes = [existing_scopes] if existing_scopes else []
+        if not isinstance(existing_scopes, list):
+            existing_scopes = []
+        existing_scope_set = set(str(s).strip() for s in existing_scopes if str(s).strip())
+        if scope_set and existing_scope_set and not (scope_set & existing_scope_set):
+            continue
+        # Check body token overlap
+        existing_body = ""
+        in_body = False
+        for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("## Knowledge"):
+                in_body = True
+                continue
+            if in_body and line.startswith("## "):
+                break
+            if in_body:
+                existing_body += line + "\n"
+        ext_body_toks = set(tokenize(existing_body))
+        if not ext_body_toks:
+            continue
+        overlap = len(body_toks & ext_body_toks) / len(body_toks | ext_body_toks)
+        if overlap >= 0.5:
+            title = ""
+            for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
+                if line.startswith("# "):
+                    title = line[2:].strip()
+                    break
+            conflicts.append(f"{p.relative_to(ROOT)} (title: {title}, body overlap: {overlap:.0%})")
+    return conflicts
 
 
 # ----------------------------- memory CRUD ----------------------------------
@@ -1238,6 +1374,28 @@ def forget(args) -> int:
     p.rename(target)
     rebuild_index()
     print(f"Archived: {p.relative_to(ROOT)} -> {target.relative_to(ROOT)}")
+    return 0
+
+
+def clean_cmd(args) -> int:
+    """H5: Permanently delete all files from archive/ (forgotten memories)."""
+    archive = RAG / "archive"
+    if not archive.exists():
+        print("No archive directory.")
+        return 0
+    targets = list(archive.glob("*.md"))
+    if not targets:
+        print("No archived memories to clean.")
+        return 0
+    if not args.force:
+        print(f"Found {len(targets)} archived memory file(s) to permanently delete:")
+        for p in targets:
+            print(f"  {p.relative_to(ROOT)}")
+        print("Run with --force to confirm permanent deletion.")
+        return 1
+    for p in targets:
+        p.unlink()
+    print(f"Permanently deleted {len(targets)} archived memory file(s).")
     return 0
 
 
@@ -1590,9 +1748,23 @@ def doctor(args) -> int:
     emb_status = "available" if emb is not None else "not available (BM25 fallback)"
     issues.append({"severity": "info", "issue": f"embeddings: {emb_status}"})
     if CONFIG_PATH.exists():
+        config_issues = _validate_config(load_config())
+        if config_issues:
+            for ci in config_issues:
+                issues.append({"severity": "warning", "issue": f"config: {ci}"})
         issues.append({"severity": "info", "issue": f"config: {CONFIG_PATH.relative_to(ROOT)}"})
     else:
         issues.append({"severity": "info", "issue": "config: defaults (no .irag.yml)"})
+    # H7: report never-accessed memories
+    never_accessed = 0
+    total_mem = 0
+    for p in memory_files():
+        total_mem += 1
+        fm = parse_fm(p.read_text(encoding="utf-8", errors="replace"))
+        if not fm.get("last_accessed"):
+            never_accessed += 1
+    if total_mem > 0 and never_accessed > 0:
+        issues.append({"severity": "info", "issue": f"memories never accessed: {never_accessed}/{total_mem} (candidates for archive)"})
     if args.json:
         print(json.dumps({"issues": issues, "version": VERSION,
                           "python": py_ver, "root": str(ROOT)}, indent=2, ensure_ascii=False))
@@ -1708,6 +1880,48 @@ privacy:
 """
 
 
+def _validate_config(cfg: Dict[str, Any]) -> List[str]:
+    """H6: Validate config values, return list of issues."""
+    issues: List[str] = []
+    known_sections = {"retrieval", "tokens", "checkpoints", "privacy"}
+    for key in cfg:
+        if key not in known_sections:
+            issues.append(f"unknown section: {key}")
+    r = cfg.get("retrieval", {})
+    if not isinstance(r, dict):
+        issues.append("retrieval: must be a mapping")
+    else:
+        if "limit" in r and not isinstance(r["limit"], int):
+            issues.append("retrieval.limit: must be integer")
+        if "mmr_lambda" in r:
+            v = r["mmr_lambda"]
+            if not isinstance(v, (int, float)) or v < 0 or v > 1:
+                issues.append("retrieval.mmr_lambda: must be 0.0-1.0")
+        if "min_score" in r:
+            v = r["min_score"]
+            if not isinstance(v, (int, float)) or v < 0:
+                issues.append("retrieval.min_score: must be >= 0")
+        if "embeddings" in r and str(r["embeddings"]).lower() not in ("auto", "on", "off"):
+            issues.append("retrieval.embeddings: must be auto|on|off")
+    t = cfg.get("tokens", {})
+    if not isinstance(t, dict):
+        issues.append("tokens: must be a mapping")
+    else:
+        if "context_budget" in t and not isinstance(t["context_budget"], int):
+            issues.append("tokens.context_budget: must be integer")
+    c = cfg.get("checkpoints", {})
+    if not isinstance(c, dict):
+        issues.append("checkpoints: must be a mapping")
+    else:
+        if "max_task_stack" in c and not isinstance(c["max_task_stack"], int):
+            issues.append("checkpoints.max_task_stack: must be integer")
+        if "max_age_minutes" in c:
+            v = c["max_age_minutes"]
+            if not isinstance(v, (int, float)) or v < 0:
+                issues.append("checkpoints.max_age_minutes: must be >= 0")
+    return issues
+
+
 def config_cmd(args) -> int:
     if getattr(args, "init", False):
         if CONFIG_PATH.exists():
@@ -1717,6 +1931,14 @@ def config_cmd(args) -> int:
         print(f"Wrote {CONFIG_PATH.relative_to(ROOT)}")
         return 0
     cfg = load_config()
+    if getattr(args, "validate", False):
+        issues = _validate_config(cfg)
+        if not issues:
+            print("Config valid.")
+            return 0
+        for issue in issues:
+            print(f"  {issue}", file=sys.stderr)
+        return 1
     if args.json:
         print(json.dumps(cfg, indent=2))
         return 0
@@ -1952,8 +2174,14 @@ def main() -> None:
     p.add_argument("--body", required=True)
     p.add_argument("--consequence", default="")
     p.add_argument("--links", default="")
-    p.add_argument("--force", action="store_true", help="Create even if a similar memory exists.")
+    p.add_argument("--force", action="store_true", help="Create even if a similar/conflicting memory exists.")
     p.add_argument("--allow-secret", action="store_true", help="Bypass secret-pattern scan (use with caution).")
+
+    p = sub.add_parser("remember-batch")
+    p.add_argument("file", help="JSON file: array of {type, title, body, ...}")
+
+    p = sub.add_parser("clean")
+    p.add_argument("--force", action="store_true", help="Confirm permanent deletion.")
 
     p = sub.add_parser("show")
     p.add_argument("ref")
@@ -2017,6 +2245,7 @@ def main() -> None:
     p = sub.add_parser("config")
     p.add_argument("--json", action="store_true")
     p.add_argument("--init", action="store_true")
+    p.add_argument("--validate", action="store_true", help="Validate config values.")
 
     a = ap.parse_args()
 
@@ -2054,6 +2283,10 @@ def main() -> None:
                 for i, (s, p, fm, sn) in enumerate(r, 1)))
     elif a.cmd == "remember":
         remember(a)
+    elif a.cmd == "remember-batch":
+        raise SystemExit(remember_batch(a))
+    elif a.cmd == "clean":
+        raise SystemExit(clean_cmd(a))
     elif a.cmd == "show":
         raise SystemExit(show_memory(a))
     elif a.cmd == "update":

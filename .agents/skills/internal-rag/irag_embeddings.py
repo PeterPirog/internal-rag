@@ -98,6 +98,25 @@ def embeddings_search(query: str,
             "decision": 0.8, "knowledge": 0.6, "constraint": 0.5,
             "gotcha": 0.4, "failure": 0.3, "hypothesis": 0.2, "session": 0.1,
         }
+
+        def _recency_boost(fm):
+            import datetime as _dt
+            date_str = str(fm.get("updated") or fm.get("created") or "")
+            if not date_str:
+                return 0.0
+            try:
+                mem_date = _dt.date.fromisoformat(date_str[:10])
+            except Exception:
+                return 0.0
+            age_days = (_dt.date.today() - mem_date).days
+            if age_days < 0:
+                age_days = 0
+            if age_days <= 7:
+                return 0.03
+            if age_days <= 30:
+                return 0.01
+            return 0.0
+
         scored: List[Tuple[float, int]] = []
         for i, sim in enumerate(sims):
             fm = candidates[i][2]
@@ -113,6 +132,7 @@ def embeddings_search(query: str,
                 score -= 10.0
             mtype = str(fm.get("type", "")).lower()
             score += TYPE_PRIORITY.get(mtype, 0.0)
+            score += _recency_boost(fm)
             if score > 0:
                 scored.append((score, i))
         scored.sort(key=lambda x: -x[0])

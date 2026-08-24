@@ -29,7 +29,13 @@ Verify no project-code changes are missing from the last checkpoint. Exit code 0
 Search durable memories (BM25+MMR, optional embeddings). `--json` returns `path`, `score`, `type`, `status`, `snippet`, `matched_tokens`. `--type` filters by memory type(s). `--status` filters by status(es). Query is auto-expanded with synonyms.
 
 ### `remember --type T --title "..." --body "..." [--status S] [--scope SC] [--tags T1,T2] [--evidence E] [--consequence C] [--links L1,L2] [--force] [--allow-secret]`
-Create a durable memory. Types: `decision`, `knowledge`, `constraint`, `gotcha`, `failure`, `hypothesis`, `session`. `--links` is stored in frontmatter. `--force` overrides duplicate detection. `--allow-secret` bypasses the secret-pattern scan (use with caution).
+Create a durable memory. Types: `decision`, `knowledge`, `constraint`, `gotcha`, `failure`, `hypothesis`, `session`. `--links` is stored in frontmatter. `--force` overrides duplicate and conflict detection. `--allow-secret` bypasses the secret-pattern scan (use with caution).
+
+### `remember-batch <file.json>`
+Create multiple memories from a JSON array. Each element needs `type`, `title`, `body` (optional: `status`, `scope`, `tags`, `evidence`, `consequence`, `links`). Duplicates are forced.
+
+### `clean [--force]`
+Permanently delete all files from `INTERNAL_RAG/archive/` (forgotten memories). `--force` confirms deletion.
 
 ### `show <ref> [--section NAME] [--json]`
 Read a memory by path, basename, or id. `--section` extracts one section (e.g. `Knowledge`, `Consequence`, `Links`).
@@ -80,13 +86,13 @@ Drop a specific task by 1-based index. Without `<id>`, clears the whole stack.
 Archive the current WORKING_STATE to `sessions/.snapshots/` and trim long lists (preserves section structure).
 
 ### `doctor [--json]`
-Health check: git, dirs, checkpoint freshness, python version, embeddings, config.
+Health check: git, dirs, checkpoint freshness, python version, embeddings, config validation, never-accessed memories.
 
 ### `embeddings-info [--json]`
 Show the retrieval engine status (configured, available, engine, plugin path).
 
-### `config [--json] [--init]`
-Show the effective configuration. `--init` writes a `.irag.yml` template.
+### `config [--json] [--init] [--validate]`
+Show the effective configuration. `--init` writes a `.irag.yml` template. `--validate` checks config values and reports issues.
 
 ### `export`
 Export all memories + WORKING_STATE to `INTERNAL_RAG/exports/irag-export-<timestamp>.json`.
