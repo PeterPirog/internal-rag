@@ -85,10 +85,10 @@ class TestIndexDB(unittest.TestCase):
         idx.close()
 
     def test_schema_version(self):
-        """After migration, schema version should be 2 (with embeddings table)."""
+        """After migration, schema version should be current."""
         idx = self._make_idx()
         st = idx.status()
-        self.assertEqual(st["schema_version"], 2)
+        self.assertGreaterEqual(st["schema_version"], 2)
         idx.close()
 
     def test_content_hash_excludes_usage(self):

@@ -26,7 +26,14 @@ import unicodedata
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+
+DEFAULT_CHUNKING = {
+    "enabled": True,
+    "threshold_chars": 2000,
+    "target_chars": 1200,
+    "overlap_chars": 120,
+}
 
 
 def _canonical_content(text: str, fm: Dict[str, Any]) -> str:
@@ -53,6 +60,11 @@ def content_hash(text: str, fm: Dict[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _chunk_content_hash(chunk_text: str) -> str:
+    """SHA-256 of a single chunk's text (for embedding cache invalidation)."""
+    return hashlib.sha256(chunk_text.encode("utf-8")).hexdigest()
+
+
 def _slugify(text: str) -> str:
     text = unicodedata.normalize("NFKD", text)
     text = "".join(c for c in text if not unicodedata.combining(c))
@@ -73,6 +85,129 @@ def _tags_to_text(fm: Dict[str, Any]) -> str:
     if isinstance(tags, list):
         return " ".join(str(t) for t in tags)
     return ""
+
+
+def _build_chunk_prefix(fm: Dict[str, Any], title: str) -> str:
+    """Build a lightweight prefix for each chunk: title, type, tags, scope."""
+    parts = []
+    if title:
+        parts.append(title)
+    mtype = str(fm.get("type", ""))
+    if mtype:
+        parts.append(f"type: {mtype}")
+    tags_text = _tags_to_text(fm)
+    if tags_text:
+        parts.append(f"tags: {tags_text}")
+    scope = fm.get("scope", [])
+    if isinstance(scope, list) and scope:
+        parts.append(f"scope: {' '.join(str(s) for s in scope)}")
+    elif isinstance(scope, str) and scope:
+        parts.append(f"scope: {scope}")
+    return "\n".join(parts) + "\n\n" if parts else ""
+
+
+def _split_sections(body: str) -> List[Tuple[str, str]]:
+    """Split Markdown body into sections by headings.
+    Returns [(section_name, section_text), ...]."""
+    sections: List[Tuple[str, str]] = []
+    current_heading = ""
+    current_lines: List[str] = []
+    for line in body.splitlines():
+        if line.startswith("## ") or line.startswith("### "):
+            if current_lines:
+                sections.append((current_heading, "\n".join(current_lines).strip()))
+            current_heading = line.lstrip("# ").strip()
+            current_lines = [line]
+        else:
+            current_lines.append(line)
+    if current_lines:
+        sections.append((current_heading, "\n".join(current_lines).strip()))
+    return sections
+
+
+def _split_long_section(text: str, target_chars: int, overlap_chars: int) -> List[str]:
+    """Split a long section into overlapping pieces."""
+    if len(text) <= target_chars:
+        return [text]
+    pieces: List[str] = []
+    start = 0
+    while start < len(text):
+        end = start + target_chars
+        if end >= len(text):
+            pieces.append(text[start:])
+            break
+        # Try to break at a sentence or word boundary
+        boundary = text.rfind(". ", start, end)
+        if boundary < start + target_chars // 2:
+            boundary = text.rfind(" ", start, end)
+        if boundary < start + target_chars // 2:
+            boundary = end
+        pieces.append(text[start:boundary].strip())
+        start = boundary - overlap_chars
+        if start < 0:
+            start = 0
+        if start >= len(text):
+            break
+    return pieces
+
+
+def chunk_memory(mem_id: str, text: str, fm: Dict[str, Any],
+                 chunking_cfg: Optional[Dict[str, Any]] = None
+                 ) -> List[Tuple[str, str, str, str]]:
+    """Section-aware chunking of a memory document.
+
+    Returns list of (chunk_id, section_slug, chunk_text, chunk_content_hash).
+    - Short memories (< threshold_chars) get exactly 1 chunk.
+    - Long memories are split by Markdown headings.
+    - Each chunk gets a lightweight prefix (title, type, tags, scope).
+    - Overlong sections are further split with overlap.
+
+    chunk_id format: <memory_id>:<section-slug>:<ordinal>
+    """
+    cfg = chunking_cfg or DEFAULT_CHUNKING
+    threshold = int(cfg.get("threshold_chars", 2000))
+    target = int(cfg.get("target_chars", 1200))
+    overlap = int(cfg.get("overlap_chars", 120))
+
+    title = _extract_title(text)
+    prefix = _build_chunk_prefix(fm, title)
+
+    # Extract body (after frontmatter)
+    body_start = text.find("\n---", 4)
+    body = text[body_start + 4:].strip() if body_start >= 0 else text
+
+    # Full text with prefix for length check
+    full_text = prefix + body
+
+    # Short memory: single chunk
+    if len(full_text) <= threshold:
+        chunk_id = f"{mem_id}:full:0"
+        chash = _chunk_content_hash(full_text)
+        return [(chunk_id, "full", full_text, chash)]
+
+    # Long memory: section-aware chunking
+    sections = _split_sections(body)
+    chunks: List[Tuple[str, str, str, str]] = []
+    for section_name, section_text in sections:
+        if not section_text.strip():
+            continue
+        full_section = prefix + section_text
+        # Split if section itself is too long
+        if len(full_section) > target:
+            pieces = _split_long_section(full_section, target, overlap)
+        else:
+            pieces = [full_section]
+        section_slug = _slugify(section_name) if section_name else "body"
+        for ordinal, piece in enumerate(pieces):
+            chunk_id = f"{mem_id}:{section_slug}:{ordinal}"
+            chash = _chunk_content_hash(piece)
+            chunks.append((chunk_id, section_slug, piece, chash))
+    if not chunks:
+        # Fallback: single chunk
+        chunk_id = f"{mem_id}:full:0"
+        chash = _chunk_content_hash(full_text)
+        chunks.append((chunk_id, "full", full_text, chash))
+    return chunks
 
 
 def _normalize_path(p: Path, root: Path) -> str:
@@ -151,6 +286,9 @@ class IndexDB:
         # v1 -> v2
         if current < 2:
             self._migrate_v1_to_v2()
+        # v2 -> v3
+        if current < 3:
+            self._migrate_v2_to_v3()
         self._set_user_version(SCHEMA_VERSION)
 
     def _migrate_v0_to_v1(self) -> None:
@@ -232,6 +370,25 @@ class IndexDB:
             """)
             c.execute("CREATE INDEX IF NOT EXISTS idx_embeddings_chunk ON embeddings(chunk_id)")
             c.execute("CREATE INDEX IF NOT EXISTS idx_embeddings_model ON embeddings(model_id)")
+            c.execute("COMMIT")
+        except Exception:
+            c.execute("ROLLBACK")
+            raise
+
+    def _migrate_v2_to_v3(self) -> None:
+        """Update chunks table for section-aware chunking.
+        Add section_slug column and update chunk_id format."""
+        c = self.conn
+        c.execute("BEGIN")
+        try:
+            # Check if section column already exists
+            cols = [r[1] for r in c.execute("PRAGMA table_info(chunks)").fetchall()]
+            if "section_slug" not in cols:
+                c.execute("ALTER TABLE chunks ADD COLUMN section_slug TEXT DEFAULT ''")
+            # Clear old chunks — they will be rebuilt with new chunking
+            c.execute("DELETE FROM chunks")
+            # Clear old embeddings for old-style chunk IDs
+            c.execute("DELETE FROM embeddings WHERE chunk_id LIKE '%-c0'")
             c.execute("COMMIT")
         except Exception:
             c.execute("ROLLBACK")
@@ -452,7 +609,8 @@ class IndexDB:
 
     # ----------------------- CRUD -----------------------
 
-    def rebuild(self, candidates: List[Tuple[Path, str, Dict[str, Any]]]) -> Dict[str, int]:
+    def rebuild(self, candidates: List[Tuple[Path, str, Dict[str, Any]]],
+                chunking_cfg: Optional[Dict[str, Any]] = None) -> Dict[str, int]:
         """Full rebuild: drop and recreate all data from Markdown files."""
         c = self.conn
         c.execute("BEGIN")
@@ -464,7 +622,7 @@ class IndexDB:
                 c.execute("DELETE FROM fts_memories")
             added = 0
             for p, text, fm in candidates:
-                self._upsert_document(p, text, fm, in_txn=True)
+                self._upsert_document(p, text, fm, in_txn=True, chunking_cfg=chunking_cfg)
                 added += 1
             c.execute("COMMIT")
         except Exception:
@@ -472,7 +630,8 @@ class IndexDB:
             raise
         return {"indexed": added, "fts5": self.fts5_available()}
 
-    def sync_incremental(self, candidates: List[Tuple[Path, str, Dict[str, Any]]]) -> Dict[str, int]:
+    def sync_incremental(self, candidates: List[Tuple[Path, str, Dict[str, Any]]],
+                         chunking_cfg: Optional[Dict[str, Any]] = None) -> Dict[str, int]:
         """Incremental sync: add new, update changed, remove deleted."""
         c = self.conn
         added = 0
@@ -490,7 +649,7 @@ class IndexDB:
             if row is None:
                 c.execute("BEGIN")
                 try:
-                    self._upsert_document(p, text, fm, in_txn=True)
+                    self._upsert_document(p, text, fm, in_txn=True, chunking_cfg=chunking_cfg)
                     c.execute("COMMIT")
                     added += 1
                 except Exception:
@@ -499,7 +658,7 @@ class IndexDB:
             elif row["content_hash"] != new_hash:
                 c.execute("BEGIN")
                 try:
-                    self._upsert_document(p, text, fm, in_txn=True)
+                    self._upsert_document(p, text, fm, in_txn=True, chunking_cfg=chunking_cfg)
                     c.execute("COMMIT")
                     updated += 1
                 except Exception:
@@ -521,7 +680,8 @@ class IndexDB:
                 "fts5": self.fts5_available()}
 
     def _upsert_document(self, p: Path, text: str, fm: Dict[str, Any],
-                         in_txn: bool = False) -> None:
+                         in_txn: bool = False,
+                         chunking_cfg: Optional[Dict[str, Any]] = None) -> None:
         c = self.conn
         rel = _normalize_path(p, self.root)
         mem_id = str(fm.get("id", ""))
@@ -546,12 +706,13 @@ class IndexDB:
             VALUES (?,?,?,?,?,?,?,?,?,?,?)
         """, (mem_id, rel, chash, mtype, status, created, updated_val, verified,
               title, tags_text, body))
-        # Insert chunk (single chunk for now)
-        chunk_id = f"{mem_id}-c0"
-        c.execute("""
-            INSERT INTO chunks (chunk_id, memory_id, ordinal, section, content_hash, text)
-            VALUES (?,?,0,'full',?,?)
-        """, (chunk_id, mem_id, chash, body))
+        # Section-aware chunking
+        chunks = chunk_memory(mem_id, text, fm, chunking_cfg)
+        for ordinal, (chunk_id, section_slug, chunk_text, chunk_chash) in enumerate(chunks):
+            c.execute("""
+                INSERT INTO chunks (chunk_id, memory_id, ordinal, section, section_slug, content_hash, text)
+                VALUES (?,?,?,?,?,?,?)
+            """, (chunk_id, mem_id, ordinal, section_slug, section_slug, chunk_chash, chunk_text))
         # Insert usage if not exists
         c.execute("INSERT OR IGNORE INTO usage (memory_id, last_accessed, access_count) VALUES (?,?,0)",
                   (mem_id, str(fm.get("last_accessed", ""))))
@@ -562,9 +723,10 @@ class IndexDB:
 
     def _delete_document(self, mem_id: str, in_txn: bool = False) -> None:
         c = self.conn
+        # Delete embeddings for all chunks of this memory
+        c.execute("DELETE FROM embeddings WHERE chunk_id LIKE ?", (mem_id + ":%",))
         c.execute("DELETE FROM chunks WHERE memory_id=?", (mem_id,))
         c.execute("DELETE FROM usage WHERE memory_id=?", (mem_id,))
-        c.execute("DELETE FROM embeddings WHERE chunk_id LIKE ?", (mem_id + "-c%",))
         c.execute("DELETE FROM documents WHERE memory_id=?", (mem_id,))
         if self.fts5_available():
             c.execute("DELETE FROM fts_memories WHERE memory_id=?", (mem_id,))
