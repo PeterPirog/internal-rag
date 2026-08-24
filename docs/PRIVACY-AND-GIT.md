@@ -9,7 +9,7 @@
 v1.0 uses `.git/info/exclude` by default instead of the project's `.gitignore`. This is local to a single clone and is not committed.
 
 `local` mode excludes:
-- `INTERNAL_RAG/`,
+- `INTERNAL_RAG/` (including `.index.sqlite3` SQLite cache),
 - the INTERNAL_RAG skill,
 - OpenCode tools/commands/plugin for INTERNAL_RAG,
 - `.irag.yml`,

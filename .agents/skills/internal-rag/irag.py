@@ -25,7 +25,7 @@ import unicodedata
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 ALLOWED_TYPES = {"decision", "knowledge", "constraint", "gotcha", "failure", "hypothesis", "session"}
 ALLOWED_STATUS = {"active", "tentative", "superseded", "invalid", "archived"}
@@ -1239,30 +1239,65 @@ def _search_with_cfg(query: str, limit: int, cfg: Dict[str, Any],
     if not cands:
         return []
 
-    # 1. Sparse BM25 — always
+    # 1. Sparse retrieval — try FTS5 first, fall back to Python BM25
     q_tokens = tokenize(query)
     if not q_tokens:
         q_tokens = re.findall(r"[A-Za-z0-9_./:@+-]{2,}", query.lower())
-    docs_tok: List[List[str]] = []
-    for p, text, fm in cands:
-        header = "\n".join(text.splitlines()[:40])
-        body = "\n".join(text.splitlines())
-        rel = str(p.relative_to(ROOT))
-        combined = f"{rel}\n{header}\n{body}"
-        docs_tok.append(tokenize(combined))
-    N = len(docs_tok)
-    avgdl = sum(len(d) for d in docs_tok) / N if N else 0
-    df: Dict[str, int] = {}
-    for d in docs_tok:
-        for t in set(d):
-            df[t] = df.get(t, 0) + 1
-    k1 = float(r_cfg.get("bm25_k1", 1.5))
-    b = float(r_cfg.get("bm25_b", 0.75))
+    # Try SQLite FTS5 for sparse channel
+    fts5_used = False
     sparse_scored: List[Tuple[float, int, List[str]]] = []
-    for i, d in enumerate(docs_tok):
-        score, matched = bm25_doc_score(q_tokens, d, df, N, avgdl, k1, b)
-        if score > 0:
-            sparse_scored.append((score, i, matched))
+    idx = _open_sqlite_index()
+    if idx is not None and idx.fts5_available():
+        # Map memory_ids to candidate indices
+        mem_id_to_cand_idx: Dict[str, int] = {}
+        for i, (p, text, fm) in enumerate(cands):
+            mid = str(fm.get("id", ""))
+            if mid:
+                mem_id_to_cand_idx[mid] = i
+        # Apply filters for FTS5 query
+        fts_types = [t.lower() for t in types] if types else None
+        fts_statuses = [s.lower() for s in statuses] if statuses else None
+        fts_results = idx.fts5_search(query, cand_limit, types=fts_types, statuses=fts_statuses)
+        if fts_results is not None and len(fts_results) > 0:
+            for fts_score, mem_id, path in fts_results:
+                ci = mem_id_to_cand_idx.get(mem_id)
+                if ci is not None:
+                    matched = [t for t in q_tokens if t in " ".join(docs_tok_placeholder(cands[ci][1]))]
+                    sparse_scored.append((fts_score, ci, matched))
+            fts5_used = True
+    if idx is not None:
+        idx.close()
+    # Fallback to Python BM25 if FTS5 not available or returned nothing
+    if not fts5_used or not sparse_scored:
+        docs_tok: List[List[str]] = []
+        for p, text, fm in cands:
+            header = "\n".join(text.splitlines()[:40])
+            body = "\n".join(text.splitlines())
+            rel = str(p.relative_to(ROOT))
+            combined = f"{rel}\n{header}\n{body}"
+            docs_tok.append(tokenize(combined))
+        N = len(docs_tok)
+        avgdl = sum(len(d) for d in docs_tok) / N if N else 0
+        df: Dict[str, int] = {}
+        for d in docs_tok:
+            for t in set(d):
+                df[t] = df.get(t, 0) + 1
+        k1 = float(r_cfg.get("bm25_k1", 1.5))
+        b = float(r_cfg.get("bm25_b", 0.75))
+        sparse_scored = []
+        for i, d in enumerate(docs_tok):
+            score, matched = bm25_doc_score(q_tokens, d, df, N, avgdl, k1, b)
+            if score > 0:
+                sparse_scored.append((score, i, matched))
+    else:
+        # Build docs_tok for MMR fallback
+        docs_tok = []
+        for p, text, fm in cands:
+            header = "\n".join(text.splitlines()[:40])
+            body = "\n".join(text.splitlines())
+            rel = str(p.relative_to(ROOT))
+            combined = f"{rel}\n{header}\n{body}"
+            docs_tok.append(tokenize(combined))
     sparse_scored.sort(key=lambda x: -x[0])
     sparse_scored = sparse_scored[:cand_limit]
 
@@ -1822,6 +1857,82 @@ def rebuild_index() -> None:
     print(f"Indexed {len(entries)} memories.")
 
 
+def _open_sqlite_index() -> Optional[Any]:
+    """Open the SQLite FTS5 index. Returns IndexDB or None."""
+    try:
+        import importlib.util as _ilu
+        spec = _ilu.spec_from_file_location(
+            "irag_index", str(ROOT / ".agents" / "skills" / "internal-rag" / "irag_index.py"))
+        if spec is None or spec.loader is None:
+            return None
+        mod = _ilu.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.open_index(ROOT)
+    except Exception:
+        return None
+
+
+def docs_tok_placeholder(text: str) -> List[str]:
+    """Quick tokenize for matched-token extraction in FTS5 path."""
+    return tokenize(text)
+
+
+def index_cmd(args) -> int:
+    """Handle `irag.py index` with subcommands: --rebuild, --status, --vacuum."""
+    if getattr(args, "rebuild", False):
+        # Rebuild INDEX.md
+        rebuild_index()
+        # Rebuild SQLite index
+        idx = _open_sqlite_index()
+        if idx is None:
+            print("SQLite index: unavailable (open failed)")
+            return 1
+        cands = [(p, p.read_text(encoding="utf-8", errors="replace"),
+                  parse_fm(p.read_text(encoding="utf-8", errors="replace")))
+                 for p in memory_files()]
+        result = idx.rebuild(cands)
+        idx.close()
+        fts = "yes" if result["fts5"] else "no"
+        print(f"SQLite index rebuilt: {result['indexed']} documents, FTS5={fts}")
+        return 0
+    if getattr(args, "status", False):
+        idx = _open_sqlite_index()
+        if idx is None:
+            print("SQLite index: unavailable")
+            return 1
+        st = idx.status()
+        # Stale check
+        cands = [(p, p.read_text(encoding="utf-8", errors="replace"),
+                  parse_fm(p.read_text(encoding="utf-8", errors="replace")))
+                 for p in memory_files()]
+        stale = idx.stale_check(cands)
+        idx.close()
+        if getattr(args, "json", False):
+            print(json.dumps({**st, **stale}, indent=2))
+            return 0
+        print(f"SQLite version: {st['sqlite_version']}")
+        print(f"Schema version: {st['schema_version']}")
+        print(f"FTS5 available: {'yes' if st['fts5_available'] else 'no'}")
+        print(f"Indexed memories: {st['indexed_memories']}")
+        print(f"Chunks: {st['chunks']}")
+        print(f"DB path: {st['db_path']}")
+        print(f"DB size: {st['db_size_bytes']} bytes")
+        print(f"Stale: {stale['stale']}, Missing: {stale['missing']}")
+        return 0
+    if getattr(args, "vacuum", False):
+        idx = _open_sqlite_index()
+        if idx is None:
+            print("SQLite index: unavailable")
+            return 1
+        idx.vacuum()
+        idx.close()
+        print("SQLite index vacuumed.")
+        return 0
+    # Default: rebuild INDEX.md only
+    rebuild_index()
+    return 0
+
+
 def validate() -> int:
     errors = 0
     warnings = 0
@@ -2057,6 +2168,29 @@ def doctor(args) -> int:
             never_accessed += 1
     if total_mem > 0 and never_accessed > 0:
         issues.append({"severity": "info", "issue": f"memories never accessed: {never_accessed}/{total_mem} (candidates for archive)"})
+    # SQLite index status
+    try:
+        import sqlite3 as _sqlite3
+        sqlite_ver = _sqlite3.sqlite_version
+        idx = _open_sqlite_index()
+        if idx is not None:
+            idx_st = idx.status()
+            fts5 = "yes" if idx_st["fts5_available"] else "no"
+            issues.append({"severity": "info", "issue": f"SQLite: v{sqlite_ver}, FTS5={fts5}, schema=v{idx_st['schema_version']}, indexed={idx_st['indexed_memories']}"})
+            # Stale check
+            cands = [(p, p.read_text(encoding="utf-8", errors="replace"),
+                      parse_fm(p.read_text(encoding="utf-8", errors="replace")))
+                     for p in memory_files()]
+            stale = idx.stale_check(cands)
+            if stale["stale"] > 0:
+                issues.append({"severity": "warning", "issue": f"SQLite index: {stale['stale']} stale document(s) — run 'index --rebuild'"})
+            if stale["missing"] > 0:
+                issues.append({"severity": "warning", "issue": f"SQLite index: {stale['missing']} missing document(s) — run 'index --rebuild'"})
+            idx.close()
+        else:
+            issues.append({"severity": "info", "issue": f"SQLite: v{sqlite_ver}, index not available"})
+    except Exception:
+        issues.append({"severity": "info", "issue": "SQLite: not available"})
     if args.json:
         print(json.dumps({"issues": issues, "version": VERSION,
                           "python": py_ver, "root": str(ROOT)}, indent=2, ensure_ascii=False))
@@ -2416,7 +2550,11 @@ def main() -> None:
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("init")
-    sub.add_parser("index")
+    p = sub.add_parser("index")
+    p.add_argument("--rebuild", action="store_true", help="Rebuild the SQLite index from Markdown.")
+    p.add_argument("--status", action="store_true", help="Show SQLite index status.")
+    p.add_argument("--vacuum", action="store_true", help="VACUUM the SQLite database.")
+    p.add_argument("--json", action="store_true")
     sub.add_parser("validate")
     sub.add_parser("guard")
     sub.add_parser("compact")
@@ -2605,7 +2743,7 @@ def main() -> None:
     elif a.cmd == "history":
         raise SystemExit(history_cmd(a))
     elif a.cmd == "index":
-        rebuild_index()
+        raise SystemExit(index_cmd(a))
     elif a.cmd == "validate":
         raise SystemExit(validate())
     elif a.cmd == "tasks":

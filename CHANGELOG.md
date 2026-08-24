@@ -1,5 +1,45 @@
 # Changelog
 
+## 1.2.0 — 2026-08-24
+
+Optional SQLite FTS5 index for retrieval acceleration.
+
+### SQLite index (`irag_index.py`)
+- New module `irag_index.py` — optional, zero-dependency (uses `sqlite3` from stdlib).
+- Location: `INTERNAL_RAG/.index.sqlite3` (cache only — Markdown remains source of truth).
+- Schema v1: `documents`, `chunks`, `usage` tables (+ optional `fts5_memories` virtual table).
+- Migrations via `PRAGMA user_version`; newer schema produces clear error.
+- FTS5 detection: if runtime sqlite3 lacks FTS5, graceful fallback to Python BM25.
+- Content hash: SHA-256 of canonical content (excludes `last_accessed`/`access_count`).
+- Changed hash → reindex document; deleted Markdown → remove from index.
+
+### Index commands
+- `irag.py index --rebuild` — full rebuild from Markdown.
+- `irag.py index --status` — SQLite version, FTS5 available, schema, indexed count, stale/missing.
+- `irag.py index --vacuum` — VACUUM the database.
+- `irag.py index --status --json` — JSON output.
+
+### Doctor
+- Reports SQLite version, FTS5 availability, schema version, indexed memory count.
+- Reports stale/missing documents with warning severity.
+
+### Hybrid retrieval integration
+- Sparse channel tries FTS5 first; if unavailable or no results, falls back to Python BM25.
+- FTS5 uses `bm25()` with higher weights for title/tags/path than body.
+- Fallback is transparent — same search results format, no error.
+
+### Security
+- All index operations use transactions.
+- Index writes never modify Markdown files.
+- `.index.sqlite3` excluded from Git (`.gitignore` + `.git/info/exclude`).
+- `privacy_check.py` recognizes `.index.sqlite3` as managed local file.
+
+### Tests
+- `tests/test_sqlite_index.py` — 19 tests: rebuild, incremental add/update/delete, FTS5 search,
+  type/status filters, content hash, schema version, newer schema error, vacuum, access tracking,
+  delete+rebuild, search-does-not-mutate-markdown.
+- Total: 63 tests (44 retrieval + 19 SQLite index), all pass with zero dependencies.
+
 ## 1.1.0 — 2026-08-24
 
 Hybrid retrieval with Reciprocal Rank Fusion.

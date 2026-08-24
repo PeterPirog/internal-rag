@@ -19,11 +19,13 @@
 - `.agents/skills/internal-rag/irag.py` — CLI (core, zero-dep).
 - `.agents/skills/internal-rag/irag_embeddings.py` — optional embeddings plugin.
 - `.agents/skills/internal-rag/irag_hooks.py` — optional git hooks installer.
+- `.agents/skills/internal-rag/irag_index.py` — optional SQLite FTS5 index module.
 - `INTERNAL_RAG/WORKING_STATE.md` — current checkpoint.
 - `INTERNAL_RAG/INDEX.md` — durable memory index.
 - `INTERNAL_RAG/.checkpoint.json` — last checkpoint metadata (schema-versioned).
 - `INTERNAL_RAG/.tasks.json` — task stack (schema-versioned).
 - `INTERNAL_RAG/.fpcache.json` — fingerprint cache.
+- `INTERNAL_RAG/.index.sqlite3` — SQLite FTS5 index cache (rebuildable from Markdown).
 - `INTERNAL_RAG/exports/` — JSON exports.
 - `INTERNAL_RAG/decisions/`, `knowledge/`, `gotchas/`, `failures/`, `hypotheses/` — durable memory.
 - `INTERNAL_RAG/sessions/` — session summaries (user-created).

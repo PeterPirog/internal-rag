@@ -65,6 +65,13 @@ def main():
   need('pool' in sr.stdout.lower(),'sparse retrieval smoke: pool not found')
   need('asyncpg' in sr.stdout.lower(),'sparse retrieval smoke: asyncpg not found')
 
+  # SQLite index smoke test
+  run([sys.executable,str(cli3),'index','--rebuild'],r3,env=env)
+  ix=run([sys.executable,str(cli3),'index','--status'],r3,env=env)
+  need('SQLite' in ix.stdout or 'indexed' in ix.stdout.lower(),'sqlite index status')
+  sr2=run([sys.executable,str(cli3),'search','--query','asyncpg','--limit','3'],r3,env=env)
+  need('asyncpg' in sr2.stdout.lower(),'sqlite index: search after rebuild')
+
   print('\nSELF TEST PASS')
   print('- local-only install')
   print('- recovery + guard')
@@ -73,6 +80,7 @@ def main():
   print('- existing AGENTS preservation')
   print('- shared-tools mode')
   print('- sparse retrieval smoke')
+  print('- SQLite index smoke')
  finally:
   shutil.rmtree(tmp,ignore_errors=True)
 if __name__=='__main__': main()

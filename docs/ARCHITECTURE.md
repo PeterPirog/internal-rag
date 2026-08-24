@@ -29,6 +29,10 @@ Warp / OpenCode / Claude Code / Cursor
 
 ### Retrieval
 - **Hybrid pipeline**: BM25 sparse (always) + optional dense embeddings → Reciprocal Rank Fusion → MMR.
+- **SQLite FTS5 index** (optional, zero-dep): `INTERNAL_RAG/.index.sqlite3` caches documents for fast FTS5 search.
+  - If FTS5 available: uses SQLite `bm25()` with higher weights for title/tags/path.
+  - If FTS5 unavailable: graceful fallback to pure-Python BM25 (same results, no error).
+  - Markdown files remain the single source of truth; index is rebuildable cache.
 - BM25 with standard IDF `log(1 + (N - df + 0.5) / (df + 0.5))` (k1=1.5, b=0.75, configurable).
 - Dense: sentence-transformers (`irag_embeddings.py`), lazy-loaded, graceful fallback to sparse-only.
 - **RRF**: `fused(doc) = sparse_weight/(rrf_k + sparse_rank) + dense_weight/(rrf_k + dense_rank)`.
@@ -38,7 +42,7 @@ Warp / OpenCode / Claude Code / Cursor
 - `--type` and `--status` filters applied before retrieval.
 - `--embeddings on|off|auto` CLI override. `--explain` for per-channel scoring breakdown.
 - `context` output groups memories: Verified facts, Lessons & pitfalls, Unverified hypotheses.
-- Deterministic test suite: `tests/test_retrieval.py` (44 tests), `tests/retrieval_benchmark.py`.
+- Deterministic test suite: `tests/test_retrieval.py` (44 tests), `tests/test_sqlite_index.py` (19 tests), `tests/retrieval_benchmark.py`.
 
 ### Lifecycle
 - `context` compares the fingerprint with the last checkpoint → `RECOVERY REQUIRED` or fresh.

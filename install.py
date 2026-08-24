@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 AGENTS_START = "<!-- INTERNAL_RAG_START -->"
 AGENTS_END = "<!-- INTERNAL_RAG_END -->"
 EXCLUDE_START = "# >>> INTERNAL_RAG LOCAL-ONLY >>>"
@@ -125,6 +125,9 @@ LOCAL_EXCLUDES = [
     '/.opencode/commands/memory-guard.md',
     '/.opencode/commands/checkpoint.md',
     '/.irag.yml',
+    '/INTERNAL_RAG/.index.sqlite3',
+    '/INTERNAL_RAG/.index.sqlite3-wal',
+    '/INTERNAL_RAG/.index.sqlite3-shm',
 ]
 SHARED_TOOLS_EXCLUDES = ['/INTERNAL_RAG/']
 

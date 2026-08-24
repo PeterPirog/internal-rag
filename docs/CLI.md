@@ -64,8 +64,8 @@ List memories by created date (newest first).
 ### `history [--json]`
 List checkpoint history (reason, at, head, fingerprint prefix).
 
-### `index`
-Rebuild `INTERNAL_RAG/INDEX.md` from durable memories.
+### `index [--rebuild] [--status] [--vacuum] [--json]`
+Rebuild `INDEX.md` (default). `--rebuild` also rebuilds the SQLite FTS5 index from Markdown. `--status` shows SQLite version, FTS5 availability, schema version, indexed count, stale/missing. `--vacuum` reclaims space.
 
 ### `validate`
 Validate all memory frontmatter (required fields, allowed types/status) and check evidence paths still exist. Exit 1 on errors, 0 on success (warnings do not fail).
