@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+dist/
+build/
+*.zip
+*.log
+.DS_Store
+Thumbs.db
+
+INTERNAL_RAG/.checkpoint.json

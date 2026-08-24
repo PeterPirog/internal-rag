@@ -1,0 +1,3 @@
+import { tool } from "@opencode-ai/plugin"
+const py = process.platform === "win32" ? "python" : "python3"
+export default tool({description:"Search persistent INTERNAL_RAG memory.",args:{query:tool.schema.string(),limit:tool.schema.number().optional()},async execute(args,context){const s=`${context.worktree}/.agents/skills/internal-rag/irag.py`;const p=Bun.spawn([py,s,"search","--query",args.query,"--limit",String(args.limit??8)],{cwd:context.worktree,stdout:"pipe",stderr:"pipe"});const o=await new Response(p.stdout).text();const e=await new Response(p.stderr).text();const c=await p.exited;if(c!==0)throw new Error(e||`exit ${c}`);return o.trim()}})
