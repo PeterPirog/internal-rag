@@ -29,6 +29,18 @@ Warp / OpenCode / Claude Code / Cursor
 
 ### Retrieval
 - **Hybrid pipeline**: BM25 sparse (always) + optional dense embeddings → Reciprocal Rank Fusion → MMR.
+- **Section-aware chunking**: memories are split by Markdown headings into chunks.
+  - Short memories (<threshold_chars) get exactly 1 chunk.
+  - Long memories split by `##` headings; overlong sections further split with overlap.
+  - Chunk prefix: title, type, tags, scope (lightweight, for retrieval context).
+  - Chunk ID: `<memory_id>:<section-slug>:<ordinal>` (deterministic).
+  - Config: `retrieval.chunking.enabled/threshold_chars/target_chars/overlap_chars`.
+- **Chunk-level retrieval**: BM25/dense operate on chunks; results merged by `memory_id` after RRF.
+  - Parent score = best chunk score (max).
+  - Snippet from best-matching chunk.
+  - Final top-k deduplicated by parent memory (no memory appears twice).
+  - `--explain` returns `chunk_id`, `section`, `parent_memory_id`.
+- **MMR on parent memories** (not chunks): 5 chunks of one document cannot displace 5 different relevant memories.
 - **SQLite FTS5 index** (optional, zero-dep): `INTERNAL_RAG/.index.sqlite3` caches documents for fast FTS5 search.
   - If FTS5 available: uses SQLite `bm25()` with higher weights for title/tags/path.
   - If FTS5 unavailable: graceful fallback to pure-Python BM25 (same results, no error).
@@ -42,11 +54,12 @@ Warp / OpenCode / Claude Code / Cursor
 - **RRF**: `fused(doc) = sparse_weight/(rrf_k + sparse_rank) + dense_weight/(rrf_k + dense_rank)`.
 - MMR reranking after fusion — uses dense cosine similarity for diversity when available, token-Jaccard fallback.
 - Policy boosts (status, type priority, recency) applied after fusion.
+- **Temporal retrieval** (`search --at YYYY-MM-DD`): candidate filter keeps superseded memories whose validity window covered the target date; `_policy_boost` lifts them (+0.5) so history stays retrievable while `invalid`/`archived` remain excluded; a post-retrieval validity-window filter enforces `valid_from ≤ D ≤ valid_to`. Malformed dates are ignored, never an error.
 - Stopwords, light stemming, query expansion with synonyms.
 - `--type` and `--status` filters applied before retrieval.
 - `--embeddings on|off|auto` CLI override. `--explain` for per-channel scoring breakdown.
-- `context` output groups memories: Verified facts, Lessons & pitfalls, Unverified hypotheses.
-- Deterministic test suite: `tests/test_retrieval.py` (44 tests), `tests/test_sqlite_index.py` (19 tests), `tests/retrieval_benchmark.py`.
+- `context` output groups memories: Verified facts, Lessons & pitfalls, Unverified hypotheses; plus a read-only **HISTORY & CONFLICTS** section for superseded/invalid/archived results tied to the task.
+- Deterministic test suite: `tests/test_retrieval.py` (44 tests), `tests/test_sqlite_index.py` (19 tests), `tests/test_lifecycle.py` (10 tests), `tests/retrieval_benchmark.py`.
 
 ### Lifecycle
 - `context` compares the fingerprint with the last checkpoint → `RECOVERY REQUIRED` or fresh.
@@ -55,7 +68,11 @@ Warp / OpenCode / Claude Code / Cursor
 - `compact` archives and trims WORKING_STATE (preserves section structure).
 - `push`/`resume` task stack with state snapshot.
 - `remember`/`show`/`update`/`supersede`/`forget`/`link` — durable memory CRUD.
-- `export`/`import` — JSON transfer between projects.
+- **Schema-2 temporal fields** (optional, schema-1 compatible): `confidence` (high|medium|low), `valid_from`, `valid_to`, `supersedes[]`, `derived_from[]`. Written by `remember`/`update`/`supersede`; validated by `validate`; consumed by `search --at`, `timeline`, `_temporal_explain`.
+- **Supersession**: `supersede <ref> --by <new>` marks the old memory `superseded`, closes its validity window (`valid_to`), records `superseded_by`, and adds `supersedes: [old-id]` to the replacement. The old memory is **never deleted** — it remains readable, searchable via `--at`, and present in `timeline`.
+- `timeline` sorts by effective validity (`valid_from` else `created`), oldest first.
+- `consolidate --dry-run [--json]` — deterministic read-only audit (duplicates, superseded, archived, never-accessed old, old snapshots, conflicting active) with a `plan` for the agent. No deletion, no rewrite, no LLM summarization.
+- `export`/`import` — JSON transfer between projects (schema-1 bundles import without change).
 
 ### Integrations
 - OpenCode: tools (`memory-*`), plugin (auto-checkpoint + compact), commands (`/memory*`, `/checkpoint`).

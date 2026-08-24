@@ -62,13 +62,16 @@ def _search(query: str, limit: int = 10,
         filtered.append((p, text, fm))
     original_root = irag.ROOT
     original_rag = irag.RAG
+    original_open = irag._open_sqlite_index
     irag.ROOT = FIXTURES_DIR.parent
     irag.RAG = FIXTURES_DIR  # INTERNAL_RAG/ equivalent
+    irag._open_sqlite_index = lambda: None  # hermetic: no index artifact in fixtures
     try:
         results = irag._search_with_cfg(query, limit, cfg, types=types, statuses=statuses, explain=explain)
     finally:
         irag.ROOT = original_root
         irag.RAG = original_rag
+        irag._open_sqlite_index = original_open
     return results
 
 

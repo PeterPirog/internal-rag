@@ -17,7 +17,16 @@ retrieval:
   rrf_k: 60                  # RRF smoothing constant (higher = flatter)
   sparse_weight: 1.0         # RRF weight for BM25 channel
   dense_weight: 1.0          # RRF weight for dense channel
-  candidate_multiplier: 4    # over-fetch factor for candidate pool
+   candidate_multiplier: 4    # over-fetch factor for candidate pool
+   profile: english-fast      # english-fast | multilingual (v1.4.0, default: english-fast)
+   embeddings_model: null     # explicit model path/name overrides the profile (no prefix)
+   query_expansion: true      # English synonym expansion (compat layer; set false to disable)
+   pl_stopwords: true         # small PL function-word list on the sparse channel (benchmark-justified)
+   chunking:                  # section-aware chunking (v1.4.0)
+     enabled: true
+     threshold_chars: 2000    # memories shorter than this become a single chunk
+     target_chars: 1200       # target chunk size for overlong sections
+     overlap_chars: 120       # overlap between split pieces
 tokens:
   context_budget: 4000       # estimated token budget in context
   warn_ratio: 0.8            # warning threshold (in JSON output)
@@ -26,6 +35,8 @@ checkpoints:
   max_task_stack: 16            # max task stack depth
 privacy:
   scan_on_checkpoint: false     # (reserved) run privacy scan on checkpoint
+usage:
+  stale_days: 30               # doctor: "stale" = last_accessed older than this many days
 ```
 
 ## Where config is loaded from

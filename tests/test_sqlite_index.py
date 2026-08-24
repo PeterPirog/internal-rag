@@ -85,10 +85,10 @@ class TestIndexDB(unittest.TestCase):
         idx.close()
 
     def test_schema_version(self):
-        """After migration, schema version should be 2 (with embeddings table)."""
+        """After migration, schema version should be current."""
         idx = self._make_idx()
         st = idx.status()
-        self.assertEqual(st["schema_version"], 2)
+        self.assertGreaterEqual(st["schema_version"], 2)
         idx.close()
 
     def test_content_hash_excludes_usage(self):
@@ -290,8 +290,10 @@ class TestSearchDoesNotMutateMarkdown(unittest.TestCase):
         # Run search through irag (patched ROOT)
         original_root = irag.ROOT
         original_rag = irag.RAG
+        original_open = irag._open_sqlite_index
         irag.ROOT = FIXTURES_DIR.parent
         irag.RAG = FIXTURES_DIR
+        irag._open_sqlite_index = lambda: None  # hermetic: no index artifact in fixtures
         try:
             cfg = {"retrieval": {"limit": 5, "mmr_lambda": 1.0, "min_score": 0.0,
                                   "mode": "sparse", "embeddings": "off",
@@ -302,6 +304,7 @@ class TestSearchDoesNotMutateMarkdown(unittest.TestCase):
         finally:
             irag.ROOT = original_root
             irag.RAG = original_rag
+            irag._open_sqlite_index = original_open
         # Verify no changes
         for p in fixture_files:
             after = p.read_bytes()

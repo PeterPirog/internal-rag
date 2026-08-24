@@ -168,7 +168,8 @@ retrieval:
   mmr_lambda: 0.4
   min_score: 0.3
   embeddings: auto        # auto | on | off
-  embeddings_model: all-MiniLM-L6-v2
+  profile: english-fast   # english-fast (default) | multilingual (PL/EN projects)
+  embeddings_model: null  # explicit model overrides the profile
 tokens:
   context_budget: 5000
 checkpoints:
@@ -197,14 +198,20 @@ pip install -r requirements-optional.txt
 
 When the package is available and `.irag.yml` has `embeddings: auto` (default), retrieval uses embeddings with fallback to BM25. Override at runtime with `--embeddings on|off|auto`.
 
+Two retrieval profiles are supported (see `docs/EMBEDDINGS.md`):
+- `english-fast` (default, `all-MiniLM-L6-v2`) — unchanged for existing users.
+- `multilingual` (`intfloat/multilingual-e5-small`, `query:`/`passage:` prefixes) — the officially supported choice for Polish-English projects; not the default until your benchmark justifies it.
+
 ## Offline / air-gapped
 
 INTERNAL_RAG works fully offline (BM25 core, zero dependencies). For embeddings on air-gapped machines:
 
 ```bash
-# On a machine with internet:
-python pack.py --with-embeddings --model all-MiniLM-L6-v2
-# -> internal-rag-offline-1.0.2.zip
+# On a machine with internet (pick your profile):
+python pack.py --with-embeddings --profile english-fast
+# for a PL/EN project:
+python pack.py --with-embeddings --profile multilingual
+# -> internal-rag-offline-1.4.0.zip
 
 # On the air-gapped machine:
 unzip internal-rag-offline-*.zip -d internal-rag-offline

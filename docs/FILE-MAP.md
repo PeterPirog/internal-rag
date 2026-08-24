@@ -25,8 +25,9 @@
 - `INTERNAL_RAG/.checkpoint.json` — last checkpoint metadata (schema-versioned).
 - `INTERNAL_RAG/.tasks.json` — task stack (schema-versioned).
 - `INTERNAL_RAG/.fpcache.json` — fingerprint cache.
-- `INTERNAL_RAG/.index.sqlite3` — SQLite FTS5 index cache (rebuildable from Markdown).
+- `INTERNAL_RAG/.index.sqlite3` — SQLite FTS5 index + usage store cache (rebuildable from Markdown; usage preserved across rebuilds by default).
 - `INTERNAL_RAG/exports/` — JSON exports.
+- `INTERNAL_RAG/usage-backups/` — timestamped backups created by `migrate-usage --apply --strip`.
 - `INTERNAL_RAG/decisions/`, `knowledge/`, `gotchas/`, `failures/`, `hypotheses/` — durable memory.
 - `INTERNAL_RAG/sessions/` — session summaries (user-created).
 - `INTERNAL_RAG/sessions/.snapshots/` — auto WORKING_STATE snapshots (managed).

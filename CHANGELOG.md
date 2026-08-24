@@ -1,5 +1,65 @@
 # Changelog
 
+## 1.4.0 — 2026-08-24
+
+Section-aware chunking, read-only search, SimHash dedup, multilingual profiles, temporal metadata.
+
+### Section-aware chunking (task 5)
+- `chunk_memory()`: splits by Markdown headings, prefix with title/type/tags/scope.
+- Short memories (<threshold_chars) get exactly 1 chunk.
+- Chunk ID: `<memory_id>:<section-slug>:<ordinal>`.
+- Config: `retrieval.chunking.enabled/threshold_chars/target_chars/overlap_chars`.
+- Schema v3 migration.
+
+### Read-only search / migrate-usage (task 6)
+- `_mark_accessed_db()` uses SQLite usage table — search/context no longer mutate Markdown.
+- `migrate-usage --dry-run/--apply [--strip] [--json]` — migrate frontmatter last_accessed to DB.
+  - `--apply` imports the historical date (does not fake a fresh access).
+  - `--strip` backs up each stripped file to `INTERNAL_RAG/usage-backups/` before rewriting, and reports all changed files + backups.
+- doctor: never-accessed, stale (config `usage.stale_days`, default 30), top-accessed from SQLite usage table. Missing usage store is reported as info, never an error.
+- `index --rebuild` preserves usage rows by default; add `--reset-usage` to explicitly reset them.
+- Incremental sync/upsert preserves existing usage rows (no reset on content update).
+- `content_hash` excludes `last_accessed`/`access_count` — usage never invalidates embeddings.
+- `access_count` does not influence ranking (no popularity bias without benchmark).
+- Tests: search leaves mtime/hash of Markdown unchanged; usage count grows in DB; dry-run/apply/strip + backup; search works with DB unavailable; rebuild/sync preserve usage.
+
+### SimHash deduplication (task 7)
+- `_canonical_memory_text()`: title + Knowledge + Consequence + significant tags/scope; NFKD + casefold + whitespace-collapse normalization (PL diacritics & formatting differences do not break comparison); excludes created/updated/last_accessed/status.
+- Exact fingerprint: SHA-256 of normalized canonical text.
+- Near fingerprint: 64-bit SimHash over tokens (pure stdlib, no datasketch/MinHash); Hamming distance ≤ 3 = near duplicate.
+- `remember`/`remember-batch`: exact match => blocked by default; near => warning; title-Jaccard remains an additional signal; `--force` bypasses.
+- Conflict detection stays **separate** from duplicate detection (opposing decisions are conflicts, never duplicates).
+- Archived memories: not active duplicates (no block), shown informationally in `near`.
+- `remember --json` returns: `status`, `duplicate: {exact, near, title_similar, recommended_action: update|supersede|force|null}`, and a separate `conflict` list when applicable.
+- `import` remains idempotent: second import of the same bundle is skipped without `--overwrite`.
+- Algorithm + limitations documented in `docs/DEDUP.md`.
+- Tests: `tests/test_dedup.py` (identical text different title, near rephrase, opposing decision, Polish/whitespace normalization, force bypass, archived informational, JSON shape, import idempotency).
+
+### Multilingual PL/EN profile (task 8)
+- `retrieval.profile: english-fast | multilingual` (default: english-fast — kept for existing users).
+- english-fast: all-MiniLM-L6-v2, no query/passage prefix (per model card).
+- multilingual: intfloat/multilingual-e5-small with `query: `/`passage: ` prefixes (per E5 model card + Sentence Transformers).
+- In-memory embedding cache key includes model identity; persistent cache keyed by `(chunk_id, model_id, precision)` — profiles never share vectors.
+- `embeddings-info` reports the active profile and resolved model.
+- `retrieval.embeddings_model` (explicit) overrides the profile; explicit models are encoded without prefix.
+- Sparse channel: no external stemmer; code identifiers preserved verbatim (`refresh_token_cache`, `AuthService.refresh()`, `src/auth/session.py`); conservative PL stopword list gated behind `retrieval.pl_stopwords` (default `true`, benchmark-justified); `retrieval.query_expansion: false` disables the English synonym compatibility layer.
+- Benchmark (`tests/multilingual_benchmark.py`, 15 PL + 15 EN + 10 mixed queries, Recall@1/3/5 + MRR per group, report `tests/benchmark_multilingual.json`):
+  - hybrid multilingual > hybrid english-fast on the PL group (R@1 12.5%→18.75%, MRR 0.227→0.269), EN/MIXED not regressed → multilingual is the officially supported choice for PL/EN projects, **not** the default.
+  - dense hybrid adds little over sparse on the small fixture corpus and costs latency — re-run the benchmark on your corpus before enabling hybrid.
+  - PL stopwords: PL group R@1 62%→69%, MRR 0.690→0.721 → kept enabled by default.
+- `pack.py --with-embeddings --profile english-fast|multilingual` (or `--model` to pin an explicit model).
+
+### Temporal, safe knowledge lifecycle (task 9)
+- Optional schema-2 lifecycle frontmatter fields (all backward-compatible — schema-1 memories work unchanged): `confidence: high|medium|low`, `valid_from`, `valid_to`, `supersedes: []`, `derived_from: []`.
+- `remember`/`remember-batch`/`update` accept and write the lifecycle fields; `validate` rejects invalid `confidence` values and malformed dates (`valid_from`/`valid_to`/`created`).
+- `supersede <ref> --by <new>` (never deletes history): sets `status: superseded`, closes the validity window (`valid_to`, default today or `--valid-to`), records `superseded_by`, and adds `supersedes: [old-id]` to the replacement. `--force` records the `--by` reference even if the replacement does not exist yet.
+- `timeline` sorts by **effective validity** (`valid_from` else `created`), oldest first — not by filename or `created` alone.
+- `search --at YYYY-MM-DD` (temporal): keeps superseded memories whose window covered the date (history queries), excludes memories not yet valid; post-filter enforces `valid_from ≤ D ≤ valid_to`; malformed dates are ignored, no error. `_policy_boost` lifts date-valid superseded memories (+0.5) instead of penalizing them (-4.0).
+- `context` defaults to current active memory but adds a read-only **HISTORY & CONFLICTS** section (superseded/invalid/archived related to the task, with `superseded_by`, validity window, cross-link to the replacement when both are in the result set); `search --json` exposes the same as a `history` block per affected result.
+- `consolidate --dry-run [--json]` — deterministic, read-only report (never deletes, never rewrites, no LLM summarization): exact/near duplicates, superseded entries (with `superseded_by`/`valid_to`), archived entries, never-accessed old entries (`--never-accessed-days`, default 90), old session snapshots (`--snapshot-age-days`, default 30), and potentially conflicting active memories (same type + overlapping scope + ≥40% body-token overlap). `--json` also emits a `plan` array of recommended actions for an OpenCode agent to evaluate — `consolidate` itself never executes them.
+- `update` never removes history (frontmatter changes + dated `## Update` appends only).
+- Tests: `tests/test_lifecycle.py` (10 tests): A→B preserves A historically; `--at` before the change finds A / after prefers B; unknown dates do not raise; schema-1 import still works; `consolidate --dry-run` is deterministic and read-only (identical JSON across runs, zero file mutations); timeline sorts by effective validity; schema-2 fields round-trip through `remember`; `validate` rejects bad confidence/dates.
+
 ## 1.3.0 — 2026-08-24
 
 Persistent embedding cache in SQLite.
