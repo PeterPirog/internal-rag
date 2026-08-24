@@ -51,6 +51,12 @@ DEFAULT_CONFIG = {
         "candidate_multiplier": 4,
         "profile": "english-fast",
         "query_expansion": True,
+        "chunking": {
+            "enabled": True,
+            "threshold_chars": 2000,
+            "target_chars": 1200,
+            "overlap_chars": 120,
+        },
     },
     "tokens": {"context_budget": 4000, "warn_ratio": 0.8},
     "checkpoints": {"auto_archive_sessions": True, "max_task_stack": 16, "max_age_minutes": 0},
@@ -1230,6 +1236,146 @@ def search(query: str, limit: int = 8, types: Optional[List[str]] = None,
     return _search_with_cfg(query, limit, load_config(), types, statuses, explain=explain)
 
 
+def _load_chunks_for_candidates(
+    cands: List[Tuple[Path, str, Dict[str, Any]]],
+    chunking_cfg: Optional[Dict[str, Any]]
+) -> Tuple[List[Tuple[str, int, str, str, str]], Dict[str, int]]:
+    """Build chunk-level representations for all candidates.
+    Returns:
+      chunks: list of (chunk_id, cand_idx, section_slug, chunk_text, chunk_hash)
+      chunk_id_to_cand: {chunk_id: cand_idx}
+    """
+    # Try to load irag_index.py from the original installation path
+    chunk_fn = None
+    try:
+        import importlib.util as _ilu
+        # Try ROOT-relative path (normal operation)
+        idx_path = ROOT / ".agents" / "skills" / "internal-rag" / "irag_index.py"
+        if not idx_path.exists():
+            # Try relative to this file (test/fixture scenarios)
+            idx_path = Path(__file__).resolve().parent / "irag_index.py"
+        if idx_path.exists():
+            spec = _ilu.spec_from_file_location("irag_index_chunk", str(idx_path))
+            if spec and spec.loader:
+                mod = _ilu.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                chunk_fn = mod.chunk_memory
+    except Exception:
+        pass
+
+    chunks: List[Tuple[str, int, str, str, str]] = []
+    chunk_id_to_cand: Dict[str, int] = {}
+    for i, (p, text, fm) in enumerate(cands):
+        mem_id = str(fm.get("id", str(p)))
+        rel = str(p.relative_to(ROOT)).replace("\\", "/")
+        if chunk_fn is not None:
+            mem_chunks = chunk_fn(mem_id, text, fm, chunking_cfg)
+        else:
+            body_start = text.find("\n---", 4)
+            body = text[body_start + 4:].strip() if body_start >= 0 else text
+            chash = hashlib.sha256(body.encode("utf-8")).hexdigest()
+            mem_chunks = [(f"{mem_id}:full:0", "full", body, chash)]
+        for chunk_id, section_slug, chunk_text, chash in mem_chunks:
+            # Prepend file path + memory_id to chunk text for BM25 tokenization
+            # (identifiers in filenames and frontmatter ids are important for exact matching)
+            mem_id_line = f"id: {mem_id}"
+            chunk_text_with_meta = f"{rel}\n{mem_id_line}\n{chunk_text}"
+            chunks.append((chunk_id, i, section_slug, chunk_text_with_meta, chash))
+            chunk_id_to_cand[chunk_id] = i
+    return chunks, chunk_id_to_cand
+
+
+def _merge_chunks_by_memory(
+    chunk_results: List[Tuple[float, str, int, str, str, Dict[str, Any]]],
+    cands: List[Tuple[Path, str, Dict[str, Any]]],
+    retrieval_mode: str,
+    query: str,
+    limit: int,
+    cfg: Dict[str, Any],
+    docs_tok: List[List[str]],
+    explain: bool,
+) -> List[Tuple[float, Path, Dict[str, Any], str]]:
+    """Merge chunk-level results to parent-memory level.
+    - Group by memory_id (cand_idx)
+    - Parent score = best chunk score (max)
+    - Snippet from best chunk
+    - Dedup: each memory appears at most once in top-k
+    - MMR on parent memories
+
+    chunk_results: (fused_score, chunk_id, cand_idx, section_slug, chunk_text, explain_dict)
+    """
+    if not chunk_results:
+        return []
+    # Group by cand_idx, keeping best chunk
+    by_memory: Dict[int, Tuple[float, str, str, str, Dict[str, Any]]] = {}
+    for fused_score, chunk_id, cand_idx, section_slug, chunk_text, expl in chunk_results:
+        if cand_idx not in by_memory or fused_score > by_memory[cand_idx][0]:
+            by_memory[cand_idx] = (fused_score, chunk_id, section_slug, chunk_text, expl)
+
+    # Apply policy boost
+    r_cfg = cfg.get("retrieval", {})
+    min_score = float(r_cfg.get("min_score", 0.5))
+    boosted: List[Tuple[float, int, Dict[str, Any]]] = []
+    for cand_idx, (best_score, chunk_id, section_slug, chunk_text, expl) in by_memory.items():
+        fm = cands[cand_idx][2]
+        pb = _policy_boost(fm)
+        final_score = best_score + pb
+        if final_score >= min_score:
+            expl["policy_boost"] = round(pb, 4)
+            expl["final_score"] = round(final_score, 6)
+            expl["chunk_id"] = chunk_id
+            expl["section"] = section_slug
+            expl["parent_memory_id"] = str(fm.get("id", str(cands[cand_idx][0])))
+            boosted.append((final_score, cand_idx, expl))
+    boosted.sort(key=lambda x: -x[0])
+
+    # MMR on parent memories
+    lam = float(r_cfg.get("mmr_lambda", 0.5))
+    if len(boosted) <= limit:
+        selected = boosted
+    else:
+        selected: List[Tuple[float, int, Dict[str, Any]]] = [boosted[0]]
+        remaining = list(boosted[1:])
+        while remaining and len(selected) < limit:
+            best = None
+            best_val = -1e18
+            best_idx = 0
+            for idx_pos, (score, ci, expl) in enumerate(remaining):
+                max_sim = 0.0
+                cur_set = set(docs_tok[ci]) if ci < len(docs_tok) else set()
+                for sel in selected:
+                    sel_set = set(docs_tok[sel[1]]) if sel[1] < len(docs_tok) else set()
+                    inter = len(cur_set & sel_set)
+                    union = len(cur_set | sel_set) or 1
+                    sim = inter / union
+                    if sim > max_sim:
+                        max_sim = sim
+                mmr_val = lam * score - (1 - lam) * max_sim
+                if mmr_val > best_val:
+                    best_val = mmr_val
+                    best = (score, ci, expl)
+                    best_idx = idx_pos
+            if best is None:
+                break
+            selected.append(best)
+            remaining.pop(best_idx)
+
+    # Build output
+    out = []
+    for rank, (final_score, cand_idx, expl) in enumerate(selected):
+        p, text, fm = cands[cand_idx]
+        # Snippet from best chunk text
+        best_chunk_text = by_memory[cand_idx][3]
+        snip = " ".join(best_chunk_text.split())[:420]
+        expl["final_rank"] = rank
+        expl["retrieval_mode"] = retrieval_mode
+        expl["matched_tokens"] = _matched_for(fm, query)
+        out.append((final_score, p, fm, snip))
+        if explain:
+            fm["_explain"] = expl
+    return out
+
+
 def _search_with_cfg(query: str, limit: int, cfg: Dict[str, Any],
                      types: Optional[List[str]] = None,
                      statuses: Optional[List[str]] = None,
@@ -1242,7 +1388,8 @@ def _search_with_cfg(query: str, limit: int, cfg: Dict[str, Any],
     emb_setting = str(r_cfg.get("embeddings", "auto")).lower()
     cand_mult = int(r_cfg.get("candidate_multiplier", 4))
     cand_limit = limit * cand_mult
-    # Filter candidates
+    chunking_cfg = r_cfg.get("chunking", {})
+    # Filter candidates at memory level (type/status filters before retrieval)
     cands: List[Tuple[Path, str, Dict[str, Any]]] = []
     for p in memory_files():
         text = p.read_text(encoding="utf-8", errors="replace")
@@ -1261,88 +1408,71 @@ def _search_with_cfg(query: str, limit: int, cfg: Dict[str, Any],
     if not cands:
         return []
 
-    # 1. Sparse retrieval — try FTS5 first, fall back to Python BM25
+    # Build chunk-level representations
+    chunks, chunk_id_to_cand = _load_chunks_for_candidates(cands, chunking_cfg)
+    if not chunks:
+        return []
+
+    # Build docs_tok at memory level (for MMR fallback)
+    docs_tok: List[List[str]] = []
+    for p, text, fm in cands:
+        header = "\n".join(text.splitlines()[:40])
+        body = "\n".join(text.splitlines())
+        rel = str(p.relative_to(ROOT))
+        combined = f"{rel}\n{header}\n{body}"
+        docs_tok.append(tokenize(combined))
+
+    # 1. Sparse BM25 on chunks
     q_tokens = tokenize(query)
     if not q_tokens:
         q_tokens = re.findall(r"[A-Za-z0-9_./:@+-]{2,}", query.lower())
-    # Try SQLite FTS5 for sparse channel
-    fts5_used = False
-    sparse_scored: List[Tuple[float, int, List[str]]] = []
-    idx = _open_sqlite_index()
-    if idx is not None and idx.fts5_available():
-        # Map memory_ids to candidate indices
-        mem_id_to_cand_idx: Dict[str, int] = {}
-        for i, (p, text, fm) in enumerate(cands):
-            mid = str(fm.get("id", ""))
-            if mid:
-                mem_id_to_cand_idx[mid] = i
-        # Apply filters for FTS5 query
-        fts_types = [t.lower() for t in types] if types else None
-        fts_statuses = [s.lower() for s in statuses] if statuses else None
-        fts_results = idx.fts5_search(query, cand_limit, types=fts_types, statuses=fts_statuses)
-        if fts_results is not None and len(fts_results) > 0:
-            for fts_score, mem_id, path in fts_results:
-                ci = mem_id_to_cand_idx.get(mem_id)
-                if ci is not None:
-                    matched = [t for t in q_tokens if t in " ".join(docs_tok_placeholder(cands[ci][1]))]
-                    sparse_scored.append((fts_score, ci, matched))
-            fts5_used = True
-    if idx is not None:
-        idx.close()
-    # Fallback to Python BM25 if FTS5 not available or returned nothing
-    if not fts5_used or not sparse_scored:
-        docs_tok: List[List[str]] = []
-        for p, text, fm in cands:
-            header = "\n".join(text.splitlines()[:40])
-            body = "\n".join(text.splitlines())
-            rel = str(p.relative_to(ROOT))
-            combined = f"{rel}\n{header}\n{body}"
-            docs_tok.append(tokenize(combined))
-        N = len(docs_tok)
-        avgdl = sum(len(d) for d in docs_tok) / N if N else 0
-        df: Dict[str, int] = {}
-        for d in docs_tok:
-            for t in set(d):
-                df[t] = df.get(t, 0) + 1
-        k1 = float(r_cfg.get("bm25_k1", 1.5))
-        b = float(r_cfg.get("bm25_b", 0.75))
-        sparse_scored = []
-        for i, d in enumerate(docs_tok):
-            score, matched = bm25_doc_score(q_tokens, d, df, N, avgdl, k1, b)
-            if score > 0:
-                sparse_scored.append((score, i, matched))
-    else:
-        # Build docs_tok for MMR fallback
-        docs_tok = []
-        for p, text, fm in cands:
-            header = "\n".join(text.splitlines()[:40])
-            body = "\n".join(text.splitlines())
-            rel = str(p.relative_to(ROOT))
-            combined = f"{rel}\n{header}\n{body}"
-            docs_tok.append(tokenize(combined))
+    chunk_docs_tok: List[List[str]] = []
+    for chunk_id, cand_idx, section_slug, chunk_text, chash in chunks:
+        chunk_docs_tok.append(tokenize(chunk_text))
+    N = len(chunk_docs_tok)
+    avgdl = sum(len(d) for d in chunk_docs_tok) / N if N else 0
+    df: Dict[str, int] = {}
+    for d in chunk_docs_tok:
+        for t in set(d):
+            df[t] = df.get(t, 0) + 1
+    k1 = float(r_cfg.get("bm25_k1", 1.5))
+    b = float(r_cfg.get("bm25_b", 0.75))
+    sparse_scored: List[Tuple[float, int, List[str]]] = []  # (score, chunk_idx, matched)
+    for ci, d in enumerate(chunk_docs_tok):
+        score, matched = bm25_doc_score(q_tokens, d, df, N, avgdl, k1, b)
+        if score > 0:
+            sparse_scored.append((score, ci, matched))
     sparse_scored.sort(key=lambda x: -x[0])
     sparse_scored = sparse_scored[:cand_limit]
 
-    # 2. Dense retrieval — if mode != sparse and embeddings available
-    dense_ranked: Optional[List[Tuple[float, int]]] = None
+    # 2. Dense retrieval on chunks (if available)
+    dense_ranked: Optional[List[Tuple[float, int]]] = None  # (score, chunk_idx)
     retrieval_mode = "sparse"
     if mode != "sparse" and emb_setting not in ("off", "no", "false", "0"):
-        dense_ranked = _dense_search_raw(query, cands, cfg)
-        if dense_ranked is not None:
+        # Build chunk candidates for dense search
+        chunk_cands: List[Tuple[Path, str, Dict[str, Any]]] = []
+        for chunk_id, cand_idx, section_slug, chunk_text, chash in chunks:
+            # Create a pseudo-candidate for each chunk
+            chunk_fm = dict(cands[cand_idx][2])
+            chunk_fm["_chunk_id"] = chunk_id
+            chunk_fm["_chunk_text"] = chunk_text
+            chunk_fm["_cand_idx"] = cand_idx
+            chunk_path = cands[cand_idx][0]
+            chunk_cands.append((chunk_path, chunk_text, chunk_fm))
+        dense_raw = _dense_search_raw(query, chunk_cands, cfg)
+        if dense_raw is not None:
             retrieval_mode = "hybrid"
-            dense_ranked = dense_ranked[:cand_limit]
-    # If mode was "dense" but dense failed, fall back to sparse gracefully
+            dense_ranked = dense_raw[:cand_limit]
 
-    # 3. RRF fusion (or sparse-only)
+    # 3. RRF fusion on chunks
     rrf_k = float(r_cfg.get("rrf_k", 60))
     sp_w = float(r_cfg.get("sparse_weight", 1.0))
     dn_w = float(r_cfg.get("dense_weight", 1.0))
     if retrieval_mode == "hybrid" and dense_ranked is not None:
         fused = rrf_fusion(sparse_scored, dense_ranked, rrf_k, sp_w, dn_w)
     else:
-        # Sparse-only: convert to fused format
         fused = []
-        for rank, (score, idx, matched) in enumerate(sparse_scored):
+        for rank, (score, chunk_idx, matched) in enumerate(sparse_scored):
             explain_dict = {
                 "sparse_score": round(score, 4),
                 "sparse_rank": rank,
@@ -1350,37 +1480,16 @@ def _search_with_cfg(query: str, limit: int, cfg: Dict[str, Any],
                 "dense_rank": None,
                 "rrf_score": round(sp_w / (rrf_k + rank), 6),
             }
-            fused.append((explain_dict["rrf_score"], idx, explain_dict))
+            fused.append((explain_dict["rrf_score"], chunk_idx, explain_dict))
 
-    # 4. Apply policy boost
-    min_score = float(r_cfg.get("min_score", 0.5))
-    boosted: List[Tuple[float, int, Dict[str, Any]]] = []
-    for rrf_sc, idx, expl in fused:
-        fm = cands[idx][2]
-        pb = _policy_boost(fm)
-        final_score = rrf_sc + pb
-        if final_score >= min_score:
-            expl["policy_boost"] = round(pb, 4)
-            expl["final_score"] = round(final_score, 6)
-            boosted.append((final_score, idx, expl))
-    boosted.sort(key=lambda x: -x[0])
+    # 4. Convert chunk-level fused results to chunk_results for merge
+    chunk_results: List[Tuple[float, str, int, str, str, Dict[str, Any]]] = []
+    for rrf_sc, chunk_idx, expl in fused:
+        chunk_id, cand_idx, section_slug, chunk_text, chash = chunks[chunk_idx]
+        chunk_results.append((rrf_sc, chunk_id, cand_idx, section_slug, chunk_text, expl))
 
-    # 5. MMR post-fusion
-    selected = _mmr_post_fusion(boosted, cands, docs_tok, cfg, limit)
-
-    # 6. Build output
-    out = []
-    for rank, (final_score, idx, expl) in enumerate(selected):
-        p, text, fm = cands[idx]
-        snip = " ".join(text.split())[:420]
-        # Add rank and retrieval_mode to explain
-        expl["final_rank"] = rank
-        expl["retrieval_mode"] = retrieval_mode
-        expl["matched_tokens"] = _matched_for(fm, query)
-        out.append((final_score, p, fm, snip))
-        # Attach explain to fm for --explain consumers
-        if explain:
-            fm["_explain"] = expl
+    # 5. Merge by memory_id + MMR on parents + build output
+    out = _merge_chunks_by_memory(chunk_results, cands, retrieval_mode, query, limit, cfg, docs_tok, explain)
     _mark_accessed_db([str(fm.get("id", str(p))) for _, p, fm, _ in out])
     return out
 

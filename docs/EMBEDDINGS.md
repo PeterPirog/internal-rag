@@ -90,6 +90,26 @@ irag.py doctor
 - Small memory corpora.
 - Environments where packages cannot be installed.
 
+## Section-aware chunking
+
+Since v1.4.0, memories are chunked before embedding:
+- Short memories (<threshold_chars) → 1 chunk.
+- Long memories → split by Markdown `##` headings, with title/type/tags/scope prefix.
+- Overlong sections → further split with configurable overlap.
+- Chunk ID: `<memory_id>:<section-slug>:<ordinal>` (deterministic).
+
+Only changed chunks are re-embedded (content hash per chunk). Changing one section does not invalidate other chunks' embeddings.
+
+Config:
+```yaml
+retrieval:
+  chunking:
+    enabled: true
+    threshold_chars: 2000
+    target_chars: 1200
+    overlap_chars: 120
+```
+
 ## Graceful degradation
 
 If `sentence-transformers` is not installed, the model fails to load, or any error occurs:

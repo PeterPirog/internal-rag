@@ -29,6 +29,18 @@ Warp / OpenCode / Claude Code / Cursor
 
 ### Retrieval
 - **Hybrid pipeline**: BM25 sparse (always) + optional dense embeddings → Reciprocal Rank Fusion → MMR.
+- **Section-aware chunking**: memories are split by Markdown headings into chunks.
+  - Short memories (<threshold_chars) get exactly 1 chunk.
+  - Long memories split by `##` headings; overlong sections further split with overlap.
+  - Chunk prefix: title, type, tags, scope (lightweight, for retrieval context).
+  - Chunk ID: `<memory_id>:<section-slug>:<ordinal>` (deterministic).
+  - Config: `retrieval.chunking.enabled/threshold_chars/target_chars/overlap_chars`.
+- **Chunk-level retrieval**: BM25/dense operate on chunks; results merged by `memory_id` after RRF.
+  - Parent score = best chunk score (max).
+  - Snippet from best-matching chunk.
+  - Final top-k deduplicated by parent memory (no memory appears twice).
+  - `--explain` returns `chunk_id`, `section`, `parent_memory_id`.
+- **MMR on parent memories** (not chunks): 5 chunks of one document cannot displace 5 different relevant memories.
 - **SQLite FTS5 index** (optional, zero-dep): `INTERNAL_RAG/.index.sqlite3` caches documents for fast FTS5 search.
   - If FTS5 available: uses SQLite `bm25()` with higher weights for title/tags/path.
   - If FTS5 unavailable: graceful fallback to pure-Python BM25 (same results, no error).
