@@ -1,12 +1,12 @@
 # INTERNAL_RAG
 
-![version](https://img.shields.io/badge/version-1.0.1-blue)
+![version](https://img.shields.io/badge/version-1.4.0-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![python](https://img.shields.io/badge/python-3.8%2B-blue)
 
 Local, persistent project memory for terminal coding agents (Warp, OpenCode, Claude Code, Cursor).
 
-**Version:** 1.3.0  
+**Version:** 1.4.0  
 **Verified:** 2026-08-24  
 **Integrations:** Warp, OpenCode, MCP (Claude Code / Cursor)  
 **Requirements:** Python 3.8+, Git  
@@ -14,6 +14,19 @@ Local, persistent project memory for terminal coding agents (Warp, OpenCode, Cla
 **Offline:** Fully functional without internet (BM25 core, optional pre-packaged embeddings)
 
 INTERNAL_RAG stores the minimum state needed to resume complex work without keeping the full session history in the model's context window. It works as a checkpoint + RAG for the agent.
+
+## What's new in 1.4.0
+
+- **Section-aware chunking**: memories split by Markdown headings; chunk-level retrieval with parent merge + MMR (`retrieval.chunking.*`, schema v3).
+- **Read-only search**: usage tracking lives in the SQLite usage store; `migrate-usage` with backups; rebuilds preserve usage.
+- **SimHash dedup**: exact (SHA-256) + near (64-bit SimHash, stdlib); conflict detection kept separate; `remember --json` duplicate/conflict shape.
+- **Multilingual PL/EN profile**: `retrieval.profile: english-fast | multilingual` (intfloat/multilingual-e5-small, `query:`/`passage:` prefixes); cache keys include model identity; benchmark-justified PL stopword list.
+- **Temporal knowledge lifecycle**: optional `confidence`/`valid_from`/`valid_to`/`supersedes`/`derived_from` (schema-1 compatible); `supersede` links both directions without deleting history; `search --at YYYY-MM-DD`; `timeline` by effective validity; `context` HISTORY & CONFLICTS section.
+- **`consolidate --dry-run --json`**: deterministic read-only report (duplicates, superseded, archived, never-accessed old, old snapshots, conflicting active) + `plan` for the agent; no deletion, no LLM summarization.
+
+## What's new in 1.3.0
+
+- **Persistent embedding cache** in SQLite (schema v2): chunk-level float32 BLOBs, multiple models coexist, `index --vacuum`/`--embed-missing`.
 
 ## What's new in 1.0.2
 
