@@ -27,7 +27,7 @@ import sys
 import zipfile
 from pathlib import Path
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 ROOT = Path(__file__).parent.resolve()
 
 
@@ -63,8 +63,9 @@ def download_model(model_name: str, out_dir: Path) -> Path | None:
 def main() -> int:
     ap = argparse.ArgumentParser(description=f"Pack INTERNAL_RAG v{VERSION} for offline use.")
     ap.add_argument("--with-embeddings", action="store_true", help="Include sentence-transformers + numpy wheels.")
-    ap.add_argument("--model", default="all-MiniLM-L6-v2", help="Pre-download this embeddings model.")
-    ap.add_argument("--out", default="", help="Output ZIP path (default: internal-rag-offline-<version>.zip).")
+    ap.add_argument("--model", default="", help="Model to pre-download (overrides profile).")
+    ap.add_argument("--profile", default="english-fast", choices=["english-fast", "multilingual"],
+                    help="Retrieval profile (default: english-fast).")
     args = ap.parse_args()
 
     out_zip = Path(args.out) if args.out else ROOT / f"internal-rag-offline-{VERSION}.zip"
@@ -98,14 +99,20 @@ def main() -> int:
         else:
             print("Wheels downloaded successfully.")
 
-        # 3. Pre-download model
+        # 3. Pre-download model (resolve from profile or explicit --model)
+        PROFILE_MODELS = {
+            "english-fast": "all-MiniLM-L6-v2",
+            "multilingual": "intfloat/multilingual-e5-small",
+        }
+        model_name = args.model or PROFILE_MODELS.get(args.profile, "all-MiniLM-L6-v2")
         model_dir = staging / "models"
-        model_path = download_model(args.model, model_dir)
+        model_path = download_model(model_name, model_dir)
         if model_path:
-            print(f"\nModel pre-downloaded to: {model_path}")
+            print(f"\nModel pre-downloaded: {model_name} -> {model_path}")
+            print(f"Profile: {args.profile}")
             print("On the offline machine, set:")
             print(f'  IRAG_EMBED_MODEL="{model_path}"')
-            print("or copy the model to the target machine and point IRAG_EMBED_MODEL to it.")
+            print(f"  or set retrieval.profile: {args.profile} in .irag.yml")
 
     # 4. Write offline README
     offline_readme = staging / "OFFLINE-README.txt"

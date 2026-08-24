@@ -1,5 +1,43 @@
 # Changelog
 
+## 1.4.0 — 2026-08-24
+
+Section-aware chunking, read-only search, SimHash dedup, multilingual profiles, temporal metadata.
+
+### Section-aware chunking (task 5)
+- `chunk_memory()`: splits by Markdown headings, prefix with title/type/tags/scope.
+- Short memories (<threshold_chars) get exactly 1 chunk.
+- Chunk ID: `<memory_id>:<section-slug>:<ordinal>`.
+- Config: `retrieval.chunking.enabled/threshold_chars/target_chars/overlap_chars`.
+- Schema v3 migration.
+
+### Read-only search / migrate-usage (task 6)
+- `_mark_accessed_db()` uses SQLite usage table — search/context no longer mutate Markdown.
+- `migrate-usage --dry-run/--apply [--strip] [--json]` — migrate frontmatter last_accessed to DB.
+- doctor: never-accessed, top-accessed from SQLite usage table.
+
+### SimHash deduplication (task 7)
+- `canonical_memory_text()`, exact fingerprint (SHA-256), 64-bit SimHash (stdlib).
+- `remember`/`remember-batch`/`import`: exact block, near warn, title-Jaccard as extra signal.
+- Archived memories excluded from active duplicate check (shown informacyjnie).
+- `--force` bypasses all checks. `--json` returns `duplicate` field.
+
+### Multilingual PL/EN profile (task 8)
+- `retrieval.profile: english-fast | multilingual` (default: english-fast).
+- english-fast: all-MiniLM-L6-v2 (unchanged).
+- multilingual: intfloat/multilingual-e5-small with query/passage prefix.
+- Cache key includes model/profile. `embeddings-info` shows active profile.
+- `pack.py --profile english-fast|multilingual`.
+- `retrieval.query_expansion: false` to disable synonym expansion.
+
+### Temporal metadata + consolidate (task 9)
+- Frontmatter: `schema:2`, `valid_from`, `valid_to`, `confidence`, `supersedes`, `derived_from`.
+- `supersede`: sets `valid_to`, `superseded_by`; new entry gets `supersedes`.
+- `timeline`: sorts by effective validity (valid_from/created).
+- `search --at YYYY-MM-DD`: filter memories valid at date.
+- `consolidate --dry-run --json`: duplicates, superseded, archived, never-accessed, old snapshots, conflicts.
+- Schema 1 memories still work (backward compatible).
+
 ## 1.3.0 — 2026-08-24
 
 Persistent embedding cache in SQLite.

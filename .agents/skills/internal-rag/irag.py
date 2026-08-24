@@ -25,7 +25,7 @@ import unicodedata
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 
 ALLOWED_TYPES = {"decision", "knowledge", "constraint", "gotcha", "failure", "hypothesis", "session"}
 ALLOWED_STATUS = {"active", "tentative", "superseded", "invalid", "archived"}
@@ -49,6 +49,8 @@ DEFAULT_CONFIG = {
         "sparse_weight": 1.0,
         "dense_weight": 1.0,
         "candidate_multiplier": 4,
+        "profile": "english-fast",
+        "query_expansion": True,
     },
     "tokens": {"context_budget": 4000, "warn_ratio": 0.8},
     "checkpoints": {"auto_archive_sessions": True, "max_task_stack": 16, "max_age_minutes": 0},
@@ -556,7 +558,7 @@ def context(args) -> int:
     save_working(text)
     types_f = getattr(args, "type", None)
     statuses_f = getattr(args, "status", None)
-    expanded = expand_query(task)
+    expanded = expand_query(task, cfg)
     results = search(expanded, limit, types=types_f, statuses=statuses_f)
     ws_text = WORKING.read_text(encoding="utf-8", errors="replace")
     ws_tokens = estimate_tokens(ws_text)
@@ -800,8 +802,13 @@ SYNONYMS: List[Tuple[str, str]] = [
 ]
 
 
-def expand_query(query: str) -> str:
-    """Expand query with synonyms for better recall."""
+def expand_query(query: str, cfg: Optional[Dict[str, Any]] = None) -> str:
+    """Expand query with synonyms for better recall.
+    Disabled when retrieval.query_expansion is false."""
+    if cfg is None:
+        cfg = load_config()
+    if not cfg.get("retrieval", {}).get("query_expansion", True):
+        return query
     tokens = re.findall(r"[A-Za-z0-9_./:@+-]{2,}", query.lower())
     extra: List[str] = []
     for tok in tokens:
@@ -1378,6 +1385,148 @@ def _search_with_cfg(query: str, limit: int, cfg: Dict[str, Any],
     return out
 
 
+def _filter_by_date(results: List[Tuple[float, Path, Dict[str, Any], str]],
+                    at_date: str) -> List[Tuple[float, Path, Dict[str, Any], str]]:
+    """Filter results to only memories valid at the given date (YYYY-MM-DD)."""
+    try:
+        target = dt.date.fromisoformat(at_date)
+    except Exception:
+        return results  # Unknown date format — return all
+    filtered = []
+    for score, p, fm, sn in results:
+        valid_from = str(fm.get("valid_from") or fm.get("created") or "")
+        valid_to = str(fm.get("valid_to") or "")
+        try:
+            vf = dt.date.fromisoformat(valid_from[:10]) if valid_from else None
+        except Exception:
+            vf = None
+        try:
+            vt = dt.date.fromisoformat(valid_to[:10]) if valid_to else None
+        except Exception:
+            vt = None
+        # Memory is valid at target date if:
+        # - valid_from <= target (or no valid_from)
+        # - valid_to >= target (or no valid_to)
+        if vf and vf > target:
+            continue
+        if vt and vt < target:
+            continue
+        filtered.append((score, p, fm, sn))
+    return filtered
+
+
+def consolidate_cmd(args) -> int:
+    """consolidate --dry-run --json: deterministic read-only report.
+    Reports: duplicates, superseded, archived, never-accessed, old snapshots, conflicts."""
+    report: Dict[str, Any] = {"dry_run": True, "issues": []}
+    all_files = memory_files()
+    # Collect all memories with metadata
+    memories: List[Dict[str, Any]] = []
+    for p in all_files:
+        text = p.read_text(encoding="utf-8", errors="replace")
+        fm = parse_fm(text)
+        memories.append({
+            "path": str(p.relative_to(ROOT)).replace("\\", "/"),
+            "id": str(fm.get("id", str(p))),
+            "type": str(fm.get("type", "")),
+            "status": str(fm.get("status", "")),
+            "created": str(fm.get("created", "")),
+            "title": _extract_title_from_text(text),
+            "fm": fm,
+            "text": text,
+        })
+    # 1. Exact/near duplicates
+    seen_hashes: Dict[str, List[str]] = {}
+    seen_simhash: List[Tuple[int, str, str]] = []
+    duplicates: List[Dict[str, str]] = []
+    for m in memories:
+        body = _extract_section(m["text"], "Knowledge")
+        consequence = _extract_section(m["text"], "Consequence")
+        canonical = _canonical_memory_text(m["title"], body, consequence)
+        fp = _exact_fingerprint(canonical)
+        sh = _simhash_64bit(canonical)
+        if fp in seen_hashes:
+            for other_path in seen_hashes[fp]:
+                duplicates.append({"type": "exact", "a": other_path, "b": m["path"]})
+            seen_hashes[fp].append(m["path"])
+        else:
+            seen_hashes[fp] = [m["path"]]
+        for other_sh, other_path, other_id in seen_simhash:
+            dist = _hamming_distance(sh, other_sh)
+            if dist <= 3 and m["path"] != other_path:
+                duplicates.append({"type": "near", "a": other_path, "b": m["path"], "simhash_distance": dist})
+        seen_simhash.append((sh, m["path"], m["id"]))
+    if duplicates:
+        report["issues"].append({"category": "duplicates", "count": len(duplicates), "items": duplicates})
+    # 2. Superseded entries
+    superseded = [m for m in memories if m["status"] == "superseded"]
+    if superseded:
+        report["issues"].append({"category": "superseded", "count": len(superseded),
+                                 "items": [{"path": m["path"], "superseded_by": m["fm"].get("superseded_by", "")}
+                                          for m in superseded]})
+    # 3. Archived entries
+    archived = [m for m in memories if "archive" in Path(m["path"]).parts]
+    if archived:
+        report["issues"].append({"category": "archived", "count": len(archived),
+                                 "items": [{"path": m["path"]} for m in archived]})
+    # 4. Never-accessed old entries (>90 days old, never accessed)
+    cutoff = (dt.date.today() - dt.timedelta(days=90)).isoformat()
+    never_accessed = []
+    for m in memories:
+        created = m["created"][:10] if m["created"] else ""
+        if created and created < cutoff and not m["fm"].get("last_accessed"):
+            never_accessed.append({"path": m["path"], "created": created})
+    if never_accessed:
+        report["issues"].append({"category": "never_accessed_old", "count": len(never_accessed),
+                                 "items": never_accessed})
+    # 5. Session snapshots older than threshold
+    snap_dir = RAG / "sessions" / ".snapshots"
+    old_snaps: List[str] = []
+    if snap_dir.exists():
+        for snap in snap_dir.glob("*.md"):
+            try:
+                mtime = snap.stat().st_mtime
+                age_days = (time.time() - mtime) / 86400
+                if age_days > 30:
+                    old_snaps.append(str(snap.relative_to(ROOT)))
+            except Exception:
+                pass
+    if old_snaps:
+        report["issues"].append({"category": "old_snapshots", "count": len(old_snaps), "items": old_snaps})
+    # 6. Potentially conflicting active memories (same type+scope)
+    conflicts: List[Dict[str, str]] = []
+    active_by_scope: Dict[str, List[Dict[str, Any]]] = {}
+    for m in memories:
+        if m["status"] != "active":
+            continue
+        scope = m["fm"].get("scope", [])
+        if isinstance(scope, str):
+            scope = [scope] if scope else []
+        if not isinstance(scope, list):
+            scope = []
+        for s in scope:
+            key = f"{m['type']}:{s}"
+            active_by_scope.setdefault(key, []).append(m)
+    for key, group in active_by_scope.items():
+        if len(group) > 1:
+            conflicts.append({"scope_key": key, "memories": [m["path"] for m in group]})
+    if conflicts:
+        report["issues"].append({"category": "conflicting_active", "count": len(conflicts), "items": conflicts})
+    if getattr(args, "json", False):
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+        return 0
+    print("consolidate --dry-run (read-only)")
+    for issue in report["issues"]:
+        print(f"\n[{issue['category']}] {issue['count']} item(s)")
+        for item in issue["items"][:10]:
+            print(f"  {item}")
+        if len(issue["items"]) > 10:
+            print(f"  ... +{len(issue['items']) - 10} more")
+    if not report["issues"]:
+        print("No issues found.")
+    return 0
+
+
 def _matched_for(fm: Dict[str, Any], query: str = "") -> List[str]:
     """Return matched tokens (from tags/scope + query overlap) for JSON consumers."""
     out: List[str] = []
@@ -1431,17 +1580,36 @@ def remember(args) -> None:
             print(f"  pattern: {s}", file=sys.stderr)
         print("If this is a false positive, re-run with --allow-secret.", file=sys.stderr)
         return
-    # G3: duplicate detection by title similarity
-    dupes = _find_duplicates(args.title, args.type)
-    if dupes and not getattr(args, "force", False):
-        print(f"WARNING: similar memory already exists:", file=sys.stderr)
-        for d in dupes:
+    # Content-based duplicate detection (SimHash + exact fingerprint)
+    dup_check = _check_duplicates(args.title, args.body, args.consequence or "",
+                                   args.type, args.tags, args.scope)
+    force = getattr(args, "force", False)
+    if dup_check["exact"] and not force:
+        print("BLOCKED: exact duplicate detected:", file=sys.stderr)
+        for d in dup_check["near"]:
             print(f"  {d}", file=sys.stderr)
         print("Use --force to create anyway, or `update` the existing memory.", file=sys.stderr)
         return
-    # H2: conflict detection for decision/knowledge/constraint
+    if dup_check["near"] and not force:
+        print("WARNING: near duplicate detected:", file=sys.stderr)
+        for d in dup_check["near"]:
+            if "exact" not in d:
+                print(f"  {d}", file=sys.stderr)
+        action = dup_check.get("recommended_action")
+        if action:
+            print(f"Recommended action: {action} (or --force to create anyway)", file=sys.stderr)
+        return
+    # Title-Jaccard as additional signal
+    title_dupes = _find_duplicates(args.title, args.type)
+    if title_dupes and not force:
+        print(f"WARNING: similar title already exists:", file=sys.stderr)
+        for d in title_dupes:
+            print(f"  {d}", file=sys.stderr)
+        print("Use --force to create anyway, or `update` the existing memory.", file=sys.stderr)
+        return
+    # H2: conflict detection (separate from duplicate detection)
     conflicts = _find_conflicts(args.type, args.body, args.scope)
-    if conflicts and not getattr(args, "force", False):
+    if conflicts and not force:
         print("WARNING: potential conflict with active memory of same type/scope:", file=sys.stderr)
         for c in conflicts:
             print(f"  {c}", file=sys.stderr)
@@ -1531,6 +1699,152 @@ def remember_batch(args) -> int:
         created += 1
     print(f"Batch complete: {created} created, {skipped} skipped.")
     return 0
+
+
+def _canonical_memory_text(title: str, body: str, consequence: str,
+                           tags: str = "", scope: str = "") -> str:
+    """Build canonical text for dedup fingerprinting.
+    Excludes timestamps, status, last_accessed, created/updated."""
+    parts = [title.strip().lower()]
+    # Extract Knowledge section content
+    parts.append(body.strip().lower())
+    if consequence:
+        parts.append(consequence.strip().lower())
+    # Tags and scope (sorted for determinism)
+    tag_list = sorted(x.strip().lower() for x in (tags or "").split(",") if x.strip())
+    if tag_list:
+        parts.append(" ".join(tag_list))
+    scope_list = sorted(x.strip().lower() for x in (scope or "").split(",") if x.strip())
+    if scope_list:
+        parts.append(" ".join(scope_list))
+    return "\n".join(parts)
+
+
+def _exact_fingerprint(canonical: str) -> str:
+    """SHA-256 of normalized canonical text."""
+    normalized = re.sub(r"\s+", " ", unicodedata.normalize("NFKD", canonical))
+    normalized = "".join(c for c in normalized if not unicodedata.combining(c))
+    normalized = normalized.strip()
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _simhash_64bit(text: str) -> int:
+    """64-bit SimHash from token hashes. Pure stdlib."""
+    tokens = tokenize(text)
+    if not tokens:
+        return 0
+    weights = [0] * 64
+    for tok in tokens:
+        h = int(hashlib.md5(tok.encode("utf-8")).hexdigest(), 16)
+        for i in range(64):
+            bit = (h >> i) & 1
+            weights[i] += 1 if bit else -1
+    result = 0
+    for i in range(64):
+        if weights[i] > 0:
+            result |= (1 << i)
+    return result
+
+
+def _hamming_distance(a: int, b: int) -> int:
+    return bin(a ^ b).count("1")
+
+
+def _check_duplicates(title: str, body: str, consequence: str,
+                      mtype: str, tags: str = "", scope: str = "",
+                      simhash_threshold: int = 3
+                      ) -> Dict[str, Any]:
+    """Comprehensive duplicate detection.
+    Returns dict with: exact, near, title_similar, recommended_action."""
+    canonical = _canonical_memory_text(title, body, consequence, tags, scope)
+    exact_fp = _exact_fingerprint(canonical)
+    query_simhash = _simhash_64bit(canonical)
+    title_toks = set(tokenize(title))
+    result: Dict[str, Any] = {
+        "exact": False, "near": [], "title_similar": [],
+        "recommended_action": None,
+    }
+    for p in memory_files():
+        text = p.read_text(encoding="utf-8", errors="replace")
+        fm = parse_fm(text)
+        if str(fm.get("type", "")).lower() != mtype.lower():
+            continue
+        status = str(fm.get("status", "")).lower()
+        is_archived = "archive" in p.parts or status in ("archived", "invalid")
+        # Extract existing memory fields
+        existing_title = _extract_title_from_text(text)
+        existing_body = _extract_section(text, "Knowledge")
+        existing_consequence = _extract_section(text, "Consequence")
+        existing_tags = _tags_to_text(fm)
+        existing_scope = ""
+        scope_val = fm.get("scope", [])
+        if isinstance(scope_val, list):
+            existing_scope = ",".join(str(s) for s in scope_val)
+        elif isinstance(scope_val, str):
+            existing_scope = scope_val
+        existing_canonical = _canonical_memory_text(
+            existing_title, existing_body, existing_consequence, existing_tags, existing_scope)
+        existing_fp = _exact_fingerprint(existing_canonical)
+        existing_simhash = _simhash_64bit(existing_canonical)
+        rel = str(p.relative_to(ROOT))
+        # Exact match
+        if existing_fp == exact_fp:
+            if is_archived:
+                result["near"].append(f"{rel} (archived exact match)")
+            else:
+                result["exact"] = True
+                result["near"].append(f"{rel} (exact duplicate)")
+                result["recommended_action"] = "update"
+        # Near duplicate (SimHash)
+        elif not is_archived:
+            dist = _hamming_distance(query_simhash, existing_simhash)
+            if dist <= simhash_threshold:
+                result["near"].append(f"{rel} (SimHash distance={dist})")
+                if result["recommended_action"] is None:
+                    result["recommended_action"] = "supersede"
+        # Title similarity (Jaccard) — additional signal
+        if title_toks and not is_archived:
+            ext_title_toks = set(tokenize(existing_title))
+            if ext_title_toks:
+                jaccard = len(title_toks & ext_title_toks) / len(title_toks | ext_title_toks)
+                if jaccard >= 0.7:
+                    result["title_similar"].append(f"{rel} (title: {existing_title}, {jaccard:.0%})")
+    if result["exact"]:
+        result["recommended_action"] = "update"
+    elif result["near"] and result["recommended_action"] is None:
+        result["recommended_action"] = "force"
+    return result
+
+
+def _extract_title_from_text(text: str) -> str:
+    for line in text.splitlines():
+        if line.startswith("# "):
+            return line[2:].strip()
+    return ""
+
+
+def _extract_section(text: str, section_name: str) -> str:
+    """Extract the body of a ## section from Markdown."""
+    in_section = False
+    lines: List[str] = []
+    for line in text.splitlines():
+        if line.startswith(f"## {section_name}"):
+            in_section = True
+            continue
+        if in_section and line.startswith("## "):
+            break
+        if in_section:
+            lines.append(line)
+    return "\n".join(lines).strip()
+
+
+def _tags_to_text(fm: Dict[str, Any]) -> str:
+    tags = fm.get("tags", [])
+    if isinstance(tags, str):
+        return tags
+    if isinstance(tags, list):
+        return ",".join(str(t) for t in tags)
+    return ""
 
 
 def _find_duplicates(title: str, mtype: str, threshold: float = 0.7) -> List[str]:
@@ -1692,10 +2006,28 @@ def supersede(args) -> int:
     fm["superseded_by"] = args.by or "unspecified"
     fm["superseded_at"] = today()
     fm["supersede_reason"] = args.reason or "unspecified"
+    fm["valid_to"] = today()
     fm["updated"] = today()
     body_start = text.find("---\n", 4)
     body = text[body_start + 4:].lstrip("\n") if body_start >= 0 else text
     p.write_text(write_fm(fm) + "\n" + body, encoding="utf-8")
+    # If --by references a new memory, add supersedes to it
+    if args.by:
+        new_p = find_memory_by_id_or_path(args.by)
+        if new_p is not None:
+            new_text, new_fm = _read_memory(new_p)
+            supersedes = new_fm.get("supersedes", [])
+            if isinstance(supersedes, str):
+                supersedes = [supersedes] if supersedes else []
+            if not isinstance(supersedes, list):
+                supersedes = []
+            old_id = str(fm.get("id", str(p)))
+            if old_id not in supersedes:
+                supersedes.append(old_id)
+            new_fm["supersedes"] = supersedes
+            new_body_start = new_text.find("---\n", 4)
+            new_body = new_text[new_body_start + 4:].lstrip("\n") if new_body_start >= 0 else new_text
+            new_p.write_text(write_fm(new_fm) + "\n" + new_body, encoding="utf-8")
     rebuild_index()
     print(f"Superseded: {p.relative_to(ROOT)} (by {args.by or 'unspecified'})")
     return 0
@@ -1820,19 +2152,25 @@ def diff_memory(args) -> int:
 
 
 def timeline(args) -> int:
-    """Show memory timeline (by created date)."""
+    """Show memory timeline (by effective validity date, fallback to created)."""
     items = []
     for p in memory_files():
         _, fm = _read_memory(p)
+        # Effective validity: valid_from if present, else created
+        effective = str(fm.get("valid_from") or fm.get("created") or "unknown")
         items.append({
+            "effective": effective,
             "created": str(fm.get("created", "unknown")),
+            "valid_from": str(fm.get("valid_from", "")),
+            "valid_to": str(fm.get("valid_to", "")),
             "path": str(p.relative_to(ROOT)).replace("\\", "/"),
             "type": str(fm.get("type", "?")),
             "status": str(fm.get("status", "?")),
             "title": next((x[2:].strip() for x in p.read_text(encoding="utf-8", errors="replace").splitlines()
                            if x.startswith("# ")), p.stem),
         })
-    items.sort(key=lambda x: (x["created"], x["path"]), reverse=True)
+    # Sort by effective validity (valid_from/created), then path
+    items.sort(key=lambda x: (x["effective"], x["path"]), reverse=True)
     if args.limit and args.limit > 0:
         items = items[: args.limit]
     if args.json:
@@ -1842,7 +2180,10 @@ def timeline(args) -> int:
         print("No memories yet.")
         return 0
     for it in items:
-        print(f"{it['created']}  [{it['type']}/{it['status']}]  {it['path']}")
+        eff = it["effective"]
+        if it["valid_to"]:
+            eff += f" -> {it['valid_to']}"
+        print(f"{eff}  [{it['type']}/{it['status']}]  {it['path']}")
         print(f"    {it['title']}")
     return 0
 
@@ -1968,7 +2309,7 @@ def index_cmd(args) -> int:
         idx.sync_incremental(cands)
         # Get model info
         cfg = load_config()
-        model_name = str(cfg.get("retrieval", {}).get("embeddings_model", "all-MiniLM-L6-v2"))
+        model_name, _, _ = _resolve_embedding_model(cfg)
         # Compute content hashes for chunks
         chunk_ids = []
         content_hashes = {}
@@ -2397,14 +2738,26 @@ def import_cmd(args) -> int:
 
 # ----------------------------- embeddings info ------------------------------
 
+def _resolve_embedding_model(cfg: Dict[str, Any]) -> Tuple[str, str, str]:
+    """Resolve model from config: explicit embeddings_model or profile."""
+    profile = str(cfg.get("retrieval", {}).get("profile", "english-fast")).lower()
+    explicit = cfg.get("retrieval", {}).get("embeddings_model")
+    if explicit and str(explicit).lower() not in ("null", "none", ""):
+        return (str(explicit), "", "")
+    profiles = {"english-fast": ("all-MiniLM-L6-v2", "", ""),
+                "multilingual": ("intfloat/multilingual-e5-small", "query: ", "passage: ")}
+    return profiles.get(profile, profiles["english-fast"])
+
+
 def embeddings_info(args) -> int:
     cfg = load_config()
     mode = str(cfg.get("retrieval", {}).get("embeddings", "auto")).lower()
     avail = embeddings_search("test", [], 1, cfg) is not None
-    model_name = str(cfg.get("retrieval", {}).get("embeddings_model", "all-MiniLM-L6-v2"))
+    model_name, _, _ = _resolve_embedding_model(cfg)
     info: Dict[str, Any] = {"configured": mode, "available": avail,
             "engine": "sentence-transformers" if avail else "bm25-fallback",
             "model": model_name,
+            "profile": str(cfg.get("retrieval", {}).get("profile", "english-fast")),
             "plugin_path": str(ROOT / ".agents" / "skills" / "internal-rag" / "irag_embeddings.py")}
     # Persistent embedding cache status
     idx = _open_sqlite_index()
@@ -2744,9 +3097,14 @@ def main() -> None:
     p.add_argument("--limit", type=int, default=0)
     p.add_argument("--type", nargs="*", default=None, help="Filter by memory type(s).")
     p.add_argument("--status", nargs="*", default=None, help="Filter by memory status(es).")
+    p.add_argument("--at", default=None, help="Filter memories valid at this date (YYYY-MM-DD).")
     p.add_argument("--json", action="store_true")
     p.add_argument("--explain", action="store_true", help="Include per-channel scoring breakdown in JSON output.")
     p.add_argument("--embeddings", choices=["on", "off", "auto"], default=None)
+
+    p = sub.add_parser("consolidate")
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--json", action="store_true")
 
     p = sub.add_parser("remember")
     p.add_argument("--type", required=True, choices=sorted(ALLOWED_TYPES))
@@ -2852,12 +3210,20 @@ def main() -> None:
         statuses_f = getattr(a, "status", None)
         emb_override = getattr(a, "embeddings", None)
         want_explain = getattr(a, "explain", False)
+        at_date = getattr(a, "at", None)
+        # Temporal filter: --at YYYY-MM-DD
+        if at_date:
+            at_statuses = statuses_f or []
+            # Will be handled in _search_with_cfg via extra filter
         if emb_override:
             cfg = load_config()
             cfg["retrieval"]["embeddings"] = emb_override
             r = _search_with_cfg(a.query, a.limit, cfg, types=types_f, statuses=statuses_f, explain=want_explain)
         else:
             r = search(a.query, a.limit, types=types_f, statuses=statuses_f, explain=want_explain)
+        # Apply --at temporal filter post-retrieval
+        if at_date:
+            r = _filter_by_date(r, at_date)
         if a.json:
             items = []
             for s, p, fm, sn in r:
@@ -2877,6 +3243,8 @@ def main() -> None:
             print("No matching durable memories." if not r else "\n".join(
                 f"{i}. {p.relative_to(ROOT)} score={s:.1f}\n   {sn}"
                 for i, (s, p, fm, sn) in enumerate(r, 1)))
+    elif a.cmd == "consolidate":
+        raise SystemExit(consolidate_cmd(a))
     elif a.cmd == "remember":
         remember(a)
     elif a.cmd == "remember-batch":

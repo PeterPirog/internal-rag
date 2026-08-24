@@ -26,6 +26,31 @@ _EMBED_CACHE: Dict[str, Any] = {}
 
 DEFAULT_MODEL = os.environ.get("IRAG_EMBED_MODEL", "all-MiniLM-L6-v2")
 
+RETRIEVAL_PROFILES = {
+    "english-fast": {
+        "model": "all-MiniLM-L6-v2",
+        "query_prefix": "",
+        "passage_prefix": "",
+    },
+    "multilingual": {
+        "model": "intfloat/multilingual-e5-small",
+        "query_prefix": "query: ",
+        "passage_prefix": "passage: ",
+    },
+}
+
+
+def _resolve_model(cfg: Dict[str, Any]) -> Tuple[str, str, str]:
+    """Resolve model name, query prefix, and passage prefix from config.
+    Returns (model_name, query_prefix, passage_prefix)."""
+    profile = str(cfg.get("retrieval", {}).get("profile", "english-fast")).lower()
+    explicit_model = cfg.get("retrieval", {}).get("embeddings_model")
+    # Explicit model overrides profile
+    if explicit_model and str(explicit_model).lower() not in ("null", "none", ""):
+        return (str(explicit_model), "", "")
+    prof = RETRIEVAL_PROFILES.get(profile, RETRIEVAL_PROFILES["english-fast"])
+    return (prof["model"], prof["query_prefix"], prof["passage_prefix"])
+
 
 def _load_model(model_name: str):
     if model_name in _MODEL_CACHE:
@@ -165,12 +190,11 @@ def dense_search_raw(query: str,
         import numpy as np
     except Exception:
         return None
-    model_name = str(cfg.get("retrieval", {}).get("embeddings_model", DEFAULT_MODEL))
+    model_name, query_prefix, passage_prefix = _resolve_model(cfg)
     model = _load_model(model_name)
     if model is None:
         return None
     try:
-        # Build doc texts and chunk info
         docs = []
         chunk_ids = []
         content_hashes = []
@@ -178,13 +202,19 @@ def dense_search_raw(query: str,
             header = "\n".join(text.splitlines()[:40])
             body = " ".join(text.split())[:2000]
             doc_text = f"{p.relative_to(root)}\n{header}\n{body}"
+            # Apply passage prefix for E5 models
+            if passage_prefix:
+                doc_text = passage_prefix + doc_text
             docs.append(doc_text)
             mem_id = str(fm.get("id", str(p)))
             chunk_ids.append(f"{mem_id}-c0")
             content_hashes.append(_compute_content_hash_simple(doc_text))
 
         # Query embedding (in-memory, not cached persistently)
-        q_emb = _embed(model, [query])[0]
+        q_text = query
+        if query_prefix:
+            q_text = query_prefix + query
+        q_emb = _embed(model, [q_text])[0]
 
         # Try persistent cache
         idx = _get_persistent_cache(root)
@@ -251,7 +281,7 @@ def dense_similarity_matrix(candidate_indices: List[int],
         import numpy as np
     except Exception:
         return None
-    model_name = str(cfg.get("retrieval", {}).get("embeddings_model", DEFAULT_MODEL))
+    model_name, _, passage_prefix = _resolve_model(cfg)
     model = _load_model(model_name)
     if model is None:
         return None
@@ -261,7 +291,10 @@ def dense_similarity_matrix(candidate_indices: List[int],
             p, text, fm = candidates[i]
             header = "\n".join(text.splitlines()[:40])
             body = " ".join(text.split())[:2000]
-            docs.append(f"{p.relative_to(root)}\n{header}\n{body}")
+            doc_text = f"{p.relative_to(root)}\n{header}\n{body}"
+            if passage_prefix:
+                doc_text = passage_prefix + doc_text
+            docs.append(doc_text)
         emb = _embed(model, docs)
         sims = emb @ emb.T if hasattr(emb, "T") else np.dot(emb, emb.T)
         return sims
