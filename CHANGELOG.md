@@ -1,5 +1,31 @@
 # Changelog
 
+## 1.0.4 — 2026-08-24
+
+Sparse retrieval fix and deterministic test suite.
+
+### BM25 IDF fix
+- Fixed IDF formula from `((N - df + 0.5) / (df + 0.5) + 1.0)` to standard `log(1 + (N - df + 0.5) / (df + 0.5))`.
+- Uses `math.log` from standard library — no external dependency added.
+- Extracted BM25 into testable functions: `bm25_idf()`, `bm25_term_score()`, `bm25_doc_score()`.
+- `k1` and `b` are now configurable via `.irag.yml` (`retrieval.bm25_k1`, `retrieval.bm25_b`).
+- Graceful behavior for empty query and empty corpus preserved.
+
+### Deterministic test suite
+- `tests/test_retrieval.py` — 33 unit tests (unittest, standard library only).
+  - Rare term ranks correct document higher.
+  - Exact symbol/function name searchable (e.g. `refresh_token_cache`).
+  - Frequent term does not dominate ranking.
+  - Active/tentative/superseded status semantics verified.
+  - Type and status filters tested.
+  - Polish characters in query and document do not break matching (NFKD normalization).
+  - Results are deterministic for fixed fixtures.
+- `tests/fixtures/retrieval/` — 22 memories: EN, PL, decisions, knowledge, gotchas, failures, hypotheses, distractors.
+- `tests/retrieval_benchmark.py` — Recall@1/3/5, MRR, p50/p95 latency on synthetic corpora (100, 1000, 10000).
+
+### self_test.py
+- Added sparse retrieval smoke test.
+
 ## 1.0.3 — 2026-08-24
 
 Quality and intelligence release.

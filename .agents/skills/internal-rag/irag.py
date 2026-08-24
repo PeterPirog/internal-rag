@@ -15,6 +15,7 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import math
 import os
 import re
 import subprocess
@@ -24,7 +25,7 @@ import unicodedata
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-VERSION = "1.0.3"
+VERSION = "1.0.4"
 
 ALLOWED_TYPES = {"decision", "knowledge", "constraint", "gotcha", "failure", "hypothesis", "session"}
 ALLOWED_STATUS = {"active", "tentative", "superseded", "invalid", "archived"}
@@ -39,7 +40,8 @@ INFRA_PREFIXES = (
 )
 INFRA_EXACT = {"AGENTS.md"}
 DEFAULT_CONFIG = {
-    "retrieval": {"limit": 8, "mmr_lambda": 0.5, "min_score": 0.5, "embeddings": "auto"},
+    "retrieval": {"limit": 8, "mmr_lambda": 0.5, "min_score": 0.5, "embeddings": "auto",
+                  "bm25_k1": 1.5, "bm25_b": 0.75},
     "tokens": {"context_budget": 4000, "warn_ratio": 0.8},
     "checkpoints": {"auto_archive_sessions": True, "max_task_stack": 16, "max_age_minutes": 0},
     "privacy": {"scan_on_checkpoint": False},
@@ -862,21 +864,60 @@ def recency_boost(fm: Dict[str, Any]) -> float:
     return 0.0
 
 
+def bm25_idf(term: str, df_map: Dict[str, int], n_docs: int) -> float:
+    """Standard BM25 IDF: log(1 + (N - df + 0.5) / (df + 0.5)).
+    Always non-negative. Returns 0 for terms not in corpus."""
+    df = df_map.get(term, 0)
+    if df == 0:
+        return 0.0
+    return math.log(1.0 + (n_docs - df + 0.5) / (df + 0.5))
+
+
+def bm25_term_score(term: str, tf: int, doc_len: int, avgdl: float,
+                    idf_val: float, k1: float, b: float) -> float:
+    """BM25 term-document score component."""
+    if tf == 0 or avgdl <= 0:
+        return 0.0
+    denom = tf * (k1 + 1) / (tf + k1 * (1 - b + b * doc_len / avgdl))
+    return idf_val * denom
+
+
+def bm25_doc_score(q_tokens: List[str], doc_tokens: List[str],
+                   df_map: Dict[str, int], n_docs: int, avgdl: float,
+                   k1: float, b: float) -> Tuple[float, List[str]]:
+    """Score a single document against query tokens.
+    Returns (score, matched_tokens)."""
+    if not doc_tokens or avgdl <= 0:
+        return 0.0, []
+    tf: Dict[str, int] = {}
+    for t in doc_tokens:
+        tf[t] = tf.get(t, 0) + 1
+    score = 0.0
+    matched: List[str] = []
+    for t in q_tokens:
+        if t in tf:
+            idf_val = bm25_idf(t, df_map, n_docs)
+            if idf_val <= 0:
+                continue
+            matched.append(t)
+            score += bm25_term_score(t, tf[t], len(doc_tokens), avgdl, idf_val, k1, b)
+    return score, matched
+
+
 def bm25_search(query: str, candidates: List[Tuple[Path, str, Dict[str, Any]]],
                 limit: int, cfg: Dict[str, Any]) -> List[Tuple[float, Path, Dict[str, Any], str, List[str]]]:
-    k1 = 1.5
-    b = 0.75
+    r_cfg = cfg.get("retrieval", {})
+    k1 = float(r_cfg.get("bm25_k1", 1.5))
+    b = float(r_cfg.get("bm25_b", 0.75))
     q_tokens = tokenize(query)
     if not q_tokens:
         q_tokens = re.findall(r"[A-Za-z0-9_./:@+-]{2,}", query.lower())
     docs_tok: List[List[str]] = []
-    docs_body: List[str] = []
     for p, text, fm in candidates:
         header = "\n".join(text.splitlines()[:40])
         body = "\n".join(text.splitlines())
         rel = str(p.relative_to(ROOT))
         combined = f"{rel}\n{header}\n{body}"
-        docs_body.append(combined)
         docs_tok.append(tokenize(combined))
     N = len(docs_tok)
     if N == 0:
@@ -886,19 +927,11 @@ def bm25_search(query: str, candidates: List[Tuple[Path, str, Dict[str, Any]]],
     for d in docs_tok:
         for t in set(d):
             df[t] = df.get(t, 0) + 1
-    idf = {t: max(0.0, ((N - df.get(t, 0) + 0.5) / (df.get(t, 0) + 0.5) + 1.0)) for t in q_tokens}
     scored: List[Tuple[float, int, List[str]]] = []
     for i, d in enumerate(docs_tok):
-        tf: Dict[str, int] = {}
-        for t in d:
-            tf[t] = tf.get(t, 0) + 1
-        score = 0.0
-        matched: List[str] = []
-        for t in q_tokens:
-            if t in tf:
-                matched.append(t)
-                denom = tf[t] * (k1 + 1) / (tf[t] + k1 * (1 - b + b * len(d) / max(avgdl, 1)))
-                score += idf[t] * denom
+        score, matched = bm25_doc_score(q_tokens, d, df, N, avgdl, k1, b)
+        if score <= 0:
+            continue
         fm = candidates[i][2]
         status = str(fm.get("status", "active")).lower()
         if status == "active":
@@ -916,9 +949,9 @@ def bm25_search(query: str, candidates: List[Tuple[Path, str, Dict[str, Any]]],
             scored.append((score, i, matched))
     scored.sort(key=lambda x: -x[0])
     top = scored[: min(limit * 4, len(scored))]
-    min_score = float(cfg.get("retrieval", {}).get("min_score", 0.5))
+    min_score = float(r_cfg.get("min_score", 0.5))
     top = [x for x in top if x[0] >= min_score]
-    lam = float(cfg.get("retrieval", {}).get("mmr_lambda", 0.5))
+    lam = float(r_cfg.get("mmr_lambda", 0.5))
     selected = mmr_rerank(top, docs_tok, lam, limit)
     out = []
     for score, i, matched in selected:

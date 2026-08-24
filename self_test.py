@@ -55,6 +55,16 @@ def main():
   run([sys.executable,str(HERE/'install.py'),str(r3),'--share-tools'],HERE,env=env)
   st=run(['git','status','--short'],r3,env=env).stdout
   need('INTERNAL_RAG/' not in st,'memory visible in shared mode'); need('.agents/' in st or '.opencode/' in st,'tools not visible in shared mode')
+
+  # Sparse retrieval smoke test
+  run([sys.executable,str(HERE/'install.py'),str(r3)],HERE,env=env)
+  cli3=r3/'.agents/skills/internal-rag/irag.py'
+  run([sys.executable,str(cli3),'remember','--type','decision','--title','Use Postgres','--body','Use Postgres for database','--tags','db,postgres','--force'],r3,env=env)
+  run([sys.executable,str(cli3),'remember','--type','gotcha','--title','Pool timeout','--body','asyncpg pool exhausts under load','--tags','db,async','--force'],r3,env=env)
+  sr=run([sys.executable,str(cli3),'search','--query','asyncpg pool','--limit','5'],r3,env=env)
+  need('pool' in sr.stdout.lower(),'sparse retrieval smoke: pool not found')
+  need('asyncpg' in sr.stdout.lower(),'sparse retrieval smoke: asyncpg not found')
+
   print('\nSELF TEST PASS')
   print('- local-only install')
   print('- recovery + guard')
@@ -62,6 +72,7 @@ def main():
   print('- clean uninstall')
   print('- existing AGENTS preservation')
   print('- shared-tools mode')
+  print('- sparse retrieval smoke')
  finally:
   shutil.rmtree(tmp,ignore_errors=True)
 if __name__=='__main__': main()

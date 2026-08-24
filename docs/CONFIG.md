@@ -11,6 +11,8 @@ retrieval:
   min_score: 0.5             # BM25 score threshold
   embeddings: auto           # auto | on | off
   embeddings_model: all-MiniLM-L6-v2   # sentence-transformers model
+  bm25_k1: 1.5               # BM25 term frequency saturation (1.2-2.0 typical)
+  bm25_b: 0.75               # BM25 length normalization (0.0-1.0)
 tokens:
   context_budget: 4000       # estimated token budget in context
   warn_ratio: 0.8            # warning threshold (in JSON output)
