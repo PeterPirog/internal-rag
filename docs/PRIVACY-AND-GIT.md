@@ -41,6 +41,18 @@ It never prints the values of found secrets.
 
 Deleting files does not remove data from Git history. Use a separate history cleanup tool such as `git filter-repo`.
 
+## Usage tracking data
+
+Usage telemetry (`last_accessed`, `access_count`) is stored **locally only** in the
+`usage` table of `.index.sqlite3` (covered by the `INTERNAL_RAG/` exclude). Search is
+read-only with respect to Markdown: it never rewrites memory files with access stamps.
+
+`migrate-usage --apply --strip` writes timestamped backups to `INTERNAL_RAG/usage-backups/`
+(also under the excluded `INTERNAL_RAG/` tree) before removing `last_accessed` from frontmatter.
+
+No usage data is ever transmitted, committed, or exported by default; `exports/` JSON
+contains memory content only if you explicitly run `export`.
+
 ## Should I add anything to the project `.gitignore`?
 
 By default: **no**.

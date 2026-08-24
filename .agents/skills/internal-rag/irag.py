@@ -61,6 +61,7 @@ DEFAULT_CONFIG = {
     "tokens": {"context_budget": 4000, "warn_ratio": 0.8},
     "checkpoints": {"auto_archive_sessions": True, "max_task_stack": 16, "max_age_minutes": 0},
     "privacy": {"scan_on_checkpoint": False},
+    "usage": {"stale_days": 30},
 }
 
 
@@ -2326,8 +2327,13 @@ def _open_sqlite_index() -> Optional[Any]:
     """Open the SQLite FTS5 index. Returns IndexDB or None."""
     try:
         import importlib.util as _ilu
-        spec = _ilu.spec_from_file_location(
-            "irag_index", str(ROOT / ".agents" / "skills" / "internal-rag" / "irag_index.py"))
+        idx_path = ROOT / ".agents" / "skills" / "internal-rag" / "irag_index.py"
+        if not idx_path.exists():
+            # Fallback: resolve next to this file (test/fixture scenarios)
+            idx_path = Path(__file__).resolve().parent / "irag_index.py"
+        if not idx_path.exists():
+            return None
+        spec = _ilu.spec_from_file_location("irag_index", str(idx_path))
         if spec is None or spec.loader is None:
             return None
         mod = _ilu.module_from_spec(spec)
@@ -2355,10 +2361,12 @@ def index_cmd(args) -> int:
         cands = [(p, p.read_text(encoding="utf-8", errors="replace"),
                   parse_fm(p.read_text(encoding="utf-8", errors="replace")))
                  for p in memory_files()]
-        result = idx.rebuild(cands)
+        reset_usage = bool(getattr(args, "reset_usage", False))
+        result = idx.rebuild(cands, reset_usage=reset_usage)
         idx.close()
         fts = "yes" if result["fts5"] else "no"
-        print(f"SQLite index rebuilt: {result['indexed']} documents, FTS5={fts}")
+        usage_note = "usage RESET" if reset_usage else "usage preserved"
+        print(f"SQLite index rebuilt: {result['indexed']} documents, FTS5={fts}, {usage_note}")
         return 0
     if getattr(args, "status", False):
         idx = _open_sqlite_index()
@@ -2697,7 +2705,14 @@ def doctor(args) -> int:
         if idx2 is not None:
             total_mem = 0
             never_accessed_db = 0
+            stale_accessed = 0
             top_accessed: List[Tuple[str, int]] = []
+            cfg = load_config()
+            stale_days = int(cfg.get("usage", {}).get("stale_days", 30))
+            try:
+                cutoff_stale = dt.date.today() - dt.timedelta(days=stale_days)
+            except Exception:
+                cutoff_stale = None
             for p in memory_files():
                 total_mem += 1
                 fm = parse_fm(p.read_text(encoding="utf-8", errors="replace"))
@@ -2707,14 +2722,25 @@ def doctor(args) -> int:
                     never_accessed_db += 1
                 elif row["access_count"] > 0:
                     top_accessed.append((mid, row["access_count"]))
+                    if cutoff_stale and row["last_accessed"]:
+                        try:
+                            la = dt.date.fromisoformat(str(row["last_accessed"])[:10])
+                            if la < cutoff_stale:
+                                stale_accessed += 1
+                        except Exception:
+                            pass
             if total_mem > 0 and never_accessed_db > 0:
                 issues.append({"severity": "info", "issue": f"memories never accessed: {never_accessed_db}/{total_mem} (candidates for archive)"})
+            if stale_accessed > 0:
+                issues.append({"severity": "info", "issue": f"stale usage: {stale_accessed} memories not accessed for {stale_days}+ days"})
             top_accessed.sort(key=lambda x: -x[1])
             for mid, cnt in top_accessed[:3]:
                 issues.append({"severity": "info", "issue": f"top accessed: {mid} ({cnt}x)"})
             idx2.close()
+        else:
+            issues.append({"severity": "info", "issue": "usage: no usage store available (not an error; search remains read-only)"})
     except Exception:
-        pass
+        issues.append({"severity": "info", "issue": "usage: not available (not an error)"})
     if args.json:
         print(json.dumps({"issues": issues, "version": VERSION,
                           "python": py_ver, "root": str(ROOT)}, indent=2, ensure_ascii=False))
@@ -2732,7 +2758,9 @@ def doctor(args) -> int:
 
 def migrate_usage_cmd(args) -> int:
     """Migrate last_accessed from Markdown frontmatter to SQLite usage table.
-    --dry-run: report what would change. --apply: write to DB, optionally strip from Markdown."""
+    --dry-run: report what would change. --apply: write to DB, optionally strip from Markdown.
+    --apply creates a timestamped backup of every stripped file under INTERNAL_RAG/usage-backups/
+    before modifying, and reports all changed files."""
     dry_run = getattr(args, "dry_run", False)
     apply_changes = getattr(args, "apply", False)
     strip_markdown = getattr(args, "strip", False)
@@ -2746,6 +2774,7 @@ def migrate_usage_cmd(args) -> int:
     changed_files: List[str] = []
     imported = 0
     stripped = 0
+    backups: List[str] = []
     for p in memory_files():
         text = p.read_text(encoding="utf-8", errors="replace")
         fm = parse_fm(text)
@@ -2764,24 +2793,48 @@ def migrate_usage_cmd(args) -> int:
         imported += 1
         changed_files.append(str(p.relative_to(ROOT)))
         if apply_changes and idx is not None:
-            idx.record_access(mid)
+            # Import with the historical date (don't fake a fresh access)
+            c = idx.conn
+            c.execute("BEGIN")
+            try:
+                prev = c.execute("SELECT access_count FROM usage WHERE memory_id=?", (mid,)).fetchone()
+                if prev:
+                    c.execute("UPDATE usage SET last_accessed=? WHERE last_accessed IS NULL OR last_accessed='' WHERE memory_id=?",
+                              (fm_last, mid))
+                else:
+                    c.execute("INSERT OR REPLACE INTO usage (memory_id, last_accessed, access_count) VALUES (?,?,?)",
+                              (mid, fm_last, 0 if prev is None else prev["access_count"]))
+                c.execute("COMMIT")
+            except Exception:
+                c.execute("ROLLBACK")
         if apply_changes and strip_markdown:
-            # Remove last_accessed from frontmatter
-            fm.pop("last_accessed", None)
-            body_start = text.find("\n---", 4)
-            body = text[body_start + 4:].lstrip("\n") if body_start >= 0 else text
-            p.write_text(write_fm(fm) + "\n" + body, encoding="utf-8")
-            stripped += 1
+            # Backup before stripping (atomic-ish: write backup first, then rewrite)
+            try:
+                bak_dir = RAG / "usage-backups"
+                stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+                bak_dir.mkdir(parents=True, exist_ok=True)
+                bak = bak_dir / f"{stamp}-{p.name}"
+                bak.write_bytes(p.read_bytes())
+                backups.append(str(bak.relative_to(ROOT)))
+                fm.pop("last_accessed", None)
+                body_start = text.find("\n---", 4)
+                body = text[body_start + 4:].lstrip("\n") if body_start >= 0 else text
+                p.write_text(write_fm(fm) + "\n" + body, encoding="utf-8")
+                stripped += 1
+            except Exception as e:
+                print(f"  WARNING: failed to strip {p} ({e}); left unchanged", file=sys.stderr)
     if idx is not None:
         idx.close()
     if getattr(args, "json", False):
         print(json.dumps({"dry_run": dry_run, "imported": imported, "stripped": stripped,
-                          "changed_files": changed_files}, indent=2, ensure_ascii=False))
+                          "changed_files": changed_files, "backups": backups}, indent=2, ensure_ascii=False))
         return 0
     action = "DRY RUN" if dry_run else "APPLIED"
     print(f"migrate-usage {action}: {imported} entries to import, {stripped} stripped from Markdown")
     for f in changed_files:
         print(f"  {f}")
+    for b in backups:
+        print(f"  backup: {b}")
     return 0
 
 
@@ -3166,6 +3219,7 @@ def main() -> None:
     sub.add_parser("init")
     p = sub.add_parser("index")
     p.add_argument("--rebuild", action="store_true", help="Rebuild the SQLite index from Markdown.")
+    p.add_argument("--reset-usage", action="store_true", help="Also reset the usage table during rebuild (explicit opt-in).")
     p.add_argument("--status", action="store_true", help="Show SQLite index status.")
     p.add_argument("--vacuum", action="store_true", help="VACUUM the database and clean stale embeddings.")
     p.add_argument("--embed-missing", action="store_true", help="Show missing/stale embeddings for the configured model.")

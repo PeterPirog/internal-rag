@@ -141,13 +141,16 @@ class TestChunkLevelRetrieval(unittest.TestCase):
             cands.append((p, text, fm))
         original_root = irag.ROOT
         original_rag = irag.RAG
+        original_open = irag._open_sqlite_index
         irag.ROOT = FIXTURES_DIR.parent
         irag.RAG = FIXTURES_DIR
+        irag._open_sqlite_index = lambda: None  # hermetic: no index artifact in fixtures
         try:
             results = irag._search_with_cfg(query, limit, cfg)
         finally:
             irag.ROOT = original_root
             irag.RAG = original_rag
+            irag._open_sqlite_index = original_open
         return results
 
     def _ids(self, results) -> List[str]:
@@ -255,8 +258,10 @@ class TestExplainChunkFields(unittest.TestCase):
             cands.append((p, text, fm))
         original_root = irag.ROOT
         original_rag = irag.RAG
+        original_open = irag._open_sqlite_index
         irag.ROOT = FIXTURES_DIR.parent
         irag.RAG = FIXTURES_DIR
+        irag._open_sqlite_index = lambda: None  # hermetic: no index artifact in fixtures
         try:
             results = irag._search_with_cfg("postgres", 5, cfg, explain=True)
             self.assertTrue(len(results) > 0)
@@ -269,6 +274,7 @@ class TestExplainChunkFields(unittest.TestCase):
         finally:
             irag.ROOT = original_root
             irag.RAG = original_rag
+            irag._open_sqlite_index = original_open
 
 
 if __name__ == "__main__":

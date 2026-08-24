@@ -14,7 +14,14 @@ Section-aware chunking, read-only search, SimHash dedup, multilingual profiles, 
 ### Read-only search / migrate-usage (task 6)
 - `_mark_accessed_db()` uses SQLite usage table — search/context no longer mutate Markdown.
 - `migrate-usage --dry-run/--apply [--strip] [--json]` — migrate frontmatter last_accessed to DB.
-- doctor: never-accessed, top-accessed from SQLite usage table.
+  - `--apply` imports the historical date (does not fake a fresh access).
+  - `--strip` backs up each stripped file to `INTERNAL_RAG/usage-backups/` before rewriting, and reports all changed files + backups.
+- doctor: never-accessed, stale (config `usage.stale_days`, default 30), top-accessed from SQLite usage table. Missing usage store is reported as info, never an error.
+- `index --rebuild` preserves usage rows by default; add `--reset-usage` to explicitly reset them.
+- Incremental sync/upsert preserves existing usage rows (no reset on content update).
+- `content_hash` excludes `last_accessed`/`access_count` — usage never invalidates embeddings.
+- `access_count` does not influence ranking (no popularity bias without benchmark).
+- Tests: search leaves mtime/hash of Markdown unchanged; usage count grows in DB; dry-run/apply/strip + backup; search works with DB unavailable; rebuild/sync preserve usage.
 
 ### SimHash deduplication (task 7)
 - `canonical_memory_text()`, exact fingerprint (SHA-256), 64-bit SimHash (stdlib).

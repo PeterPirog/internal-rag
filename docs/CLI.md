@@ -64,8 +64,15 @@ List memories by created date (newest first).
 ### `history [--json]`
 List checkpoint history (reason, at, head, fingerprint prefix).
 
-### `index [--rebuild] [--status] [--vacuum] [--embed-missing] [--json]`
-Rebuild `INDEX.md` (default). `--rebuild` also rebuilds the SQLite FTS5 index from Markdown. `--status` shows SQLite version, FTS5 availability, schema version, indexed count, stale/missing. `--vacuum` reclaims space and cleans stale embeddings. `--embed-missing` shows missing/stale embeddings for the configured model.
+### `index [--rebuild] [--reset-usage] [--status] [--vacuum] [--embed-missing] [--json]`
+Rebuild `INDEX.md` (default). `--rebuild` also rebuilds the SQLite FTS5 index from Markdown. Usage rows are **preserved** across rebuilds by default; pass `--reset-usage` to explicitly reset them. `--status` shows SQLite version, FTS5 availability, schema version, indexed count, stale/missing. `--vacuum` reclaims space and cleans stale embeddings. `--embed-missing` shows missing/stale embeddings for the configured model.
+
+### `migrate-usage --dry-run | --apply [--strip] [--json]`
+Migrate `last_accessed` from Markdown frontmatter to the SQLite usage store.
+- `--dry-run` — report entries that would be imported (no writes).
+- `--apply` — import the historical date into the usage table (does not fake a fresh access).
+- `--strip` — also remove `last_accessed` from Markdown; each stripped file is first backed up to `INTERNAL_RAG/usage-backups/`, and all changed files/backups are reported.
+- `--json` — machine-readable report.
 
 ### `validate`
 Validate all memory frontmatter (required fields, allowed types/status) and check evidence paths still exist. Exit 1 on errors, 0 on success (warnings do not fail).

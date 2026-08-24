@@ -610,13 +610,25 @@ class IndexDB:
     # ----------------------- CRUD -----------------------
 
     def rebuild(self, candidates: List[Tuple[Path, str, Dict[str, Any]]],
-                chunking_cfg: Optional[Dict[str, Any]] = None) -> Dict[str, int]:
-        """Full rebuild: drop and recreate all data from Markdown files."""
+                chunking_cfg: Optional[Dict[str, Any]] = None,
+                reset_usage: bool = False) -> Dict[str, int]:
+        """Full rebuild: drop and recreate all data from Markdown files.
+        Preserves usage rows by default (reset_usage=False)."""
         c = self.conn
+        # Save usage data before rebuild if not resetting
+        saved_usage: Dict[str, Tuple[Optional[str], int]] = {}
+        if not reset_usage:
+            try:
+                rows = c.execute("SELECT memory_id, last_accessed, access_count FROM usage").fetchall()
+                for row in rows:
+                    saved_usage[row["memory_id"]] = (row["last_accessed"], row["access_count"])
+            except Exception:
+                pass
         c.execute("BEGIN")
         try:
             c.execute("DELETE FROM chunks")
             c.execute("DELETE FROM documents")
+            # Clear usage (always, to unblock re-seed from frontmatter; preserved in saved_usage)
             c.execute("DELETE FROM usage")
             if self.fts5_available():
                 c.execute("DELETE FROM fts_memories")
@@ -624,11 +636,21 @@ class IndexDB:
             for p, text, fm in candidates:
                 self._upsert_document(p, text, fm, in_txn=True, chunking_cfg=chunking_cfg)
                 added += 1
+            # Restore usage rows for documents that still exist (FK constraint)
+            if not reset_usage:
+                cur = c.execute("SELECT memory_id FROM documents")
+                kept_ids = {r["memory_id"] for r in cur.fetchall()}
+                for mid, (last_acc, acc_cnt) in saved_usage.items():
+                    if mid in kept_ids:
+                        c.execute(
+                            "INSERT OR REPLACE INTO usage (memory_id, last_accessed, access_count) VALUES (?,?,?)",
+                            (mid, last_acc, acc_cnt)
+                        )
             c.execute("COMMIT")
         except Exception:
             c.execute("ROLLBACK")
             raise
-        return {"indexed": added, "fts5": self.fts5_available()}
+        return {"indexed": added, "fts5": self.fts5_available(), "usage_preserved": not reset_usage}
 
     def sync_incremental(self, candidates: List[Tuple[Path, str, Dict[str, Any]]],
                          chunking_cfg: Optional[Dict[str, Any]] = None) -> Dict[str, int]:
@@ -697,7 +719,10 @@ class IndexDB:
         created = str(fm.get("created", ""))
         updated_val = str(fm.get("updated", ""))
         verified = str(fm.get("verified", ""))
-        # Delete existing
+        # Delete existing (preserve usage row — restore after re-insert)
+        prev_usage = c.execute(
+            "SELECT last_accessed, access_count FROM usage WHERE memory_id=?",
+            (mem_id,)).fetchone()
         self._delete_document(mem_id, in_txn=True)
         # Insert document
         c.execute("""
@@ -713,9 +738,13 @@ class IndexDB:
                 INSERT INTO chunks (chunk_id, memory_id, ordinal, section, section_slug, content_hash, text)
                 VALUES (?,?,?,?,?,?,?)
             """, (chunk_id, mem_id, ordinal, section_slug, section_slug, chunk_chash, chunk_text))
-        # Insert usage if not exists
-        c.execute("INSERT OR IGNORE INTO usage (memory_id, last_accessed, access_count) VALUES (?,?,0)",
-                  (mem_id, str(fm.get("last_accessed", ""))))
+        # Restore / seed usage (previous value wins over frontmatter)
+        if prev_usage is not None:
+            c.execute("INSERT OR REPLACE INTO usage (memory_id, last_accessed, access_count) VALUES (?,?,?)",
+                      (mem_id, prev_usage["last_accessed"], prev_usage["access_count"]))
+        else:
+            c.execute("INSERT OR IGNORE INTO usage (memory_id, last_accessed, access_count) VALUES (?,?,0)",
+                      (mem_id, str(fm.get("last_accessed", ""))))
         # FTS5
         if self.fts5_available():
             c.execute("INSERT INTO fts_memories (memory_id, title, tags_text, path, body) VALUES (?,?,?,?,?)",

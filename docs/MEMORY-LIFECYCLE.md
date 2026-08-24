@@ -35,6 +35,21 @@ The `context` packet groups results:
 - **Lessons & pitfalls** (gotchas, failures) — apply to avoid repeating mistakes.
 - **Unverified hypotheses** — treat as tentative, verify before acting.
 
+`access_count` does **not** influence ranking (no popularity bias without a benchmark).
+
+## Usage tracking (read-only)
+
+Search/context are **logically read-only** against durable memory content:
+- `last_accessed` / `access_count` live in the SQLite **usage store** (`.index.sqlite3`, `usage` table), never written back to Markdown during search.
+- `content_hash` excludes usage fields, so usage tracking never invalidates embeddings.
+- Missing usage store is not an error — search degrades to sparse-only and still succeeds.
+
+Migration / housekeeping:
+- `migrate-usage --dry-run` — report frontmatter `last_accessed` that would be imported.
+- `migrate-usage --apply [--strip] [--json]` — import to DB; `--strip` removes the field from Markdown after creating a timestamped backup in `INTERNAL_RAG/usage-backups/`.
+- `index --rebuild` preserves usage; `index --rebuild --reset-usage` explicitly resets it.
+- `doctor` reports never-accessed and stale (config `usage.stale_days`, default 30) counts, plus top-accessed.
+
 ## CRUD
 
 - `remember` — create.
