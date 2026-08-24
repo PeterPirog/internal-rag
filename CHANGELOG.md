@@ -49,13 +49,16 @@ Section-aware chunking, read-only search, SimHash dedup, multilingual profiles, 
   - PL stopwords: PL group R@1 62%→69%, MRR 0.690→0.721 → kept enabled by default.
 - `pack.py --with-embeddings --profile english-fast|multilingual` (or `--model` to pin an explicit model).
 
-### Temporal metadata + consolidate (task 9)
-- Frontmatter: `schema:2`, `valid_from`, `valid_to`, `confidence`, `supersedes`, `derived_from`.
-- `supersede`: sets `valid_to`, `superseded_by`; new entry gets `supersedes`.
-- `timeline`: sorts by effective validity (valid_from/created).
-- `search --at YYYY-MM-DD`: filter memories valid at date.
-- `consolidate --dry-run --json`: duplicates, superseded, archived, never-accessed, old snapshots, conflicts.
-- Schema 1 memories still work (backward compatible).
+### Temporal, safe knowledge lifecycle (task 9)
+- Optional schema-2 lifecycle frontmatter fields (all backward-compatible — schema-1 memories work unchanged): `confidence: high|medium|low`, `valid_from`, `valid_to`, `supersedes: []`, `derived_from: []`.
+- `remember`/`remember-batch`/`update` accept and write the lifecycle fields; `validate` rejects invalid `confidence` values and malformed dates (`valid_from`/`valid_to`/`created`).
+- `supersede <ref> --by <new>` (never deletes history): sets `status: superseded`, closes the validity window (`valid_to`, default today or `--valid-to`), records `superseded_by`, and adds `supersedes: [old-id]` to the replacement. `--force` records the `--by` reference even if the replacement does not exist yet.
+- `timeline` sorts by **effective validity** (`valid_from` else `created`), oldest first — not by filename or `created` alone.
+- `search --at YYYY-MM-DD` (temporal): keeps superseded memories whose window covered the date (history queries), excludes memories not yet valid; post-filter enforces `valid_from ≤ D ≤ valid_to`; malformed dates are ignored, no error. `_policy_boost` lifts date-valid superseded memories (+0.5) instead of penalizing them (-4.0).
+- `context` defaults to current active memory but adds a read-only **HISTORY & CONFLICTS** section (superseded/invalid/archived related to the task, with `superseded_by`, validity window, cross-link to the replacement when both are in the result set); `search --json` exposes the same as a `history` block per affected result.
+- `consolidate --dry-run [--json]` — deterministic, read-only report (never deletes, never rewrites, no LLM summarization): exact/near duplicates, superseded entries (with `superseded_by`/`valid_to`), archived entries, never-accessed old entries (`--never-accessed-days`, default 90), old session snapshots (`--snapshot-age-days`, default 30), and potentially conflicting active memories (same type + overlapping scope + ≥40% body-token overlap). `--json` also emits a `plan` array of recommended actions for an OpenCode agent to evaluate — `consolidate` itself never executes them.
+- `update` never removes history (frontmatter changes + dated `## Update` appends only).
+- Tests: `tests/test_lifecycle.py` (10 tests): A→B preserves A historically; `--at` before the change finds A / after prefers B; unknown dates do not raise; schema-1 import still works; `consolidate --dry-run` is deterministic and read-only (identical JSON across runs, zero file mutations); timeline sorts by effective validity; schema-2 fields round-trip through `remember`; `validate` rejects bad confidence/dates.
 
 ## 1.3.0 — 2026-08-24
 

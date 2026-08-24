@@ -584,6 +584,8 @@ def context(args) -> int:
         kept.append((score, p, fm, sn))
         used += sn_t
     mem_tokens = used - ws_tokens
+    # History & superseded conflicts for the task (read-only; defaults on)
+    history = _temporal_explain(task, kept)
     # G6: recent git log
     git_log = ""
     try:
@@ -607,6 +609,7 @@ def context(args) -> int:
             "memory_tokens": mem_tokens,
             "context_budget": budget,
             "memories_dropped_for_budget": dropped,
+            "history_conflicts": history,
             "recent_commits": [l for l in git_log.splitlines() if l.strip()],
             "next": "RECOVER -> CHECKPOINT -> GUARD OK -> continue." if recovery
                     else "Checkpoint before first code edit, then continue.",
@@ -652,6 +655,13 @@ def context(args) -> int:
             print(f"   {snip}")
     if dropped:
         print(f"\n({dropped} memory result(s) dropped to fit token budget)")
+    if history:
+        print("\n## HISTORY & CONFLICTS (superseded/invalid/archived — keep as history, do not act on them directly)")
+        for h in history:
+            vt = f" valid_to={h['valid_to']}" if h.get("valid_to") else ""
+            print(f"- {h['path']} [{h['status']}]{vt} ({h['why']})")
+            if h.get("conflict_with"):
+                print(f"  replacement in this result set: {h['conflict_with']}")
     print("\n## NEXT")
     print("RECOVER -> CHECKPOINT -> GUARD OK -> continue." if recovery
           else "Checkpoint before first code edit, then continue.")
@@ -1187,8 +1197,33 @@ def rrf_fusion(sparse_ranked: List[Tuple[float, int, List[str]]],
     return fused
 
 
-def _policy_boost(fm: Dict[str, Any]) -> float:
-    """Status + type + recency boost applied after fusion."""
+def _valid_at_date(fm: Dict[str, Any], at_date: str) -> bool:
+    """True if the memory's validity window covers at_date (or window is open)."""
+    try:
+        target = dt.date.fromisoformat(at_date)
+    except Exception:
+        return True
+    vf = str(fm.get("valid_from") or fm.get("created") or "")
+    vt = str(fm.get("valid_to") or "")
+    try:
+        d_vf = dt.date.fromisoformat(vf[:10])
+    except Exception:
+        d_vf = None
+    try:
+        d_vt = dt.date.fromisoformat(vt[:10])
+    except Exception:
+        d_vt = None
+    if d_vf and d_vf > target:
+        return False
+    if d_vt and d_vt < target:
+        return False
+    return True
+
+
+def _policy_boost(fm: Dict[str, Any], at_date: Optional[str] = None) -> float:
+    """Status + type + recency boost applied after fusion.
+    With at_date set (search --at), superseded memories valid at that date
+    lose their penalty so history is retrievable; invalid/archived stay excluded."""
     boost = 0.0
     status = str(fm.get("status", "active")).lower()
     if status == "active":
@@ -1196,7 +1231,10 @@ def _policy_boost(fm: Dict[str, Any]) -> float:
     elif status == "tentative":
         boost += 0.6
     elif status == "superseded":
-        boost -= 4.0
+        if at_date and _valid_at_date(fm, at_date):
+            boost += 0.5  # historically valid at this date — keep it retrievable
+        else:
+            boost -= 4.0
     elif status in ("invalid", "archived"):
         boost -= 100.0
     mtype = str(fm.get("type", "")).lower()
@@ -1291,10 +1329,12 @@ def _mark_accessed(paths: List[Path]) -> None:
 
 
 def search(query: str, limit: int = 8, types: Optional[List[str]] = None,
-           statuses: Optional[List[str]] = None,
-           explain: bool = False
-           ) -> List[Tuple[float, Path, Dict[str, Any], str]]:
-    return _search_with_cfg(query, limit, load_config(), types, statuses, explain=explain)
+            statuses: Optional[List[str]] = None,
+            explain: bool = False,
+            at_date: Optional[str] = None
+            ) -> List[Tuple[float, Path, Dict[str, Any], str]]:
+    return _search_with_cfg(query, limit, load_config(), types, statuses,
+                            explain=explain, at_date=at_date)
 
 
 def _load_chunks_for_candidates(
@@ -1376,10 +1416,11 @@ def _merge_chunks_by_memory(
     # Apply policy boost
     r_cfg = cfg.get("retrieval", {})
     min_score = float(r_cfg.get("min_score", 0.5))
+    at_date = str(cfg.get("_at_date") or "") or None
     boosted: List[Tuple[float, int, Dict[str, Any]]] = []
     for cand_idx, (best_score, chunk_id, section_slug, chunk_text, expl) in by_memory.items():
         fm = cands[cand_idx][2]
-        pb = _policy_boost(fm)
+        pb = _policy_boost(fm, at_date=at_date)
         final_score = best_score + pb
         if final_score >= min_score:
             expl["policy_boost"] = round(pb, 4)
@@ -1438,12 +1479,17 @@ def _merge_chunks_by_memory(
 
 
 def _search_with_cfg(query: str, limit: int, cfg: Dict[str, Any],
-                     types: Optional[List[str]] = None,
-                     statuses: Optional[List[str]] = None,
-                     explain: bool = False
-                     ) -> List[Tuple[float, Path, Dict[str, Any], str]]:
+                      types: Optional[List[str]] = None,
+                      statuses: Optional[List[str]] = None,
+                      explain: bool = False,
+                      at_date: Optional[str] = None
+                      ) -> List[Tuple[float, Path, Dict[str, Any], str]]:
     if limit <= 0:
         limit = int(cfg.get("retrieval", {}).get("limit", 8))
+    # Internal channel for the temporal-aware policy boost
+    if at_date:
+        cfg = dict(cfg)
+        cfg["_at_date"] = at_date
     r_cfg = cfg.get("retrieval", {})
     mode = str(r_cfg.get("mode", "hybrid")).lower()
     emb_setting = str(r_cfg.get("embeddings", "auto")).lower()
@@ -1452,12 +1498,16 @@ def _search_with_cfg(query: str, limit: int, cfg: Dict[str, Any],
     chunking_cfg = r_cfg.get("chunking", {})
     set_pl_stopwords(bool(r_cfg.get("pl_stopwords", False)))
     # Filter candidates at memory level (type/status filters before retrieval)
+    # With at_date, superseded memories that were valid at that date are kept
+    # so history is retrievable via `search --at YYYY-MM-DD`.
     cands: List[Tuple[Path, str, Dict[str, Any]]] = []
     for p in memory_files():
         text = p.read_text(encoding="utf-8", errors="replace")
         fm = parse_fm(text)
         status = str(fm.get("status", "active")).lower()
         if status in {"invalid", "archived"}:
+            continue
+        if status == "superseded" and at_date and not _valid_at_date(fm, at_date):
             continue
         if types:
             mt = str(fm.get("type", "")).lower()
@@ -1591,7 +1641,7 @@ def consolidate_cmd(args) -> int:
     """consolidate --dry-run --json: deterministic read-only report.
     Reports: duplicates, superseded, archived, never-accessed, old snapshots, conflicts."""
     report: Dict[str, Any] = {"dry_run": True, "issues": []}
-    all_files = memory_files()
+    all_files = all_memory_files()
     # Collect all memories with metadata
     memories: List[Dict[str, Any]] = []
     for p in all_files:
@@ -1634,15 +1684,18 @@ def consolidate_cmd(args) -> int:
     superseded = [m for m in memories if m["status"] == "superseded"]
     if superseded:
         report["issues"].append({"category": "superseded", "count": len(superseded),
-                                 "items": [{"path": m["path"], "superseded_by": m["fm"].get("superseded_by", "")}
-                                          for m in superseded]})
+                                  "items": [{"path": m["path"],
+                                             "superseded_by": str(m["fm"].get("superseded_by", "")),
+                                             "valid_to": str(m["fm"].get("valid_to", ""))}
+                                           for m in superseded]})
     # 3. Archived entries
     archived = [m for m in memories if "archive" in Path(m["path"]).parts]
     if archived:
         report["issues"].append({"category": "archived", "count": len(archived),
                                  "items": [{"path": m["path"]} for m in archived]})
-    # 4. Never-accessed old entries (>90 days old, never accessed)
-    cutoff = (dt.date.today() - dt.timedelta(days=90)).isoformat()
+    # 4. Never-accessed old entries (> threshold days old, never accessed)
+    threshold_days = int(getattr(args, "never_accessed_days", 90) or 90)
+    cutoff = (dt.date.today() - dt.timedelta(days=threshold_days)).isoformat()
     never_accessed = []
     for m in memories:
         created = m["created"][:10] if m["created"] else ""
@@ -1652,6 +1705,7 @@ def consolidate_cmd(args) -> int:
         report["issues"].append({"category": "never_accessed_old", "count": len(never_accessed),
                                  "items": never_accessed})
     # 5. Session snapshots older than threshold
+    snap_threshold_days = int(getattr(args, "snapshot_age_days", 30) or 30)
     snap_dir = RAG / "sessions" / ".snapshots"
     old_snaps: List[str] = []
     if snap_dir.exists():
@@ -1659,31 +1713,74 @@ def consolidate_cmd(args) -> int:
             try:
                 mtime = snap.stat().st_mtime
                 age_days = (time.time() - mtime) / 86400
-                if age_days > 30:
+                if age_days > snap_threshold_days:
                     old_snaps.append(str(snap.relative_to(ROOT)))
             except Exception:
                 pass
     if old_snaps:
         report["issues"].append({"category": "old_snapshots", "count": len(old_snaps), "items": old_snaps})
-    # 6. Potentially conflicting active memories (same type+scope)
-    conflicts: List[Dict[str, str]] = []
-    active_by_scope: Dict[str, List[Dict[str, Any]]] = {}
-    for m in memories:
-        if m["status"] != "active":
-            continue
+    # 6. Potentially conflicting active memories (same type + overlapping scope
+    #    + significant body overlap). Deterministic: sorted scope keys, sorted
+    #    pairs, fixed Jaccard threshold.
+    conflicts: List[Dict[str, Any]] = []
+    active = [m for m in memories if m["status"] == "active"]
+    by_key: Dict[str, List[Dict[str, Any]]] = {}
+    for m in active:
         scope = m["fm"].get("scope", [])
         if isinstance(scope, str):
             scope = [scope] if scope else []
         if not isinstance(scope, list):
             scope = []
         for s in scope:
-            key = f"{m['type']}:{s}"
-            active_by_scope.setdefault(key, []).append(m)
-    for key, group in active_by_scope.items():
-        if len(group) > 1:
-            conflicts.append({"scope_key": key, "memories": [m["path"] for m in group]})
+            by_key.setdefault(f"{m['type']}:{s}", []).append(m)
+    for key in sorted(by_key):
+        group = by_key[key]
+        if len(group) < 2:
+            continue
+        group = sorted(group, key=lambda x: x["path"])
+        for i in range(len(group)):
+            for j in range(i + 1, len(group)):
+                a, b = group[i], group[j]
+                ba = set(tokenize(_extract_section(a["text"], "Knowledge")))
+                bb = set(tokenize(_extract_section(b["text"], "Knowledge")))
+                if not ba or not bb:
+                    continue
+                overlap = len(ba & bb) / len(ba | bb)
+                if overlap >= 0.4:
+                    conflicts.append({
+                        "scope_key": key,
+                        "a": a["path"], "b": b["path"],
+                        "body_overlap": round(overlap, 3),
+                        "recommendation": "Review pair: if factually incompatible, run `supersede <ref> --by <new>` "
+                                          "and re-check `search --at` for both dates.",
+                    })
     if conflicts:
         report["issues"].append({"category": "conflicting_active", "count": len(conflicts), "items": conflicts})
+    # Deterministic recommended plan for the agent (never executed by us)
+    plan = []
+    for issue in report["issues"]:
+        if issue["category"] == "duplicates":
+            plan.append({"action": "merge_or_supersede", "detail": f"{issue['count']} duplicate pair(s) — "
+                           f"use `supersede` for true updates, `forget` for true duplicates.",
+                         "references": [x for x in issue["items"] if "exact" in x][:50]})
+        elif issue["category"] == "superseded":
+            plan.append({"action": "verify_links", "detail": "superseded entries keep full history; "
+                           "ensure each has `superseded_by` pointing at a live memory.",
+                         "references": issue["items"][:50]})
+        elif issue["category"] == "archived":
+            plan.append({"action": "review_archive", "detail": "archived entries are never retrieved as active; "
+                           "use `clean --force` only when intentionally purging."})
+        elif issue["category"] == "never_accessed_old":
+            plan.append({"action": "review_stale", "detail": "old entries never accessed — candidates for "
+                           "`forget` (archive) or keeping as history."})
+        elif issue["category"] == "old_snapshots":
+            plan.append({"action": "review_snapshots", "detail": "session snapshots beyond threshold; safe to "
+                           "remove only if the session is closed."})
+        elif issue["category"] == "conflicting_active":
+            plan.append({"action": "resolve_conflicts", "detail": "active memories that may contradict each other — "
+                           "decide the current truth, then `supersede` the losing one.",
+                         "references": issue["items"][:50]})
+    report["plan"] = plan
     if getattr(args, "json", False):
         print(json.dumps(report, indent=2, ensure_ascii=False))
         return 0
@@ -1697,6 +1794,59 @@ def consolidate_cmd(args) -> int:
     if not report["issues"]:
         print("No issues found.")
     return 0
+
+
+def _temporal_explain(query: str,
+                      results: List[Tuple[float, Path, Dict[str, Any], str]]) -> List[Dict[str, Any]]:
+    """Explain (read-only) superseded/archived conflicts for a query.
+    - A result is a 'history conflict' when its replacement is ALSO a result,
+      when the result is superseded and the query mentions history words,
+      or when two results share a supersede link.
+    - Never mutates state. Deterministic (sorted by path, then valid_from).
+    """
+    hist_words = {"histor", "history", "earlier", "before", "used to", "used-to", "previously",
+                  "stary", "dawny", "dawniej", "wcze", "przed", "poprzedni", "poprzedzaj"}
+    q_tokens = set(tokenize(query))
+    q_lower = {t.lower() for t in q_tokens}
+    is_history = bool(q_lower & hist_words)
+    out: List[Dict[str, Any]] = []
+    for score, p, fm, sn in results:
+        status = str(fm.get("status", "")).lower()
+        sup_by = str(fm.get("superseded_by", ""))
+        if not sup_by and status not in ("superseded", "invalid", "archived"):
+            continue
+        reason = ""
+        if is_history:
+            reason = "query mentions history"
+        if sup_by:
+            reason = reason or f"superseded by {sup_by}"
+        if status == "invalid":
+            reason = reason or "marked invalid"
+        if status == "archived":
+            reason = reason or "archived (never active in retrieval)"
+        out.append({
+            "path": str(p.relative_to(ROOT)),
+            "status": status,
+            "superseded_by": sup_by,
+            "valid_from": str(fm.get("valid_from") or fm.get("created", "")),
+            "valid_to": str(fm.get("valid_to", "")),
+            "why": reason,
+            "recommendation": "Keep as history; do not re-activate. If the current fact changed again, "
+                              "run `supersede <this> --by <new>`.",
+        })
+    # Cross-link: flag pairs where one result's superseded_by is another result's id
+    id_by_path = {str(p.relative_to(ROOT)): str(fm.get("id", str(p))) for _, p, fm, _ in results}
+    for it in out:
+        sup_by = it.get("superseded_by")
+        if not sup_by:
+            continue
+        other_path = next((pp for pp, idv in id_by_path.items() if idv == sup_by), None)
+        if other_path:
+            it["conflict_with"] = other_path
+            it["recommendation"] = (it["recommendation"] +
+                                    f" Replacement memory is in this result set: {other_path}.")
+    out.sort(key=lambda x: (x["path"], x["valid_from"]))
+    return out
 
 
 def _matched_for(fm: Dict[str, Any], query: str = "") -> List[str]:
@@ -1826,6 +1976,7 @@ def remember(args) -> None:
 
     content = (
         "---\n"
+        "schema: 2\n"
         f"id: mem-{d}-{slugify(args.title)[:40]}\n"
         f"type: {args.type}\n"
         f"status: {status}\n"
@@ -1843,6 +1994,26 @@ def remember(args) -> None:
             content += "links: []\n"
     else:
         content += "links: []\n"
+    # schema-2 optional lifecycle fields (only written when supplied)
+    schema2 = []
+    if getattr(args, "confidence", None):
+        schema2.append(f"confidence: {args.confidence}")
+    if getattr(args, "valid_from", None):
+        schema2.append(f"valid_from: {args.valid_from}")
+    if getattr(args, "valid_to", None):
+        schema2.append(f"valid_to: {args.valid_to}")
+    sup = [x.strip() for x in (getattr(args, "supersedes", "") or "").split(",") if x.strip()]
+    der = [x.strip() for x in (getattr(args, "derived_from", "") or "").split(",") if x.strip()]
+    if sup:
+        schema2.append("supersedes:\n" + "".join(f"  - {x}\n" for x in sup))
+    else:
+        schema2.append("supersedes: []")
+    if der:
+        schema2.append("derived_from:\n" + "".join(f"  - {x}\n" for x in der))
+    else:
+        schema2.append("derived_from: []")
+    if schema2:
+        content += "".join(x if x.endswith("\n") else x + "\n" for x in schema2)
     content += (
         "---\n\n"
         f"# {args.title}\n\n"
@@ -1883,6 +2054,10 @@ def remember_batch(args) -> int:
             print(f"SKIP: invalid entry (needs type, title, body): {item.get('title', '?')}", file=sys.stderr)
             skipped += 1
             continue
+        def _join_list(v):
+            if isinstance(v, list):
+                return ",".join(str(x) for x in v if str(x).strip())
+            return str(v or "")
         class _BatchArgs:
             type = item.get("type", "knowledge")
             status = item.get("status", "active")
@@ -1893,6 +2068,11 @@ def remember_batch(args) -> int:
             body = item.get("body", "")
             consequence = item.get("consequence", "")
             links = item.get("links", "")
+            confidence = item.get("confidence")
+            valid_from = item.get("valid_from")
+            valid_to = item.get("valid_to")
+            supersedes = _join_list(item.get("supersedes", ""))
+            derived_from = _join_list(item.get("derived_from", ""))
             force = bool(getattr(args, "force", False)) or bool(item.get("force", False))
             allow_secret = False
             json = bool(getattr(args, "json", False))
@@ -2201,6 +2381,26 @@ def update_memory(args) -> int:
             tags = [tags]
         rm = {x.strip() for x in args.remove_tags.split(",")}
         fm["tags"] = [t for t in tags if t not in rm]
+    # schema-2 lifecycle fields (never deleted on update; history preserved)
+    if getattr(args, "confidence", None):
+        fm["confidence"] = args.confidence
+    if getattr(args, "valid_from", None) is not None:
+        if args.valid_from:
+            fm["valid_from"] = args.valid_from
+        else:
+            fm.pop("valid_from", None)
+    if getattr(args, "valid_to", None) is not None:
+        if args.valid_to:
+            fm["valid_to"] = args.valid_to
+        else:
+            fm.pop("valid_to", None)
+    if getattr(args, "supersedes", None) is not None:
+        xs = [x.strip() for x in args.supersedes.split(",") if x.strip()]
+        fm["supersedes"] = xs
+    # promote to schema-2 marker when lifecycle fields are touched
+    if any(getattr(args, k, None) is not None for k in ("confidence", "valid_from", "valid_to", "supersedes")):
+        if fm.get("schema") not in ("2", 2):
+            fm["schema"] = "2"
     fm["updated"] = today()
     body_start = text.find("---\n", 4)
     body = text[body_start + 4:] if body_start >= 0 else text
@@ -2216,39 +2416,65 @@ def update_memory(args) -> int:
 
 
 def supersede(args) -> int:
+    """Mark this memory superseded by a (preferred existing) replacement.
+    - status -> superseded
+    - valid_to -> today (if not already set)
+    - superseded_by -> id/path of the replacement (if provided)
+    - the replacement gains `supersedes: [old_id]` (if it exists)
+    History is never deleted."""
     p = find_memory_by_id_or_path(args.ref)
     if p is None:
         print(f"Memory not found: {args.ref}", file=sys.stderr)
         return 1
     text, fm = _read_memory(p)
+    old_id = str(fm.get("id", str(p)))
+    valid_to = str(getattr(args, "valid_to", "") or "") or today()
     fm["status"] = "superseded"
-    fm["superseded_by"] = args.by or "unspecified"
     fm["superseded_at"] = today()
-    fm["supersede_reason"] = args.reason or "unspecified"
-    fm["valid_to"] = today()
+    if not str(fm.get("valid_to") or ""):
+        fm["valid_to"] = valid_to
+    elif valid_to != today():
+        # explicit --valid-to overrides a previous valid_to
+        fm["valid_to"] = valid_to
     fm["updated"] = today()
-    body_start = text.find("---\n", 4)
-    body = text[body_start + 4:].lstrip("\n") if body_start >= 0 else text
-    p.write_text(write_fm(fm) + "\n" + body, encoding="utf-8")
-    # If --by references a new memory, add supersedes to it
+    if args.reason:
+        fm["supersede_reason"] = args.reason
+    # Resolve the replacement memory id, if provided
+    new_id = ""
+    new_p = None
     if args.by:
         new_p = find_memory_by_id_or_path(args.by)
         if new_p is not None:
-            new_text, new_fm = _read_memory(new_p)
-            supersedes = new_fm.get("supersedes", [])
-            if isinstance(supersedes, str):
-                supersedes = [supersedes] if supersedes else []
-            if not isinstance(supersedes, list):
-                supersedes = []
-            old_id = str(fm.get("id", str(p)))
-            if old_id not in supersedes:
-                supersedes.append(old_id)
-            new_fm["supersedes"] = supersedes
-            new_body_start = new_text.find("---\n", 4)
-            new_body = new_text[new_body_start + 4:].lstrip("\n") if new_body_start >= 0 else new_text
-            new_p.write_text(write_fm(new_fm) + "\n" + new_body, encoding="utf-8")
+            _, new_fm = _read_memory(new_p)
+            new_id = str(new_fm.get("id", args.by))
+        elif getattr(args, "force", False):
+            new_id = str(args.by)  # record the reference even if not resolvable
+    if new_id:
+        fm["superseded_by"] = new_id
+    else:
+        # keep a prior value if present; do not overwrite with junk
+        if not str(fm.get("superseded_by") or ""):
+            fm.pop("superseded_by", None)
+    body_start = text.find("---\n", 4)
+    body = text[body_start + 4:].lstrip("\n") if body_start >= 0 else text
+    p.write_text(write_fm(fm) + "\n" + body, encoding="utf-8")
+    # Link the replacement: supersedes -> [old_id]
+    if new_p is not None:
+        new_text, new_fm = _read_memory(new_p)
+        supersedes = new_fm.get("supersedes", [])
+        if isinstance(supersedes, str):
+            supersedes = [supersedes] if supersedes else []
+        if not isinstance(supersedes, list):
+            supersedes = []
+        if old_id not in supersedes:
+            supersedes.append(old_id)
+        new_fm["supersedes"] = supersedes
+        new_body_start = new_text.find("---\n", 4)
+        new_body = new_text[new_body_start + 4:].lstrip("\n") if new_body_start >= 0 else new_text
+        new_p.write_text(write_fm(new_fm) + "\n" + new_body, encoding="utf-8")
     rebuild_index()
-    print(f"Superseded: {p.relative_to(ROOT)} (by {args.by or 'unspecified'})")
+    suffix = f" (superseded by {new_id})" if new_id else ""
+    print(f"Superseded: {p.relative_to(ROOT)}{suffix}")
     return 0
 
 
@@ -2388,8 +2614,8 @@ def timeline(args) -> int:
             "title": next((x[2:].strip() for x in p.read_text(encoding="utf-8", errors="replace").splitlines()
                            if x.startswith("# ")), p.stem),
         })
-    # Sort by effective validity (valid_from/created), then path
-    items.sort(key=lambda x: (x["effective"], x["path"]), reverse=True)
+    # Sort by effective validity (valid_from/created), oldest first, then path
+    items.sort(key=lambda x: (x["effective"], x["path"]))
     if args.limit and args.limit > 0:
         items = items[: args.limit]
     if args.json:
@@ -2578,6 +2804,20 @@ def validate() -> int:
         if fm.get("status") and fm.get("status") not in ALLOWED_STATUS:
             print(f"ERROR {rel}: invalid status `{fm.get('status')}`")
             errors += 1
+        # schema-2 lifecycle fields (optional; validated when present)
+        conf = fm.get("confidence")
+        if conf and str(conf) not in ("high", "medium", "low"):
+            print(f"ERROR {rel}: invalid confidence `{conf}` (use high|medium|low)")
+            errors += 1
+        for datekey in ("valid_from", "valid_to", "created"):
+            v = str(fm.get(datekey) or "")
+            if not v:
+                continue
+            try:
+                dt.date.fromisoformat(v[:10])
+            except Exception:
+                print(f"ERROR {rel}: invalid date in `{datekey}`: `{v}`")
+                errors += 1
         # G2: stale evidence path check
         sources = fm.get("sources", [])
         if isinstance(sources, str):
@@ -3375,8 +3615,13 @@ def main() -> None:
     p.add_argument("--embeddings", choices=["on", "off", "auto"], default=None)
 
     p = sub.add_parser("consolidate")
-    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--dry-run", action="store_true", default=True,
+                   help="Default and only mode: read-only, no deletions, no LLM summarization.")
     p.add_argument("--json", action="store_true")
+    p.add_argument("--never-accessed-days", type=int, default=90,
+                   help="Age threshold for 'never accessed old entries' (default 90).")
+    p.add_argument("--snapshot-age-days", type=int, default=30,
+                   help="Age threshold for 'old session snapshots' (default 30).")
 
     p = sub.add_parser("remember")
     p.add_argument("--type", required=True, choices=sorted(TYPE_DIR.keys()))
@@ -3388,6 +3633,13 @@ def main() -> None:
     p.add_argument("--body", required=True)
     p.add_argument("--consequence", default="")
     p.add_argument("--links", default="")
+    p.add_argument("--confidence", choices=["high", "medium", "low"], default=None,
+                   help="schema-2 optional field: confidence in this memory.")
+    p.add_argument("--valid-from", default=None, help="schema-2: date from which this is valid (YYYY-MM-DD).")
+    p.add_argument("--valid-to", default=None, help="schema-2: date to which this is valid (YYYY-MM-DD).")
+    p.add_argument("--supersedes", default="", help="schema-2: comma-separated ids this memory replaces.")
+    p.add_argument("--derived-from", dest="derived_from", default="",
+                   help="schema-2: comma-separated ids this memory was derived from.")
     p.add_argument("--force", action="store_true", help="Create even if a similar/conflicting memory exists.")
     p.add_argument("--allow-secret", action="store_true", help="Bypass secret-pattern scan (use with caution).")
     p.add_argument("--json", action="store_true", help="Machine-readable result (including duplicate detection).")
@@ -3410,11 +3662,17 @@ def main() -> None:
     p.add_argument("--add-tags")
     p.add_argument("--remove-tags")
     p.add_argument("--append")
+    p.add_argument("--confidence", choices=["high", "medium", "low"], default=None)
+    p.add_argument("--valid-from", default=None, help="Set valid_from (YYYY-MM-DD). Pass empty to clear.")
+    p.add_argument("--valid-to", default=None, help="Set valid_to (YYYY-MM-DD). Pass empty to clear.")
+    p.add_argument("--supersedes", default=None, help="Replace the supersedes list (comma-separated ids).")
 
     p = sub.add_parser("supersede")
     p.add_argument("ref")
-    p.add_argument("--by")
+    p.add_argument("--by", help="id or path of the new memory that replaces this one")
     p.add_argument("--reason")
+    p.add_argument("--valid-to", dest="valid_to", help="valid_to date for the old memory (YYYY-MM-DD, default today).")
+    p.add_argument("--force", action="store_true", help="Record the --by reference even if it does not exist yet (recommended: create it first).")
 
     p = sub.add_parser("forget")
     p.add_argument("ref")
@@ -3491,20 +3749,31 @@ def main() -> None:
         if emb_override:
             cfg = load_config()
             cfg["retrieval"]["embeddings"] = emb_override
-            r = _search_with_cfg(a.query, a.limit, cfg, types=types_f, statuses=statuses_f, explain=want_explain)
+            r = _search_with_cfg(a.query, a.limit, cfg, types=types_f, statuses=statuses_f,
+                                 explain=want_explain, at_date=at_date)
         else:
-            r = search(a.query, a.limit, types=types_f, statuses=statuses_f, explain=want_explain)
+            r = search(a.query, a.limit, types=types_f, statuses=statuses_f,
+                       explain=want_explain, at_date=at_date)
         # Apply --at temporal filter post-retrieval
         if at_date:
             r = _filter_by_date(r, at_date)
+        # History/superseded explain (read-only; default on for explain, also when --at given)
+        if want_explain or at_date:
+            hist = _temporal_explain(a.query, r)
+            by_path = {h["path"]: h for h in hist}
+        else:
+            by_path = {}
         if a.json:
             items = []
             for s, p, fm, sn in r:
-                item = {"path": str(p.relative_to(ROOT)), "score": round(s, 2),
+                rel = str(p.relative_to(ROOT))
+                item = {"path": rel, "score": round(s, 2),
                         "type": fm.get("type"), "status": fm.get("status"),
                         "snippet": sn, "matched_tokens": _matched_for(fm, a.query)}
                 if want_explain and "_explain" in fm:
                     item["explain"] = fm.pop("_explain")
+                if rel in by_path:
+                    item["history"] = by_path[rel]
                 items.append(item)
             print(json.dumps(items, ensure_ascii=False, indent=2))
         elif getattr(a, "verbose", False) and r:
