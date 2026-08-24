@@ -1,45 +1,53 @@
-# Prywatność i Git
+# Privacy & Git (v1.0.1)
 
-## Domyślna zasada
+## Default policy
 
-`INTERNAL_RAG/` jest lokalną pamięcią roboczą i może zawierać ścieżki lokalne, hipotezy oraz informacje operacyjne. Nie zapisuj do niej sekretów.
+`INTERNAL_RAG/` is local operational memory and may contain local paths, hypotheses, and operational info. Never store secrets in it.
 
-## Dlaczego `.git/info/exclude`
+## Why `.git/info/exclude`
 
-v0.4 domyślnie używa `.git/info/exclude` zamiast projektowego `.gitignore`. To lokalna konfiguracja danego klonu repo i nie jest commitowana.
+v1.0 uses `.git/info/exclude` by default instead of the project's `.gitignore`. This is local to a single clone and is not committed.
 
-Tryb `local` wyklucza:
+`local` mode excludes:
 - `INTERNAL_RAG/`,
-- skill INTERNAL_RAG,
-- OpenCode tools/commands/plugin INTERNAL_RAG,
-- `AGENTS.md` tylko wtedy, gdy instalator utworzył go od zera.
+- the INTERNAL_RAG skill,
+- OpenCode tools/commands/plugin for INTERNAL_RAG,
+- `.irag.yml`,
+- `AGENTS.md` only when the installer created it from scratch.
 
-Jeżeli projekt miał wcześniej tracked `AGENTS.md`, jego modyfikacja będzie widoczna w Git. Deinstalator usuwa tylko oznaczoną sekcję INTERNAL_RAG.
+If the project already had a tracked `AGENTS.md`, its modification will be visible in Git. The uninstaller removes only the marked INTERNAL_RAG section.
 
-## Ignore nie działa na tracked files
+## Ignore does not affect tracked files
 
-Jeżeli plik został już dodany do Git, późniejsze ignore/exclude nie przestaje go śledzić.
+If a file was already added to Git, a later ignore/exclude does not stop tracking it.
 
-Przed push uruchom:
+Before a push run:
 
 ```text
 privacy_check.py
 ```
 
-Oczekiwane: `RESULT: PASS`.
+Expected: `RESULT: PASS`.
 
-Checker sprawdza obecność lokalnego exclude, tracked INTERNAL_RAG/tools, typowe wzorce credentiali i występowanie `INTERNAL_RAG/` w historii commitów. Nie wypisuje wartości znalezionych sekretów.
+The checker audits:
+- presence of the local exclude block,
+- tracked INTERNAL_RAG/tool/`.irag.yml` files,
+- common credential patterns in `INTERNAL_RAG/`,
+- `INTERNAL_RAG/` paths in git commit history.
 
-## Jeśli INTERNAL_RAG był commitowany
+It never prints the values of found secrets.
 
-Samo usunięcie plików nie usuwa danych z historii Git. Potrzebne jest osobne czyszczenie historii, np. `git filter-repo`.
+## If INTERNAL_RAG was committed
 
-## Czy trzeba coś dopisać do `.gitignore` projektu?
+Deleting files does not remove data from Git history. Use a separate history cleanup tool such as `git filter-repo`.
 
-Domyślnie: **nie**.
+## Should I add anything to the project `.gitignore`?
 
-Jeżeli cały zespół świadomie chce wspólnie ignorować pamięć, można dodać:
+By default: **no**.
+
+If the whole team consciously wants to ignore memory collectively, add:
 
 ```gitignore
 /INTERNAL_RAG/
+/.irag.yml
 ```

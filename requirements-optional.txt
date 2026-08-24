@@ -1,0 +1,6 @@
+# Optional dependencies for INTERNAL_RAG embeddings retrieval.
+# Install with: pip install -r requirements-optional.txt
+# These are NOT required — INTERNAL_RAG falls back to BM25+MMR when unavailable.
+
+sentence-transformers>=2.2.0
+numpy>=1.21.0

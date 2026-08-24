@@ -1,22 +1,22 @@
-# INTERNAL_RAG project memory (v1.0.0)
+# INTERNAL_RAG project memory (v1.0.1)
 
-Ten katalog jest lokalną pamięcią operacyjną agenta.
+This directory is the agent's local operational memory.
 
-Najważniejsze:
-- `WORKING_STATE.md` — bieżący checkpoint (write-ahead),
-- `INDEX.md` — indeks pamięci trwałej,
-- `.checkpoint.json` — metadane ostatniego checkpointu,
-- `.tasks.json` — stos zadań (push/resume),
-- `.fpcache.json` — cache fingerprint (auto),
-- `exports/` — eksporty JSON (`irag.py export`),
-- `decisions/` — decyzje,
-- `knowledge/` — wiedza i ograniczenia,
-- `gotchas/` — pułapki,
-- `failures/` — nieudane podejścia,
-- `hypotheses/` — hipotezy,
-- `sessions/` — streszczenia sesji (user-created) + `.snapshots/` (auto),
-- `archive/` — zapomniane pamięci (`irag.py forget`).
+Key entries:
+- `WORKING_STATE.md` — current checkpoint (write-ahead),
+- `INDEX.md` — durable memory index,
+- `.checkpoint.json` — last checkpoint metadata,
+- `.tasks.json` — task stack (push/resume),
+- `.fpcache.json` — fingerprint cache (auto),
+- `exports/` — JSON exports (`irag.py export`),
+- `decisions/` — decisions,
+- `knowledge/` — knowledge and constraints,
+- `gotchas/` — gotchas,
+- `failures/` — failed approaches,
+- `hypotheses/` — hypotheses,
+- `sessions/` — session summaries (user-created) + `.snapshots/` (auto),
+- `archive/` — forgotten memories (`irag.py forget`).
 
-Nie zapisuj tutaj haseł, tokenów, kluczy API, private keys ani danych produkcyjnych.
+Never store passwords, tokens, API keys, private keys, or production data here.
 
-W domyślnej instalacji v1.0 cały katalog jest lokalnie ignorowany przez `.git/info/exclude`.
+In the default v1.0 install, the whole directory is locally ignored via `.git/info/exclude`.

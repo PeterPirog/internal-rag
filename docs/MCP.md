@@ -1,37 +1,39 @@
-# MCP server (v1.0.0)
+# MCP server (v1.0.1)
 
-INTERNAL_RAG dostarcza minimalny serwer MCP-over-stdio, kompatybilny z Claude Code, Cursor i innymi klientami MCP.
+INTERNAL_RAG ships a minimal MCP-over-stdio server, compatible with Claude Code, Cursor, and other MCP clients.
 
-## Uruchomienie
+## Start
 
 ```bash
 python3 .agents/skills/internal-rag/irag.py mcp
 ```
 
-## Protokół
+## Protocol
 
-Minimalny podzbiór JSON-RPC 2.0 po stdin/stdout:
+Minimal JSON-RPC 2.0 subset over stdin/stdout:
 
-- `initialize` — handshake, zwraca `protocolVersion`, `serverInfo`.
-- `tools/list` — lista narzędzi.
-- `tools/call` — wywołanie narzędzia z `name` i `arguments`.
+- `initialize` — handshake, returns `protocolVersion`, `serverInfo`.
+- `notifications/initialized` — acknowledged (no response).
+- `shutdown` — exit cleanly.
+- `tools/list` — list tools.
+- `tools/call` — invoke a tool with `name` and `arguments`.
 
-## Narzędzia
+## Tools
 
-| name | argumenty | opis |
-|------|-----------|-----|
-| `context` | `task`, `limit?` | Pakiet kontekstu (WORKING_STATE, kandydaci, tokeny, recovery) |
-| `search` | `query`, `limit?` | BM25+MMR (embeddings jeśli dostępne) |
-| `checkpoint` | `reason`, `phase?`, `completed?`, `in_progress?`, `blockers?`, `next?` | Zapis stanu |
-| `guard` | — | Weryfikacja świeżości checkpointu |
-| `remember` | `type`, `title`, `body`, `tags?`, `evidence?`, `scope?`, `consequence?` | Zapis pamięci trwałej |
-| `status` | — | Przegląd pamięci i checkpointu |
-| `tasks` | — | Stos zadań |
-| `resume` | — | Wznów zadanie ze szczytu stosu |
+| name | arguments | description |
+|------|-----------|-------------|
+| `context` | `task`, `limit?` | Context packet (WORKING_STATE, candidates, tokens, recovery) |
+| `search` | `query`, `limit?` | BM25+MMR (embeddings if available) |
+| `checkpoint` | `reason`, `phase?`, `completed?`, `in_progress?`, `blockers?`, `next?` | Save state |
+| `guard` | — | Verify checkpoint freshness |
+| `remember` | `type`, `title`, `body`, `tags?`, `evidence?`, `scope?`, `consequence?` | Store durable memory |
+| `status` | — | Memory and checkpoint overview |
+| `tasks` | — | Task stack |
+| `resume` | — | Resume the top task |
 
-## Konfiguracja w Claude Code
+## Claude Code config
 
-W `claude_desktop_config.json` (lub odpowiedniku):
+In `claude_desktop_config.json` (or equivalent):
 
 ```json
 {
@@ -45,10 +47,10 @@ W `claude_desktop_config.json` (lub odpowiedniku):
 }
 ```
 
-Na Windows użyj `python` zamiast `python3` i ścieżek z `\\`.
+On Windows use `python` instead of `python3` and backslash paths.
 
-## Uwagi
+## Notes
 
-- Serwer nie wymaga zewnętrznych zależności (poza opcjonalnymi embeddings).
-- Wszystkie wywołania operują na `INTERNAL_RAG/` w bieżącym katalogu roboczym (lub root git).
-- Błędy zwracane są jako JSON-RPC error object (kod -32000).
+- No external dependencies required (beyond optional embeddings).
+- All calls operate on `INTERNAL_RAG/` in the current working directory (or git root).
+- Errors are returned as JSON-RPC error objects (code -32000).

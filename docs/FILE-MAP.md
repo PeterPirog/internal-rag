@@ -1,38 +1,39 @@
-# Mapa plików (v1.0.0)
+# File map (v1.0.1)
 
-## W paczce (repo internal-rag)
+## In the package (internal-rag repo)
 
-- `install.py` — instalacja/aktualizacja.
-- `uninstall.py` — pełne usunięcie z backupem.
-- `privacy_check.py` — audyt prywatności/Git.
-- `self_test.py` — test regresyjny.
-- `README.md`, `docs/` — dokumentacja.
-- `VERSION`, `CHANGELOG.md` — wersjonowanie.
+- `install.py` — install/update.
+- `uninstall.py` — full removal with backup.
+- `privacy_check.py` — privacy & git audit.
+- `self_test.py` — regression test.
+- `requirements-optional.txt` — optional embeddings dependencies.
+- `README.md`, `docs/` — documentation.
+- `VERSION`, `CHANGELOG.md` — versioning.
 
-## W docelowym repo (po instalacji)
+## In a target repo (after install)
 
-- `AGENTS.md` — stałe reguły (sekcja INTERNAL_RAG).
-- `.irag.yml` — opcjonalna konfiguracja (user-created).
-- `.agents/skills/internal-rag/SKILL.md` — procedura dla agenta.
-- `.agents/skills/internal-rag/irag.py` — CLI (rdzeń, zero-dep).
-- `.agents/skills/internal-rag/irag_embeddings.py` — opcjonalny plugin embeddings.
-- `.agents/skills/internal-rag/irag_hooks.py` — opcjonalne git hooks.
-- `INTERNAL_RAG/WORKING_STATE.md` — bieżący checkpoint.
-- `INTERNAL_RAG/INDEX.md` — indeks pamięci trwałej.
-- `INTERNAL_RAG/.checkpoint.json` — metadane ostatniego checkpointu.
-- `INTERNAL_RAG/.tasks.json` — stos zadań.
-- `INTERNAL_RAG/.fpcache.json` — cache fingerprint.
-- `INTERNAL_RAG/exports/` — eksporty JSON.
-- `INTERNAL_RAG/decisions/`, `knowledge/`, `gotchas/`, `failures/`, `hypotheses/` — pamięć trwała.
-- `INTERNAL_RAG/sessions/` — streszczenia sesji (user-created).
-- `INTERNAL_RAG/sessions/.snapshots/` — auto-snapshoty WORKING_STATE (zarządzane).
-- `INTERNAL_RAG/archive/` — zapomniane pamięci.
-- `.opencode/tools/memory-*.ts` — narzędzia OpenCode.
-- `.opencode/plugins/internal-rag-resilience.ts` — plugin auto-checkpoint + compact.
-- `.opencode/commands/memory*.md`, `checkpoint.md` — komendy slash.
+- `AGENTS.md` — standing rules (INTERNAL_RAG section).
+- `.irag.yml` — optional config (user-created or `config --init`).
+- `.agents/skills/internal-rag/SKILL.md` — agent procedure.
+- `.agents/skills/internal-rag/irag.py` — CLI (core, zero-dep).
+- `.agents/skills/internal-rag/irag_embeddings.py` — optional embeddings plugin.
+- `.agents/skills/internal-rag/irag_hooks.py` — optional git hooks installer.
+- `INTERNAL_RAG/WORKING_STATE.md` — current checkpoint.
+- `INTERNAL_RAG/INDEX.md` — durable memory index.
+- `INTERNAL_RAG/.checkpoint.json` — last checkpoint metadata (schema-versioned).
+- `INTERNAL_RAG/.tasks.json` — task stack (schema-versioned).
+- `INTERNAL_RAG/.fpcache.json` — fingerprint cache.
+- `INTERNAL_RAG/exports/` — JSON exports.
+- `INTERNAL_RAG/decisions/`, `knowledge/`, `gotchas/`, `failures/`, `hypotheses/` — durable memory.
+- `INTERNAL_RAG/sessions/` — session summaries (user-created).
+- `INTERNAL_RAG/sessions/.snapshots/` — auto WORKING_STATE snapshots (managed).
+- `INTERNAL_RAG/archive/` — forgotten memories.
+- `.opencode/tools/memory-*.ts` — OpenCode tools.
+- `.opencode/plugins/internal-rag-resilience.ts` — auto-checkpoint + compact plugin.
+- `.opencode/commands/memory*.md`, `checkpoint.md` — slash commands.
 
-## Poza working tree
+## Outside the working tree
 
-- `.git/info/exclude` — lokalna ochrona przed przypadkowym `git add`.
-- `.git/internal-rag/manifest.json` — lokalny manifest instalacji.
-- `.git/hooks/post-commit`, `post-checkout`, `pre-push` — opcjonalne hooki (jeśli `irag_hooks.py install`).
+- `.git/info/exclude` — local protection against accidental `git add`.
+- `.git/internal-rag/manifest.json` — local install manifest.
+- `.git/hooks/post-commit`, `post-checkout`, `pre-push` — optional hooks (if `irag_hooks.py install`).

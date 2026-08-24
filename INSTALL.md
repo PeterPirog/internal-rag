@@ -1,15 +1,15 @@
-# Skrócona instalacja
+# Installation (short)
 
-Pełny opis: `docs/INSTALLATION.md`.
+Full guide: `docs/INSTALLATION.md`.
 
 Windows:
 
 ```powershell
-python .\install.py "D:\sciezka\do\projektu"
+python .\install.py "D:\path\to\project"
 ```
 
 Linux/macOS:
 
 ```bash
-python3 install.py "/sciezka/do/projektu"
+python3 install.py "/path/to/project"
 ```

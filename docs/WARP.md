@@ -1,21 +1,23 @@
-# Warp
+# Warp (v1.0.1)
 
-Warp rozpoznaje `AGENTS.md` jako Project Rules oraz skills w `.agents/skills/`.
+Warp recognizes `AGENTS.md` as Project Rules and skills in `.agents/skills/`.
 
-Po instalacji uruchom Warp ponownie w repozytorium.
+After install, restart Warp in the repository.
 
-Przykład:
+Example:
 
 ```text
-Kontynuuj aktualne zadanie zgodnie z AGENTS.md i INTERNAL_RAG.
+Continue the current task following AGENTS.md and INTERNAL_RAG.
 ```
 
-Możesz też jawnie poprosić: `Użyj skill internal-rag`.
+You can also explicitly request: `Use skill internal-rag`.
 
-Ręczny test na Windows:
+Manual test on Windows:
 
 ```text
 python .agents\skills\internal-rag\irag.py context --task "test"
 ```
 
-OpenCode-specific hooks nie działają w Warp, dlatego checkpoint i guard pozostają ważne.
+OpenCode-specific hooks do not run in Warp, so checkpoint and guard remain important.
+
+Warp does not support MCP tools; use the CLI directly or via the skill.

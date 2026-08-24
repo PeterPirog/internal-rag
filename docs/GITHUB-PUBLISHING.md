@@ -1,52 +1,55 @@
-# Umieszczenie INTERNAL_RAG na własnym GitHub
+# Publishing INTERNAL_RAG to your own GitHub
 
-Ten dokument dotyczy **repozytorium INTERNAL_RAG**, a nie projektu, w którym INTERNAL_RAG jest tymczasowo instalowany.
+This document covers the **INTERNAL_RAG repository**, not a project where INTERNAL_RAG is temporarily installed.
 
-## 1. Rozpakuj release
+## 1. Unpack a release
 
-Rozpakuj `internal-rag-v0.4-github-ready.zip` do osobnego katalogu, np.:
+Unpack `internal-rag-v1.0-github-ready.zip` into a separate directory, e.g.:
 
 ```text
 D:\GitHub\internal-rag
 ```
 
-## 2. Zainicjalizuj Git
+## 2. Initialize Git
 
 ```powershell
 cd "D:\GitHub\internal-rag"
 git init
 git add .
-git commit -m "Initial INTERNAL_RAG v0.4.0"
+git commit -m "Initial INTERNAL_RAG v1.0.1"
 ```
 
-## 3. Utwórz puste repo na GitHub
+## 3. Create an empty repo on GitHub
 
-Nie dodawaj zdalnie osobnego README/licencji, jeżeli chcesz uniknąć konfliktu pierwszego commita.
+Do not add a remote README/license if you want to avoid a first-commit conflict.
 
-## 4. Podłącz remote i push
+## 4. Connect remote and push
 
-Użyj adresu własnego repozytorium:
+Use your own repo address:
 
 ```powershell
 git branch -M main
-git remote add origin <TWOJ-ADRES-REPO>
+git remote add origin <YOUR-REPO-ADDRESS>
 git push -u origin main
 ```
 
+Note: to push `.github/workflows/`, the git token needs the `workflow` scope. Without it, remove the workflow file before pushing, then add it via the GitHub UI or with a properly scoped token.
+
 ## 5. Release ZIP
 
-Plik ZIP może być dodany jako GitHub Release asset. Nie ma potrzeby commitować ZIP-a do repo, ponieważ `.gitignore` ignoruje `*.zip`.
+The ZIP can be added as a GitHub Release asset. No need to commit the ZIP to the repo because `.gitignore` ignores `*.zip`.
 
-## 6. Co warto zachować przez lata
+## 6. What to preserve long-term
 
-Najważniejsze pliki do przyszłego odtworzenia sposobu działania:
+The most important files for future reconstruction:
 - `README.md`,
 - `START_HERE.md`,
 - `docs/ARCHITECTURE.md`,
 - `docs/PRIVACY-AND-GIT.md`,
 - `docs/COMPATIBILITY.md`,
+- `docs/CLI.md`,
 - `CHANGELOG.md`,
 - `VERSION`,
 - `self_test.py`.
 
-Po aktualizacji Warp/OpenCode uruchom `self_test.py` i sprawdź źródła z `docs/COMPATIBILITY.md`.
+After updating Warp/OpenCode, run `self_test.py` and check the sources in `docs/COMPATIBILITY.md`.

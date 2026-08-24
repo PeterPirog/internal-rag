@@ -1,8 +1,9 @@
 # Release checklist
 
-1. Ustaw poprawną wersję w `VERSION` i `CHANGELOG.md`.
-2. Zweryfikuj datę i źródła w `docs/COMPATIBILITY.md`.
-3. Uruchom `python self_test.py` na Windows i Linux (GitHub Actions robi oba systemy).
-4. Sprawdź, czy paczka nie zawiera prywatnych ścieżek ani prawdziwych credentiali.
-5. Utwórz ZIP jako GitHub Release asset.
-6. Nie commituj ZIP-a do repozytorium źródłowego — `.gitignore` ignoruje `*.zip`.
+1. Set the correct version in `VERSION` and `CHANGELOG.md`.
+2. Verify the date and sources in `docs/COMPATIBILITY.md`.
+3. Run `python self_test.py` on Windows and Linux (GitHub Actions covers both).
+4. Check that the package contains no private paths or real credentials.
+5. Create a ZIP as a GitHub Release asset.
+6. Do not commit the ZIP to the source repository — `.gitignore` ignores `*.zip`.
+7. To push `.github/workflows/`, the git token needs the `workflow` scope.

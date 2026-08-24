@@ -1,46 +1,48 @@
-# Codzienne użycie (v1.0.0)
+# Daily usage (v1.0.1)
 
-## Start zadania
+## Start a task
 
 ```text
-irag.py context --task "opis zadania"
+irag.py context --task "task description"
 ```
 
-Dla narzędzi: `irag.py context --task "..." --json`.
+For tooling: `irag.py context --task "..." --json`.
 
-## Przed pierwszą zmianą
+## Before the first change
 
 ```text
 irag.py checkpoint --reason "task-start"
 ```
 
-## Po milestone
+## After a milestone
 
 ```text
 irag.py checkpoint --reason "milestone" --phase "..." --completed "..." --next "..."
 ```
 
-## Wyszukiwanie pamięci
+## Search memory
 
 ```text
 irag.py search --query "symbol subsystem problem" --limit 8
 irag.py search --query "..." --json
+irag.py search --query "..." --embeddings off
 ```
 
-BM25+MMR domyślnie; embeddings gdy dostępne i włączone w `.irag.yml`.
+BM25+MMR by default; embeddings when available and enabled in `.irag.yml` (or `--embeddings on`).
 
-## Zapis trwałej wiedzy
+## Store durable knowledge
 
 ```text
-irag.py remember --type decision --title "..." --scope "..." --tags "..." --evidence "..." --body "..." --consequence "..."
+irag.py remember --type decision --title "..." --scope "..." --tags "..." --evidence "..." --body "..." --consequence "..." --links "decisions/other.md"
 ```
 
-Typy: `decision`, `knowledge`, `constraint`, `gotcha`, `failure`, `hypothesis`, `session`.
+Types: `decision`, `knowledge`, `constraint`, `gotcha`, `failure`, `hypothesis`, `session`.
 
-## Odczyt / aktualizacja pamięci
+## Read / update memory
 
 ```text
 irag.py show <path-or-id>
+irag.py show <ref> --section Knowledge
 irag.py timeline --limit 20
 irag.py update <ref> --status superseded --add-tags "new"
 irag.py update <ref> --append "New evidence: ..."
@@ -49,48 +51,51 @@ irag.py forget <ref>
 irag.py link --from <ref> --to <ref>
 irag.py status
 irag.py diff
+irag.py history
 ```
 
-## Stos zadań (przerwania)
+## Task stack (interrupts)
 
 ```text
-irag.py push --task "przerwana praca" --reason "user-priority"
+irag.py push --task "interrupted work" --reason "user-priority"
 irag.py tasks
 irag.py resume
+irag.py forget-task <id>
 irag.py forget-task
 ```
 
-## Kompresja (przed context compaction)
+## Compaction (before context compaction)
 
 ```text
 irag.py compact
 ```
 
-## Diagnostyka
+## Diagnostics
 
 ```text
 irag.py doctor
 irag.py embeddings-info
 irag.py config
+irag.py config --init
 irag.py validate
 irag.py index
 ```
 
-## Transfer pamięci
+## Transfer memory
 
 ```text
 irag.py export
 irag.py import <file.json> --overwrite
 ```
 
-## Koniec
+## Finish
 
 ```text
 irag.py guard
 ```
 
-Kończ po `GUARD OK`.
+Finish only after `GUARD OK`.
 
-## Nie zapisuj
+## Never store
 
-Haseł, tokenów, kluczy API, private keys, danych produkcyjnych, pełnych logów, pełnego chain-of-thought ani całej historii rozmowy.
+Passwords, tokens, API keys, private keys, production data, full logs, full chain-of-thought, or the entire conversation history.

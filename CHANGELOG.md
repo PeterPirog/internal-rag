@@ -1,5 +1,36 @@
 # Changelog
 
+## 1.0.1 — 2026-08-24
+
+Patch release: full English documentation and professionalization.
+
+### Documentation
+- All documentation translated to English (README, docs/*, INSTALL, START_HERE, CONTRIBUTING, SECURITY, RELEASE_CHECKLIST, INTERNAL_RAG/README).
+- New docs: `docs/CLI.md` (full command reference), `docs/GIT-HOOKS.md`.
+- README badges (version, license, Python).
+
+### Functional fixes
+- `search --json` now returns `matched_tokens` for each result.
+- `remember --links` stored in frontmatter `links:` field (not just body).
+- MCP server handles `notifications/initialized` and `shutdown` methods.
+- `compact` preserves section structure; trims long lists (not the whole section).
+- `privacy_check.py` now audits `.irag.yml` (managed path detection).
+- Added `requirements-optional.txt` for embeddings.
+- `.gitignore` now covers `.tasks.json`, `.fpcache.json`, `exports/`.
+- CI workflow note in docs (token `workflow` scope required to push `.github/workflows/`).
+
+### CLI professionalization
+- Global `--quiet` and `--verbose` flags.
+- `search --limit` defaults to config `retrieval.limit` (was 0→8, unintuitive).
+- `history` command: list checkpoint history (from rolling log).
+- `forget-task <id>`: drop a specific task by index/id (not just clear-all).
+- `resume` now updates WORKING_STATE sections (Current request, phase, next).
+- `config --init`: writes a `.irag.yml` template.
+- `--embeddings on|off|auto` CLI override (per-invocation).
+- `show --section <name>`: extract a single section from a memory.
+- Schema versioning in `.checkpoint.json` and `.tasks.json` (`schema: 2`).
+- `self_test.py` extended with CRUD, MCP, and hooks smoke tests.
+
 ## 1.0.0 — 2026-08-24
 
 First stable release. Full professional RAG for terminal coding agents.
@@ -55,13 +86,13 @@ First stable release. Full professional RAG for terminal coding agents.
 - `self_test.py` extended to cover v1.0 invariants.
 
 ## 0.4.0 — 2026-08-22
-- dokumentacja GitHub,
-- poprawione launchery PowerShell,
-- local-only przez `.git/info/exclude`,
+- GitHub documentation,
+- improved PowerShell launchers,
+- local-only via `.git/info/exclude`,
 - `privacy_check.py`,
-- `uninstall.py` z backupem,
-- lokalny manifest w `.git`,
-- self-test i GitHub Actions.
+- `uninstall.py` with backup,
+- local manifest in `.git`,
+- self-test and GitHub Actions.
 
 ## 0.3.0 — 2026-08-22
 - recovery detection,

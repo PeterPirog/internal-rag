@@ -1,30 +1,30 @@
-# Cykl życia pamięci (v1.0.0)
+# Memory lifecycle (v1.0.1)
 
-`WORKING_STATE.md` jest krótką, często aktualizowaną pamięcią roboczą (write-ahead checkpoint).
+`WORKING_STATE.md` is short, frequently updated working memory (write-ahead checkpoint).
 
-Pamięć trwałą zapisuj tylko dla informacji przydatnych w przyszłych sesjach: decyzji, ograniczeń, root cause, gotchas, kosztownych błędnych podejść i hipotez.
+Store durable memory only for information useful in future sessions: decisions, constraints, root causes, gotchas, costly failed approaches, and hypotheses.
 
-## Statusy
+## Statuses
 
-- `active` — aktualna, zweryfikowana.
-- `tentative` — hipoteza, niepotwierdzona (domyślnie dla `hypothesis`).
-- `superseded` — zastąpiona nowszą (`supersede --by`).
-- `invalid` — błędna (`update --status invalid`).
-- `archived` — zapomniana (`forget` przenosi do `archive/`).
+- `active` — current, verified.
+- `tentative` — hypothesis, unconfirmed (default for `hypothesis`).
+- `superseded` — replaced by a newer one (`supersede --by`).
+- `invalid` — wrong (`update --status invalid`).
+- `archived` — forgotten (`forget` moves to `archive/`).
 
 ## CRUD
 
-- `remember` — tworzy.
-- `show` / `timeline` — czyta.
-- `update` — modyfikuje (status, tags, append).
-- `supersede` — oznacza zastąpioną.
-- `forget` — archiwizuje (nie usuwa).
+- `remember` — create.
+- `show` / `timeline` — read.
+- `update` — modify (status, tags, append).
+- `supersede` — mark replaced.
+- `forget` — archive (does not delete).
 - `link` — cross-reference.
 
-## Zasady
+## Rules
 
-Hipoteza nie jest faktem i powinna pozostać `tentative` do weryfikacji.
+A hypothesis is not a fact and should remain `tentative` until verified.
 
-Jeżeli pamięć przeczy aktualnemu kodowi/testom: ufaj kodowi, oznacz starą pamięć jako `superseded`/`invalid`, zapisz nowe dowody i odśwież indeks (`irag.py index`).
+If memory contradicts current code/tests: trust the code, mark the old memory `superseded`/`invalid`, record new evidence, and rebuild the index (`irag.py index`).
 
-Nie zapisuj: haseł, tokenów, kluczy, danych produkcyjnych, pełnych logów, pełnego chain-of-thought.
+Never store: passwords, tokens, keys, production data, full logs, full chain-of-thought.

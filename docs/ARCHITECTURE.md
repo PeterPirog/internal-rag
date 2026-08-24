@@ -1,14 +1,14 @@
-# Architektura (v1.0.0)
+# Architecture (v1.0.1)
 
 ```text
 Warp / OpenCode / Claude Code / Cursor
       │
       ├── AGENTS.md
       ├── SKILL.md
-      └── .irag.yml (opcjonalna)
+      └── .irag.yml (optional)
                │
                ▼
-            irag.py  (CLI, zero-dep rdzeń)
+            irag.py  (CLI, zero-dep core)
        ┌───────┼─────────┬───────────┬──────────┐
        │       │         │           │          │
     context  checkpoint  search    remember    tasks
@@ -20,36 +20,37 @@ Warp / OpenCode / Claude Code / Cursor
         gotchas, failures, hypotheses, sessions, archive)
 ```
 
-### Rdzeń (zero zależności)
-- `irag.py` — wszystkie komendy CLI.
+### Core (zero dependencies)
+- `irag.py` — all CLI commands.
 - `WORKING_STATE.md` — write-ahead checkpoint.
-- `.checkpoint.json` — fingerprint + metadane ostatniego checkpointu.
-- `.tasks.json` — stos zadań (push/resume).
-- `.fpcache.json` — cache fingerprint (invalidowany przy checkout).
+- `.checkpoint.json` — fingerprint + last checkpoint metadata (schema-versioned).
+- `.tasks.json` — task stack (push/resume) (schema-versioned).
+- `.fpcache.json` — fingerprint cache (invalidated on checkout).
 
 ### Retrieval
-- Domyślnie: BM25 (k1=1.5, b=0.75) z MMR (lambda z config).
-- Opcjonalnie: sentence-transformers (`irag_embeddings.py`), lazy-loaded, fallback do BM25.
+- Default: BM25 (k1=1.5, b=0.75) with MMR (lambda from config).
+- Optional: sentence-transformers (`irag_embeddings.py`), lazy-loaded, fallback to BM25.
 - Stopwords, light stemming, status weighting (active/tentative/superseded/invalid).
+- `--embeddings on|off|auto` CLI override.
 
-### Cykl życia
-- `context` porównuje fingerprint z ostatnim checkpointem → `RECOVERY REQUIRED` lub fresh.
-- `checkpoint` zapisuje semantyczny stan + fingerprint.
-- `guard` wykrywa zmiany po ostatnim checkpointcie.
-- `compact` archiwizuje i trimuje WORKING_STATE.
-- `push`/`resume` stos zadań z snapshotem stanu.
-- `remember`/`show`/`update`/`supersede`/`forget`/`link` — CRUD pamięci trwałej.
-- `export`/`import` — transfer JSON między projektami.
+### Lifecycle
+- `context` compares the fingerprint with the last checkpoint → `RECOVERY REQUIRED` or fresh.
+- `checkpoint` saves semantic state + fingerprint.
+- `guard` detects changes after the last checkpoint.
+- `compact` archives and trims WORKING_STATE (preserves section structure).
+- `push`/`resume` task stack with state snapshot.
+- `remember`/`show`/`update`/`supersede`/`forget`/`link` — durable memory CRUD.
+- `export`/`import` — JSON transfer between projects.
 
-### Integracje
+### Integrations
 - OpenCode: tools (`memory-*`), plugin (auto-checkpoint + compact), commands (`/memory*`, `/checkpoint`).
 - Warp: `AGENTS.md` + skill.
 - MCP: `irag.py mcp` (JSON-RPC stdio).
-- Git hooks (opcjonalne): post-commit auto-checkpoint, post-checkout invalidate, pre-push warn.
+- Git hooks (optional): post-commit auto-checkpoint, post-checkout invalidate, pre-push warn.
 
-### Prywatność
-- Domyślnie local-only via `.git/info/exclude`.
-- `privacy_check.py` audytuje tracked files, wzorce sekretów, historię git.
-- `INTERNAL_RAG/` i tools nigdy nie powinny być commitowane (chyba że `--share-tools`).
+### Privacy
+- Default local-only via `.git/info/exclude`.
+- `privacy_check.py` audits tracked files, secret patterns, git history, and `.irag.yml`.
+- `INTERNAL_RAG/` and tools should never be committed (unless `--share-tools`).
 
-Pamięć trwała z `decisions`, `knowledge`, `gotchas`, `failures`, `hypotheses` jest ładowana selektywnie przez retrieval, nigdy w całości.
+Durable memory from `decisions`, `knowledge`, `gotchas`, `failures`, `hypotheses` is loaded selectively via retrieval, never in bulk.

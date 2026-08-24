@@ -1,50 +1,50 @@
-# Kompatybilność (v1.0.0)
+# Compatibility (v1.0.1)
 
-Zweryfikowano: **2026-08-24**.
+Verified: **2026-08-24**.
 
 ## Warp
 
-Używane mechanizmy:
+Mechanisms used:
 - `AGENTS.md` Project Rules,
 - `.agents/skills/`.
 
-Źródła:
+Sources:
 - https://docs.warp.dev/agent-platform/capabilities/rules
 - https://docs.warp.dev/agent-platform/capabilities/skills
 
 ## OpenCode
 
-Używane mechanizmy:
+Mechanisms used:
 - `.agents/skills/`,
 - `.opencode/tools/`,
 - `.opencode/plugins/`,
 - `.opencode/commands/`.
 
-Źródła:
+Sources:
 - https://opencode.ai/docs/skills/
 - https://opencode.ai/docs/custom-tools/
 - https://opencode.ai/docs/plugins/
 
 ## MCP (Claude Code, Cursor)
 
-- `irag.py mcp` — minimalny JSON-RPC stdio server.
-- Kompatybilny ze specyfikacją MCP 2024-11-05 (podzbiór).
+- `irag.py mcp` — minimal JSON-RPC stdio server.
+- Compatible with MCP spec 2024-11-05 (subset).
 
-Źródło:
+Source:
 - https://modelcontextprotocol.io/
 
 ## Git
 
-- Tryb local-only używa `.git/info/exclude`.
-- Opcjonalne hooki w `.git/hooks/` (post-commit, post-checkout, pre-push).
+- Local-only mode uses `.git/info/exclude`.
+- Optional hooks in `.git/hooks/` (post-commit, post-checkout, pre-push).
 
-Źródło:
+Source:
 - https://git-scm.com/docs/gitignore
 
 ## Python
 
-- Wymagane: Python 3.8+.
-- Opcjonalne: `sentence-transformers`, `numpy` (embeddings).
-- Zero zależności domyślnie.
+- Required: Python 3.8+.
+- Optional: `sentence-transformers`, `numpy` (embeddings).
+- Zero dependencies by default.
 
-Przy większej zmianie Warp/OpenCode/MCP należy ponownie zweryfikować dokumentację i zaktualizować datę. Uruchom `self_test.py` po każdej zmianie.
+After a major Warp/OpenCode/MCP change, re-verify documentation and update the date. Run `self_test.py` after any change.

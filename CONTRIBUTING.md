@@ -1,9 +1,11 @@
 # Contributing
 
-Przed zmianą:
-1. edytuj kod,
-2. uruchom `python self_test.py`,
-3. zaktualizuj dokumentację,
-4. przy release zaktualizuj `VERSION` i `CHANGELOG.md`.
+Before submitting a change:
+1. Edit code or docs.
+2. Run `python self_test.py` — it must print `SELF TEST PASS`.
+3. Update documentation (keep it in English).
+4. For a release, bump `VERSION` and update `CHANGELOG.md`.
 
-Nie używaj prawdziwych sekretów w testach.
+Do not use real secrets in tests. Do not commit `INTERNAL_RAG/` memory or `.irag.yml` (they are local-only by default).
+
+Documentation language: **English**.

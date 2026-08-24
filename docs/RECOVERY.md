@@ -1,8 +1,8 @@
-# Recovery (v1.0.0)
+# Recovery (v1.0.1)
 
-Jeżeli widzisz `RECOVERY REQUIRED`, nie wykonuj nowych zmian.
+If you see `RECOVERY REQUIRED`, do not make new edits.
 
-1. Sprawdź:
+1. Inspect:
 
 ```text
 git status --short
@@ -11,31 +11,32 @@ git diff
 irag.py diff
 ```
 
-2. Odtwórz stan pracy.
-3. Zapisz checkpoint:
+2. Reconstruct the working state.
+3. Save a checkpoint:
 
 ```text
 irag.py checkpoint --reason "recovery" --phase "..." --completed "..." --in-progress "..." --blockers "..." --next "..."
 ```
 
-4. Uruchom `irag.py guard`.
-5. Kontynuuj dopiero po `GUARD OK`.
+4. Run `irag.py guard`.
+5. Continue only after `GUARD OK`.
 
-## Stos zadań (jeśli przerwano)
+## Task stack (if interrupted)
 
-Jeżeli `irag.py tasks` pokazuje zapamiętane zadania:
+If `irag.py tasks` shows remembered tasks:
 
 ```text
 irag.py resume
 ```
 
-`resume` przywraca WORKING_STATE i raportuje czy kod projektu nadal pasuje (fingerprint fresh/stale).
+`resume` restores the WORKING_STATE and reports whether the project code still matches (fingerprint fresh/stale).
 
-## Diagnostyka
+## Diagnostics
 
 ```text
 irag.py doctor
 irag.py status
+irag.py history
 ```
 
-`doctor` zgłasza braki (katalogi, checkpoint, python, embeddings).
+`doctor` reports missing pieces (dirs, checkpoint, python, embeddings). `history` shows recent checkpoints.

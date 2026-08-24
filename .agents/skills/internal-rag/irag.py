@@ -24,7 +24,7 @@ import unicodedata
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 
 ALLOWED_TYPES = {"decision", "knowledge", "constraint", "gotcha", "failure", "hypothesis", "session"}
 ALLOWED_STATUS = {"active", "tentative", "superseded", "invalid", "archived"}
@@ -348,6 +348,24 @@ def save_working(text: str) -> None:
     WORKING.write_text(text.rstrip() + "\n", encoding="utf-8")
 
 
+CHECKPOINT_SCHEMA = 2
+TASKS_SCHEMA = 2
+HISTORY_FILE = RAG / ".history.jsonl"
+_HISTORY_MAX = 100
+
+
+def _append_history(entry: Dict[str, Any]) -> None:
+    try:
+        RAG.mkdir(exist_ok=True)
+        with HISTORY_FILE.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        lines = HISTORY_FILE.read_text(encoding="utf-8", errors="replace").splitlines()
+        if len(lines) > _HISTORY_MAX:
+            HISTORY_FILE.write_text("\n".join(lines[-_HISTORY_MAX:]) + "\n", encoding="utf-8")
+    except Exception:
+        pass
+
+
 def load_checkpoint() -> Dict[str, Any]:
     try:
         return json.loads(CHECKPOINT.read_text(encoding="utf-8"))
@@ -357,12 +375,45 @@ def load_checkpoint() -> Dict[str, Any]:
 
 def save_checkpoint(reason: str) -> Dict[str, Any]:
     data = {
+        "schema": CHECKPOINT_SCHEMA,
         "version": VERSION, "at": now(), "reason": reason,
         "fingerprint": project_fingerprint(), "branch": git_text("branch", "--show-current"),
         "head": git_text("rev-parse", "--short", "HEAD"),
     }
     CHECKPOINT.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    _append_history({"at": data["at"], "reason": reason, "head": data["head"],
+                     "fingerprint": data["fingerprint"][:16], "branch": data["branch"]})
     return data
+
+
+def history_cmd(args) -> int:
+    if not HISTORY_FILE.exists():
+        if args.json:
+            print("[]")
+        else:
+            print("No checkpoint history yet.")
+        return 0
+    entries = []
+    for line in HISTORY_FILE.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entries.append(json.loads(line))
+        except Exception:
+            continue
+    entries = entries[::-1]
+    if args.limit and args.limit > 0:
+        entries = entries[: args.limit]
+    if args.json:
+        print(json.dumps(entries, indent=2, ensure_ascii=False))
+        return 0
+    if not entries:
+        print("No checkpoint history yet.")
+        return 0
+    for e in entries:
+        print(f"{e.get('at', '?')}  [{e.get('reason', '?')}]  head={e.get('head', '?')}  fp={e.get('fingerprint', '?')}")
+    return 0
 
 
 # ----------------------------- init -----------------------------------------
@@ -786,7 +837,10 @@ def embeddings_search(query: str, candidates: List[Tuple[Path, str, Dict[str, An
 
 
 def search(query: str, limit: int = 8) -> List[Tuple[float, Path, Dict[str, Any], str]]:
-    cfg = load_config()
+    return _search_with_cfg(query, limit, load_config())
+
+
+def _search_with_cfg(query: str, limit: int, cfg: Dict[str, Any]) -> List[Tuple[float, Path, Dict[str, Any], str]]:
     if limit <= 0:
         limit = int(cfg.get("retrieval", {}).get("limit", 8))
     cands: List[Tuple[Path, str, Dict[str, Any]]] = []
@@ -804,6 +858,23 @@ def search(query: str, limit: int = 8) -> List[Tuple[float, Path, Dict[str, Any]
         return [(s, p, fm, sn) for s, p, fm, sn, _ in emb]
     bm = bm25_search(query, cands, limit, cfg)
     return [(s, p, fm, sn) for s, p, fm, sn, _ in bm]
+
+
+def _matched_for(fm: Dict[str, Any], query: str = "") -> List[str]:
+    """Return matched tokens (from tags/scope + query overlap) for JSON consumers."""
+    out: List[str] = []
+    tags = fm.get("tags", [])
+    if isinstance(tags, list):
+        out.extend(str(t) for t in tags if str(t) not in ("[]", ""))
+    elif tags and str(tags) != "[]":
+        out.append(str(tags))
+    if query:
+        q_tokens = set(tokenize(query))
+        title = str(fm.get("id", ""))
+        for t in q_tokens:
+            if t in title.lower():
+                out.append(t)
+    return out
 
 
 # ----------------------------- remember -------------------------------------
@@ -833,6 +904,16 @@ def remember(args) -> None:
         f"{yl('scope', args.scope)}"
         f"{yl('tags', args.tags)}"
         f"{yl('sources', args.evidence)}"
+    )
+    if args.links:
+        links = [x.strip() for x in args.links.split(",") if x.strip()]
+        if links:
+            content += "links:\n" + "".join(f"  - {x}\n" for x in links)
+        else:
+            content += "links: []\n"
+    else:
+        content += "links: []\n"
+    content += (
         "---\n\n"
         f"# {args.title}\n\n"
         "## Knowledge\n\n"
@@ -840,10 +921,6 @@ def remember(args) -> None:
         "## Consequence\n\n"
         f"{(args.consequence or 'To be determined.').strip()}\n"
     )
-    if args.links:
-        links = [x.strip() for x in args.links.split(",") if x.strip()]
-        if links:
-            content += "\n## Links\n\n" + "\n".join(f"- {x}" for x in links) + "\n"
     path.write_text(content, encoding="utf-8")
     rebuild_index()
     print(path.relative_to(ROOT))
@@ -862,6 +939,17 @@ def show_memory(args) -> int:
         print(f"Memory not found: {args.ref}", file=sys.stderr)
         return 1
     text = p.read_text(encoding="utf-8", errors="replace")
+    if args.section:
+        body = text
+        fm_end = text.find("\n---", 4)
+        if fm_end >= 0:
+            body = text[fm_end + 4:].lstrip("\n")
+        section = get_section(body, args.section)
+        if not section:
+            print(f"Section not found: {args.section}", file=sys.stderr)
+            return 1
+        print(section)
+        return 0
     if args.json:
         fm = parse_fm(text)
         print(json.dumps({"path": str(p.relative_to(ROOT)), "frontmatter": fm,
@@ -1106,15 +1194,21 @@ def validate() -> int:
 
 def load_tasks() -> Dict[str, Any]:
     try:
-        return json.loads(TASKS.read_text(encoding="utf-8"))
+        data = json.loads(TASKS.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return {"schema": TASKS_SCHEMA, "stack": [], "completed": []}
+        if "schema" not in data:
+            data["schema"] = TASKS_SCHEMA
+        return data
     except Exception:
-        return {"stack": [], "completed": []}
+        return {"schema": TASKS_SCHEMA, "stack": [], "completed": []}
 
 
 def save_tasks(data: Dict[str, Any]) -> None:
     RAG.mkdir(exist_ok=True)
     cfg = load_config()
     max_stack = int(cfg.get("checkpoints", {}).get("max_task_stack", 16))
+    data["schema"] = TASKS_SCHEMA
     data["stack"] = data.get("stack", [])[-max_stack:]
     TASKS.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
@@ -1159,7 +1253,8 @@ def tasks_cmd(args) -> int:
 
 
 def resume_cmd(args) -> int:
-    """Pop the top task from the stack and restore its WORKING_STATE."""
+    """Pop the top task from the stack and restore its WORKING_STATE.
+    Also update Current request / Current phase / Next actions to reflect the resume."""
     top = pop_task()
     if top is None:
         print("No task to resume (stack is empty).", file=sys.stderr)
@@ -1167,6 +1262,12 @@ def resume_cmd(args) -> int:
     ws = top.get("working_state", "")
     if ws and not args.discard_state:
         save_working(ws)
+    if WORKING.exists():
+        text = WORKING.read_text(encoding="utf-8", errors="replace")
+        text = set_section(text, "Current request", top.get("task", "resumed"))
+        text = set_section(text, "Current phase", f"resumed: {top.get('reason', '?')}")
+        text = set_header(text, "updated", now())
+        save_working(text)
     fp_saved = top.get("fingerprint")
     cur = project_fingerprint()
     fresh = fp_saved == cur
@@ -1185,21 +1286,35 @@ def resume_cmd(args) -> int:
 
 def forget_task_cmd(args) -> int:
     data = load_tasks()
-    n = len(data.get("stack", []))
-    data["stack"] = []
-    save_tasks(data)
-    print(f"Cleared task stack ({n} task(s) dropped).")
-    return 0
+    stack = data.get("stack", [])
+    if args.id is None:
+        n = len(stack)
+        data["stack"] = []
+        save_tasks(data)
+        print(f"Cleared task stack ({n} task(s) dropped).")
+        return 0
+    try:
+        idx = int(args.id)
+        if idx < 1 or idx > len(stack):
+            print(f"Invalid task id: {idx} (stack depth: {len(stack)})", file=sys.stderr)
+            return 1
+        removed = stack.pop(idx - 1)
+        data["stack"] = stack
+        save_tasks(data)
+        print(f"Dropped task #{idx}: {removed.get('task', '?')}")
+        return 0
+    except ValueError:
+        print(f"Invalid task id (expected integer): {args.id}", file=sys.stderr)
+        return 1
 
 
 def compact_working_state() -> None:
-    """Compact WORKING_STATE.md: keep only the most recent checkpoint snapshot
-    in sessions/.snapshots/ and trim the file to its latest meaningful state."""
+    """Compact WORKING_STATE.md: archive a snapshot and trim long list sections
+    (preserves the full section structure, only shortens overlong lists)."""
     if not WORKING.exists():
         print("No WORKING_STATE.md to compact.")
         return
     text = WORKING.read_text(encoding="utf-8", errors="replace")
-    # Archive current snapshot before compaction
     try:
         snap_dir = RAG / "sessions" / ".snapshots"
         snap_dir.mkdir(parents=True, exist_ok=True)
@@ -1207,17 +1322,15 @@ def compact_working_state() -> None:
         (snap_dir / f"pre-compact-{stamp}.md").write_text(text, encoding="utf-8")
     except Exception:
         pass
-    # Trim Recovery snapshot and Relevant files to last-20 entries (keep concise)
-    rs = get_section(text, "Recovery snapshot")
-    if rs:
-        rs_lines = rs.splitlines()
-        if len(rs_lines) > 20:
-            text = set_section(text, "Recovery snapshot", "\n".join(rs_lines[:20]) + "\n- (older entries trimmed by compact)")
-    rf = get_section(text, "Relevant files")
-    if rf:
-        rf_lines = rf.splitlines()
-        if len(rf_lines) > 20:
-            text = set_section(text, "Relevant files", "\n".join(rf_lines[:20]) + "\n- (older entries trimmed by compact)")
+    max_lines = 20
+    for sec in ("Recovery snapshot", "Relevant files"):
+        body = get_section(text, sec)
+        if not body:
+            continue
+        lines = body.splitlines()
+        if len(lines) > max_lines:
+            kept = "\n".join(lines[:max_lines])
+            text = set_section(text, sec, kept + "\n- (older entries trimmed by compact)")
     text = set_header(text, "updated", now())
     save_working(text)
     print("WORKING_STATE compacted (snapshot archived in sessions/.snapshots/).")
@@ -1347,13 +1460,40 @@ def embeddings_info(args) -> int:
 
 # ----------------------------- config ---------------------------------------
 
+CONFIG_TEMPLATE = """# INTERNAL_RAG configuration (v1.0.1)
+# Optional — remove this file to use built-in defaults.
+
+retrieval:
+  limit: 10
+  mmr_lambda: 0.5
+  min_score: 0.5
+  embeddings: auto        # auto | on | off
+  embeddings_model: all-MiniLM-L6-v2
+tokens:
+  context_budget: 4000
+  warn_ratio: 0.8
+checkpoints:
+  auto_archive_sessions: true
+  max_task_stack: 16
+privacy:
+  scan_on_checkpoint: false
+"""
+
+
 def config_cmd(args) -> int:
+    if getattr(args, "init", False):
+        if CONFIG_PATH.exists():
+            print(f"{CONFIG_PATH.relative_to(ROOT)} already exists; not overwriting.", file=sys.stderr)
+            return 1
+        CONFIG_PATH.write_text(CONFIG_TEMPLATE, encoding="utf-8")
+        print(f"Wrote {CONFIG_PATH.relative_to(ROOT)}")
+        return 0
     cfg = load_config()
     if args.json:
         print(json.dumps(cfg, indent=2))
         return 0
     if not CONFIG_PATH.exists():
-        print(f"No {CONFIG_PATH.relative_to(ROOT)} - using built-in defaults.")
+        print(f"No {CONFIG_PATH.relative_to(ROOT)} - using built-in defaults. Run `config --init` to create one.")
     else:
         print(CONFIG_PATH.read_text(encoding="utf-8", errors="replace"))
     return 0
@@ -1403,6 +1543,13 @@ def mcp_server() -> int:
             continue
         method = req.get("method", "")
         rid = req.get("id")
+        if method == "notifications/initialized":
+            continue
+        if method == "shutdown":
+            if rid is not None:
+                print(json.dumps({"jsonrpc": "2.0", "id": rid, "result": {}}))
+                sys.stdout.flush()
+            break
         if method == "tools/list":
             print(json.dumps({"jsonrpc": "2.0", "id": rid, "result": {"tools": tools}}))
             sys.stdout.flush()
@@ -1514,6 +1661,10 @@ def _mcp_dispatch(name: str, args_d: Dict[str, Any]) -> str:
 def main() -> None:
     ap = argparse.ArgumentParser(prog="irag.py", description=f"INTERNAL_RAG v{VERSION}")
     ap.add_argument("--version", action="version", version=VERSION)
+    ap.add_argument("--quiet", action="store_true", help="Suppress non-essential output.")
+    ap.add_argument("--verbose", action="store_true", help="Show extra detail.")
+    ap.add_argument("--embeddings", choices=["on", "off", "auto"], default=None,
+                    help="Override retrieval engine for this invocation.")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("init")
@@ -1551,6 +1702,7 @@ def main() -> None:
     p.add_argument("--query", required=True)
     p.add_argument("--limit", type=int, default=0)
     p.add_argument("--json", action="store_true")
+    p.add_argument("--embeddings", choices=["on", "off", "auto"], default=None)
 
     p = sub.add_parser("remember")
     p.add_argument("--type", required=True, choices=sorted(ALLOWED_TYPES))
@@ -1565,6 +1717,7 @@ def main() -> None:
 
     p = sub.add_parser("show")
     p.add_argument("ref")
+    p.add_argument("--section")
     p.add_argument("--json", action="store_true")
 
     p = sub.add_parser("update")
@@ -1597,7 +1750,12 @@ def main() -> None:
     p.add_argument("--limit", type=int, default=50)
     p.add_argument("--json", action="store_true")
 
-    sub.add_parser("forget-task")
+    p = sub.add_parser("history")
+    p.add_argument("--limit", type=int, default=50)
+    p.add_argument("--json", action="store_true")
+
+    p = sub.add_parser("forget-task")
+    p.add_argument("id", nargs="?")
 
     p = sub.add_parser("tasks")
     p.add_argument("--json", action="store_true")
@@ -1618,6 +1776,7 @@ def main() -> None:
 
     p = sub.add_parser("config")
     p.add_argument("--json", action="store_true")
+    p.add_argument("--init", action="store_true")
 
     a = ap.parse_args()
 
@@ -1630,10 +1789,17 @@ def main() -> None:
     elif a.cmd == "guard":
         raise SystemExit(guard())
     elif a.cmd == "search":
-        r = search(a.query, a.limit)
+        emb_override = a.embeddings or getattr(a, "embeddings", None)
+        if emb_override:
+            cfg = load_config()
+            cfg["retrieval"]["embeddings"] = emb_override
+            r = _search_with_cfg(a.query, a.limit, cfg)
+        else:
+            r = search(a.query, a.limit)
         if a.json:
             print(json.dumps([{"path": str(p.relative_to(ROOT)), "score": round(s, 2),
-                               "type": fm.get("type"), "status": fm.get("status"), "snippet": sn}
+                               "type": fm.get("type"), "status": fm.get("status"),
+                               "snippet": sn, "matched_tokens": _matched_for(fm, a.query)}
                               for s, p, fm, sn in r], ensure_ascii=False, indent=2))
         else:
             print("No matching durable memories." if not r else "\n".join(
@@ -1657,6 +1823,8 @@ def main() -> None:
         raise SystemExit(diff_memory(a))
     elif a.cmd == "timeline":
         raise SystemExit(timeline(a))
+    elif a.cmd == "history":
+        raise SystemExit(history_cmd(a))
     elif a.cmd == "index":
         rebuild_index()
     elif a.cmd == "validate":

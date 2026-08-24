@@ -1,22 +1,23 @@
 # START HERE
 
-Jeżeli wracasz do INTERNAL_RAG po miesiącach lub latach, wykonaj kolejno:
+If you return to INTERNAL_RAG after months or years, follow these steps:
 
-1. Zainstaluj do docelowego repo:
-
-```powershell
-python .\install.py "D:\sciezka\do\projektu"
-```
-
-2. Uruchom ponownie Warp/OpenCode.
-3. W repo wykonaj:
+1. Install into the target repo:
 
 ```powershell
-python .agents\skills\internal-rag\irag.py context --task "aktualne zadanie"
+python .\install.py "D:\path\to\project"
 ```
 
-4. Jeżeli pojawi się `RECOVERY REQUIRED`, użyj `docs/RECOVERY.md`.
-5. Przed publikacją repo uruchom `privacy_check.py`.
-6. Aby całkowicie oczyścić finalny projekt, uruchom `uninstall.py`.
+2. Restart Warp/OpenCode.
+3. In the repo run:
 
-Pełna dokumentacja: `README.md` i katalog `docs/`.
+```powershell
+python .agents\skills\internal-rag\irag.py context --task "current task"
+```
+
+4. If `RECOVERY REQUIRED` appears, follow `docs/RECOVERY.md`.
+5. Before publishing the repo run `privacy_check.py`.
+6. To fully clean the final project, run `uninstall.py`.
+7. Run `irag.py doctor` for a health check.
+
+Full documentation: `README.md` and the `docs/` directory.

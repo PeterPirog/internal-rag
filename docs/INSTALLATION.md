@@ -1,72 +1,74 @@
-# Instalacja (v1.0.0)
+# Installation (v1.0.1)
 
-## Wymagania
+## Requirements
 
 ```text
 python --version   # 3.8+
 git --version
 ```
 
-Projekt docelowy musi być repozytorium Git.
+The target project must be a Git repository.
 
-## Tryb zalecany: local-only
+## Recommended mode: local-only
 
 Windows:
 
 ```powershell
-python .\install.py "D:\projekty\moj-projekt"
+python .\install.py "D:\projects\my-project"
 ```
 
 Linux/macOS:
 
 ```bash
-python3 install.py "/home/user/projekty/moj-projekt"
+python3 install.py "/home/user/projects/my-project"
 ```
 
-Po sukcesie zobaczysz `INSTALLATION COMPLETE`.
+On success you will see `INSTALLATION COMPLETE`.
 
-Instalator:
-1. robi backup,
-2. zachowuje istniejącą pamięć,
-3. instaluje skill i CLI (`irag.py`, `irag_embeddings.py`, `irag_hooks.py`),
-4. instaluje integrację OpenCode (tools, plugin, commands),
-5. aktualizuje tylko oznaczoną sekcję `AGENTS.md`,
-6. konfiguruje `.git/info/exclude` (w tym `.irag.yml`),
-7. uruchamia `init` i `validate`.
+The installer:
+1. creates a backup,
+2. preserves existing memory,
+3. installs the skill and CLI (`irag.py`, `irag_embeddings.py`, `irag_hooks.py`),
+4. installs the OpenCode integration (tools, plugin, commands),
+5. updates only the marked section of `AGENTS.md`,
+6. configures `.git/info/exclude` (including `.irag.yml`),
+7. runs `init` and `validate`.
 
-## Tryb współdzielenia tools
+## Share-tools mode
 
-Jeżeli chcesz commitować integracje do docelowego projektu:
+If you want to commit integrations into the target project:
 
 ```text
-python install.py "D:\projekt" --share-tools
+python install.py "D:\project" --share-tools
 ```
 
-`INTERNAL_RAG/` nadal pozostaje lokalnie ignorowany.
+`INTERNAL_RAG/` remains locally ignored.
 
-## Opcjonalne: embeddings
+## Optional: embeddings
 
 ```bash
-pip install sentence-transformers numpy
+pip install -r requirements-optional.txt
 ```
 
-W `.irag.yml`:
+In `.irag.yml`:
 
 ```yaml
 retrieval:
   embeddings: auto
 ```
 
-## Opcjonalne: git hooks
+## Optional: git hooks
 
 ```bash
 python3 .agents/skills/internal-rag/irag_hooks.py install
 ```
 
-## Opcjonalne: MCP server
+See `docs/GIT-HOOKS.md`.
 
-Zobacz `docs/MCP.md`.
+## Optional: MCP server
 
-## Aktualizacja
+See `docs/MCP.md`.
 
-Uruchom nowy `install.py` na tym samym repo. Istniejący `WORKING_STATE.md` i katalogi pamięci są zachowywane.
+## Update
+
+Run the new `install.py` on the same repo. Existing `WORKING_STATE.md` and memory directories are preserved.

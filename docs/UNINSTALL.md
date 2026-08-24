@@ -1,23 +1,23 @@
-# Deinstalacja
+# Uninstall (v1.0.1)
 
-## Pełne oczyszczenie repo
+## Full cleanup of a repo
 
 Windows:
 
 ```powershell
-python .\uninstall.py "D:\projekt"
+python .\uninstall.py "D:\project"
 ```
 
 Linux/macOS:
 
 ```bash
-python3 uninstall.py "/projekt"
+python3 uninstall.py "/project"
 ```
 
-Program robi backup poza repo, usuwa `INTERNAL_RAG/`, skill, integrację OpenCode, własną sekcję z `AGENTS.md`, własny blok z `.git/info/exclude` i lokalny manifest.
+The uninstaller creates a backup outside the repo, then removes `INTERNAL_RAG/`, the skill, the OpenCode integration, the INTERNAL_RAG section from `AGENTS.md`, the INTERNAL_RAG block from `.git/info/exclude`, and the local manifest.
 
-Aby zachować pamięć: `--keep-memory`.
+To keep the memory: `--keep-memory`.
 
-Aby pominąć backup: `--no-backup`.
+To skip the backup: `--no-backup`.
 
-Po deinstalacji uruchom `git status --short`. Jeżeli INTERNAL_RAG był kiedyś commitowany, usunięcie nie czyści historii.
+After uninstall, run `git status --short`. If INTERNAL_RAG was ever committed, uninstalling does not clean the history.

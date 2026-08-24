@@ -11,3 +11,7 @@ build/
 Thumbs.db
 
 INTERNAL_RAG/.checkpoint.json
+INTERNAL_RAG/.tasks.json
+INTERNAL_RAG/.fpcache.json
+INTERNAL_RAG/exports/
+INTERNAL_RAG/sessions/.snapshots/

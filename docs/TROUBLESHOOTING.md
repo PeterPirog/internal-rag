@@ -1,21 +1,23 @@
-# Troubleshooting (v1.0.0)
+# Troubleshooting (v1.0.1)
 
-`RECOVERY REQUIRED` nie jest błędem — zobacz `RECOVERY.md`. `irag.py diff` pokaże co się zmieniło.
+`RECOVERY REQUIRED` is not an error — see `RECOVERY.md`. `irag.py diff` shows what changed.
 
-`GUARD STALE` oznacza zmianę po ostatnim checkpointcie. Zapisz checkpoint i powtórz guard.
+`GUARD STALE` means a change happened after the last checkpoint. Save a checkpoint and run guard again.
 
-Jeżeli OpenCode nie widzi tools: zrestartuj OpenCode, sprawdź `.opencode/tools/`, worktree i w razie potrzeby użyj bezpośrednio `irag.py`.
+If OpenCode does not see tools: restart OpenCode, check `.opencode/tools/`, the worktree, and if needed use `irag.py` directly.
 
-Jeżeli Warp nie używa skilla: zrestartuj Warp, sprawdź `AGENTS.md`, `.agents/skills/internal-rag/SKILL.md` i jawnie poproś o `internal-rag`.
+If Warp does not use the skill: restart Warp, check `AGENTS.md`, `.agents/skills/internal-rag/SKILL.md`, and explicitly request `internal-rag`.
 
-Jeżeli PowerShell blokuje `.ps1`, uruchom bezpośrednio `python .\install.py "D:\projekt"`.
+If PowerShell blocks `.ps1`, run `python .\install.py "D:\project"` directly.
 
-Embeddings niedostępne: `irag.py doctor` i `irag.py embeddings-info` pokażą status. Zainstaluj `pip install sentence-transformers numpy` lub użyj BM25 (domyślnie).
+Embeddings unavailable: `irag.py doctor` and `irag.py embeddings-info` show the status. Install `pip install -r requirements-optional.txt` or use BM25 (default).
 
-`irag.py mcp` nie odpowiada: serwer czyta stdin linia po linii (JSON-RPC). Upewnij się że klient wysyła `initialize` przed `tools/call`.
+`irag.py mcp` not responding: the server reads stdin line by line (JSON-RPC). Ensure the client sends `initialize` before `tools/call`.
 
-Hooki git nie uruchamiają się: sprawdź `.git/hooks/` i `irag_hooks.py status`. Na Windows upewnij się że git używa bash (Git for Windows).
+Git hooks not firing: check `.git/hooks/` and `irag_hooks.py status`. On Windows ensure git uses bash (Git for Windows).
 
-Backup jest domyślnie w `~/.internal-rag-backups/`. Jeżeli katalog domowy nie jest zapisywalny, skrypt użyje fallbacku obok repozytorium.
+Backup is in `~/.internal-rag-backups/` by default. If the home directory is not writable, the script falls back to a location next to the repo.
 
-`irag.py doctor` zgłasza braki — uruchom `irag.py init` aby utworzyć strukturę katalogów.
+`irag.py doctor` reports issues — run `irag.py init` to create the directory structure.
+
+CI workflow not pushed: the git token needs the `workflow` scope to push `.github/workflows/`.

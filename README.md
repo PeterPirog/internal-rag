@@ -1,71 +1,97 @@
 # INTERNAL_RAG
 
-Lokalna, trwała pamięć projektowa dla agentów programistycznych pracujących w terminalu (Warp, OpenCode, Claude Code, Cursor).
+![version](https://img.shields.io/badge/version-1.0.1-blue)
+![license](https://img.shields.io/badge/license-MIT-green)
+![python](https://img.shields.io/badge/python-3.8%2B-blue)
 
-**Wersja:** 1.0.0  
-**Zweryfikowano:** 2026-08-24  
-**Integracje:** Warp, OpenCode, MCP (Claude Code / Cursor)
-**Wymagania:** Python 3.8+, Git
-**Opcjonalnie:** `sentence-transformers`, `numpy` (lepsze wyszukiwanie semantyczne)
+Local, persistent project memory for terminal coding agents (Warp, OpenCode, Claude Code, Cursor).
 
-INTERNAL_RAG przechowuje minimalny stan potrzebny do wznowienia złożonej pracy bez utrzymywania całej historii sesji w oknie kontekstowym modelu. Działa jak punkt kontrolny (checkpoint) + RAG dla agenta.
+**Version:** 1.0.1  
+**Verified:** 2026-08-24  
+**Integrations:** Warp, OpenCode, MCP (Claude Code / Cursor)  
+**Requirements:** Python 3.8+, Git  
+**Optional:** `sentence-transformers`, `numpy` (better semantic retrieval)
 
-## Co nowego w 1.0.0
+INTERNAL_RAG stores the minimum state needed to resume complex work without keeping the full session history in the model's context window. It works as a checkpoint + RAG for the agent.
 
-- **Retrieval BM25 + MMR** z opcjonalnymi embeddingami (zero-dep fallback).
-- **Pełny CRUD pamięci**: `show`, `update`, `supersede`, `forget`, `link`, `status`, `diff`, `timeline`.
-- **Stos zadań**: `push` / `tasks` / `resume` / `forget-task` dla przerwań.
-- **Kompresja**: `compact` przed context compaction.
-- **MCP server**: `irag.py mcp` (JSON-RPC stdio) dla Claude Code / Cursor.
-- **Git hooks** (opcjonalne): auto-checkpoint po commicie, ostrzeżenie przed push.
-- **Diagnostyka**: `doctor`, `embeddings-info`, `config`.
-- **Transfer pamięci**: `export` / `import` (JSON).
-- **Token budget**: estymacja tokenów w `context`.
-- **`--json`** dla wszystkich komend strukturalnych.
+## What's new in 1.0.1
 
-## Szybki start
+- Full English documentation.
+- `search --json` now returns `matched_tokens`.
+- `remember --links` stored in frontmatter.
+- MCP server handles `notifications/initialized` and `shutdown`.
+- `compact` preserves sections (trims long lists, not the structure).
+- `privacy_check.py` now audits `.irag.yml`.
+- `requirements-optional.txt` for embeddings.
+- `--quiet` / `--verbose` global flags.
+- `history` command (checkpoint history).
+- `forget-task <id>` (drop a specific task, not just clear-all).
+- `resume` updates WORKING_STATE sections.
+- `config --init` generates a `.irag.yml` template.
+- `--embeddings on|off|auto` CLI override.
+- `show --section <name>` extracts a single section.
+- Schema versioning in `.checkpoint.json` / `.tasks.json`.
+- `.gitignore` covers `.tasks.json`, `.fpcache.json`, `exports/`.
+- New docs: `docs/CLI.md`, `docs/GIT-HOOKS.md`.
+- README badges.
+- Extended `self_test.py` (CRUD, MCP, hooks).
+
+## What's new in 1.0.0
+
+- **BM25 + MMR retrieval** with optional embeddings (zero-dep fallback).
+- **Full memory CRUD**: `show`, `update`, `supersede`, `forget`, `link`, `status`, `diff`, `timeline`.
+- **Task stack**: `push` / `tasks` / `resume` / `forget-task` for interrupts.
+- **Compaction**: `compact` before context compaction.
+- **MCP server**: `irag.py mcp` (JSON-RPC stdio) for Claude Code / Cursor.
+- **Git hooks** (optional): auto-checkpoint after commit, pre-push warning.
+- **Diagnostics**: `doctor`, `embeddings-info`, `config`.
+- **Memory transfer**: `export` / `import` (JSON).
+- **Token budget**: token estimation in `context`.
+- **`--json`** for all structured commands.
+
+## Quick start
 
 ### Windows
 
 ```powershell
-python .\install.py "D:\sciezka\do\projektu"
+python .\install.py "D:\path\to\project"
 ```
 
-Następnie uruchom ponownie Warp/OpenCode i w projekcie:
+Then restart Warp/OpenCode and in the project:
 
 ```powershell
-python .agents\skills\internal-rag\irag.py context --task "aktualne zadanie"
+python .agents\skills\internal-rag\irag.py context --task "current task"
 ```
 
 ### Linux/macOS
 
 ```bash
-python3 install.py "/sciezka/do/projektu"
+python3 install.py "/path/to/project"
 ```
 
-Następnie:
+Then:
 
 ```bash
-python3 .agents/skills/internal-rag/irag.py context --task "aktualne zadanie"
+python3 .agents/skills/internal-rag/irag.py context --task "current task"
 ```
 
-## Model pracy
+## Workflow
 
 ```text
 context
   ↓
-recovery, jeżeli wymagane
+recovery, if required
   ↓
-checkpoint przed pierwszą zmianą
+checkpoint before first change
   ↓
-implementacja
+implementation
   ↓
-checkpoint po istotnym etapie
+checkpoint after each milestone
   ↓
-guard przed zakończeniem
+guard before finishing
 ```
 
-Najważniejsze polecenia:
+Core commands:
 
 ```text
 irag.py context --task "..."
@@ -80,28 +106,31 @@ irag.py validate
 irag.py doctor
 ```
 
-## Pamięć trwała (CRUD)
+## Durable memory (CRUD)
 
 ```text
-remember --type decision --title "..." --body "..." --tags "a,b" --evidence "src/x.py:42"
+remember --type decision --title "..." --body "..." --tags "a,b" --evidence "src/x.py:42" --links "decisions/other.md"
 show <path-or-id>
+show <ref> --section Knowledge
 update <ref> --add-tags "new" --append "New evidence: ..."
 supersede <ref> --by <new> --reason "..."
-forget <ref>              # archiwizuje, nie usuwa
+forget <ref>              # archives, does not delete
 link --from <ref> --to <ref>
 timeline --limit 20
 status
+history
 ```
 
-Typy: `decision`, `knowledge`, `constraint`, `gotcha`, `failure`, `hypothesis`, `session`.
+Types: `decision`, `knowledge`, `constraint`, `gotcha`, `failure`, `hypothesis`, `session`.
 
-## Stos zadań (przerwania)
+## Task stack (interrupts)
 
 ```text
-irag.py push --task "przerwana praca" --reason "user-priority"
+irag.py push --task "interrupted work" --reason "user-priority"
 irag.py tasks
 irag.py resume
-irag.py forget-task
+irag.py forget-task <id>   # drop a specific task
+irag.py forget-task         # clear the whole stack
 ```
 
 ## MCP server (Claude Code / Cursor)
@@ -110,9 +139,9 @@ irag.py forget-task
 python3 .agents/skills/internal-rag/irag.py mcp
 ```
 
-Minimalny JSON-RPC stdio: `context`, `search`, `checkpoint`, `guard`, `remember`, `status`, `tasks`, `resume`.
+Minimal JSON-RPC stdio: `context`, `search`, `checkpoint`, `guard`, `remember`, `status`, `tasks`, `resume`.
 
-## Git hooks (opcjonalne, auto-checkpoint)
+## Git hooks (optional, auto-checkpoint)
 
 ```bash
 python3 .agents/skills/internal-rag/irag_hooks.py install
@@ -120,9 +149,9 @@ python3 .agents/skills/internal-rag/irag_hooks.py status
 python3 .agents/skills/internal-rag/irag_hooks.py uninstall
 ```
 
-Hooki nigdy nie blokują operacji git.
+Hooks never block git operations.
 
-## Konfiguracja (`.irag.yml`, opcjonalna)
+## Configuration (`.irag.yml`, optional)
 
 ```yaml
 retrieval:
@@ -138,9 +167,9 @@ checkpoints:
   max_task_stack: 24
 ```
 
-`irag.py config` pokazuje efektywną konfigurację.
+`irag.py config` shows the effective configuration. `irag.py config --init` writes a template.
 
-## Diagnostyka i transfer
+## Diagnostics & transfer
 
 ```text
 irag.py doctor
@@ -148,65 +177,68 @@ irag.py embeddings-info
 irag.py export                  # -> INTERNAL_RAG/exports/
 irag.py import <file.json> --overwrite
 irag.py config
+irag.py history
 ```
 
-## Opcjonalne embeddings (lepszy retrieval)
+## Optional embeddings (better retrieval)
 
 ```bash
-pip install sentence-transformers numpy
+pip install -r requirements-optional.txt
 ```
 
-Gdy pakiet jest dostępny i `.irag.yml` ma `embeddings: auto` (domyślnie), wyszukiwanie używa embeddingów z fallbackiem do BM25 gdy model niedostępny.
+When the package is available and `.irag.yml` has `embeddings: auto` (default), retrieval uses embeddings with fallback to BM25. Override at runtime with `--embeddings on|off|auto`.
 
-## Prywatność i Git
+## Privacy & Git
 
-Domyślny tryb instalacji jest **local-only**. Instalator używa `.git/info/exclude`, a nie projektowego `.gitignore`, żeby lokalne pliki pamięci i integracji nie były przypadkowo dodawane do commitów.
+The default install mode is **local-only**. The installer uses `.git/info/exclude`, not the project's `.gitignore`, so local memory and integration files are not accidentally committed.
 
-Przed publikacją projektu:
+Before publishing a project:
 
 ```powershell
-python .\privacy_check.py "D:\sciezka\do\projektu"
+python .\privacy_check.py "D:\path\to\project"
 ```
 
-Oczekiwany wynik:
+Expected result:
 
 ```text
 RESULT: PASS
 ```
 
-## Całkowite usunięcie z projektu
+## Full removal from a project
 
 ```powershell
-python .\uninstall.py "D:\sciezka\do\projektu"
+python .\uninstall.py "D:\path\to\project"
 ```
 
-Deinstalator tworzy backup poza repozytorium, a następnie usuwa INTERNAL_RAG i jego integracje. Aby zachować samą pamięć, użyj `--keep-memory`.
+The uninstaller creates a backup outside the repository, then removes INTERNAL_RAG and its integrations. To keep the memory, use `--keep-memory`.
 
-## Dokumentacja
+## Documentation
 
-- [Instalacja](docs/INSTALLATION.md)
-- [Codzienna praca](docs/DAILY-USAGE.md)
-- [Architektura](docs/ARCHITECTURE.md)
-- [Cykl życia pamięci](docs/MEMORY-LIFECYCLE.md)
+- [Installation](docs/INSTALLATION.md)
+- [Daily usage](docs/DAILY-USAGE.md)
+- [CLI reference](docs/CLI.md)
+- [Architecture](docs/ARCHITECTURE.md)
+- [Memory lifecycle](docs/MEMORY-LIFECYCLE.md)
 - [Recovery](docs/RECOVERY.md)
 - [Warp](docs/WARP.md)
 - [OpenCode](docs/OPENCODE.md)
 - [MCP](docs/MCP.md)
-- [Konfiguracja](docs/CONFIG.md)
+- [Configuration](docs/CONFIG.md)
 - [Embeddings](docs/EMBEDDINGS.md)
-- [Prywatność i Git](docs/PRIVACY-AND-GIT.md)
-- [Deinstalacja](docs/UNINSTALL.md)
+- [Git hooks](docs/GIT-HOOKS.md)
+- [Privacy & Git](docs/PRIVACY-AND-GIT.md)
+- [Uninstall](docs/UNINSTALL.md)
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
-- [Mapa plików](docs/FILE-MAP.md)
-- [Kompatybilność](docs/COMPATIBILITY.md)
-- [Publikacja na GitHub](docs/GITHUB-PUBLISHING.md)
+- [File map](docs/FILE-MAP.md)
+- [Compatibility](docs/COMPATIBILITY.md)
+- [GitHub publishing](docs/GITHUB-PUBLISHING.md)
 
-## Struktura w docelowym projekcie
+## Structure in a target project
 
 ```text
-projekt/
+project/
 ├── AGENTS.md
-├── .irag.yml                    # opcjonalna konfiguracja
+├── .irag.yml                    # optional config
 ├── INTERNAL_RAG/
 │   ├── WORKING_STATE.md
 │   ├── INDEX.md
@@ -225,25 +257,25 @@ projekt/
 ├── .agents/skills/internal-rag/
 │   ├── SKILL.md
 │   ├── irag.py
-│   ├── irag_embeddings.py       # opcjonalny plugin
-│   └── irag_hooks.py            # opcjonalne git hooks
+│   ├── irag_embeddings.py       # optional plugin
+│   └── irag_hooks.py            # optional git hooks
 └── .opencode/
     ├── tools/
     ├── commands/
     └── plugins/
 ```
 
-## Źródło prawdy
+## Source of truth
 
-1. bieżące polecenie użytkownika,
-2. aktualny kod/testy/konfiguracja,
-3. specyfikacje/ADR,
-4. zweryfikowana pamięć,
-5. notatki sesji,
-6. hipotezy.
+1. current user instructions,
+2. current code/tests/configuration,
+3. specifications/ADRs,
+4. verified memory,
+5. session notes,
+6. hypotheses.
 
-Pamięć może być nieaktualna. Kod ma pierwszeństwo.
+Memory can be stale. Code takes precedence.
 
-## Licencja
+## License
 
 MIT.

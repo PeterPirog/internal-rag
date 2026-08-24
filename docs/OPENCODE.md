@@ -1,6 +1,6 @@
-# OpenCode (v1.0.0)
+# OpenCode (v1.0.1)
 
-OpenCode używa:
+OpenCode uses:
 - `.agents/skills/internal-rag/SKILL.md`,
 - `.opencode/tools/`,
 - `.opencode/plugins/internal-rag-resilience.ts`,
@@ -8,28 +8,28 @@ OpenCode używa:
 
 ## Tools (native)
 
-- `memory-context` — start/resume zadania (context packet + recovery).
-- `memory-search` — wyszukiwanie BM25+MMR/embeddings.
-- `memory-checkpoint` — zapis stanu.
-- `memory-guard` — weryfikacja świeżości.
-- `memory-remember` — zapis pamięci trwałej.
-- `memory-status` — przegląd pamięci.
+- `memory-context` — start/resume a task (context packet + recovery).
+- `memory-search` — BM25+MMR/embeddings search.
+- `memory-checkpoint` — save state.
+- `memory-guard` — verify freshness.
+- `memory-remember` — store durable memory.
+- `memory-status` — memory overview.
 
-Wszystkie narzędzia wspierają `--json` (gdzie ma to sens).
+All tools support `--json` where relevant.
 
 ## Commands (slash)
 
-- `/memory <task>` — start zadania.
-- `/checkpoint` — zapis stanu + guard.
+- `/memory <task>` — start a task.
+- `/checkpoint` — save state + guard.
 - `/memory-check` — index + status + validate + guard.
-- `/memory-guard` — tylko guard.
+- `/memory-guard` — guard only.
 
 ## Plugin (resilience)
 
 `internal-rag-resilience.ts`:
-- `tool.execute.after` — auto-checkpoint po `edit`/`write`/`apply_patch`.
-- `session.error` — checkpoint + sugestia inspekcji.
+- `tool.execute.after` — auto-checkpoint after `edit`/`write`/`apply_patch`.
+- `session.error` — checkpoint + suggest inspection.
 - `session.idle` — checkpoint.
-- `experimental.session.compacting` — `compact` + checkpoint + wstrzykuje WORKING_STATE do kontekstu.
+- `experimental.session.compacting` — `compact` + checkpoint + inject WORKING_STATE into context.
 
-Jeżeli native tool zawiedzie, agent może zawsze wywołać `irag.py` przez terminal.
+If a native tool fails, the agent can always call `irag.py` via the terminal.
