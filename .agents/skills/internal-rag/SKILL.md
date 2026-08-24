@@ -1,6 +1,6 @@
 ---
 name: internal-rag
-description: Mandatory persistent project memory for substantial coding tasks. Use at task start, recovery, milestones, failures, before risky operations, before compaction, and before finishing.
+description: Mandatory persistent project memory for substantial coding tasks. Use at task start, recovery, milestones, failures, before risky operations, before compaction, and before finishing. v1.0.0 adds CRUD, multi-task stack, MCP server, optional embeddings, doctor, export/import.
 ---
 
 # Internal RAG
@@ -53,17 +53,88 @@ python3 .agents/skills/internal-rag/irag.py guard
 
 If guard is stale, checkpoint and run guard again. Do not finish until `GUARD OK`.
 
-## Retrieval
-
-Do not recursively read all of `INTERNAL_RAG/`.
+## Retrieval (selective, never preload all)
 
 ```bash
 python3 .agents/skills/internal-rag/irag.py search --query "symbols subsystem error" --limit 8
+python3 .agents/skills/internal-rag/irag.py search --query "..." --json   # for tooling
 ```
 
-## Durable memory
+Retrieval uses BM25 + MMR by default. If `sentence-transformers` is installed and `.irag.yml` enables it, embeddings are used with BM25 fallback.
 
-Use `remember` only for future-relevant decisions, constraints, root causes, gotchas, failures, and hypotheses. Never save raw chain-of-thought.
+## Durable memory CRUD
+
+Store only future-relevant knowledge. Never save raw chain-of-thought.
+
+```bash
+# Create
+python3 .agents/skills/internal-rag/irag.py remember --type decision --title "..." --body "..." --tags "a,b" --scope "module" --evidence "src/x.py:42"
+
+# Read
+python3 .agents/skills/internal-rag/irag.py show <path-or-id>
+python3 .agents/skills/internal-rag/irag.py timeline --limit 20
+
+# Update
+python3 .agents/skills/internal-rag/irag.py update <ref> --status superseded --add-tags "new"
+python3 .agents/skills/internal-rag/irag.py update <ref> --append "New evidence: ..."
+
+# Lifecycle
+python3 .agents/skills/internal-rag/irag.py supersede <ref> --by <new-ref> --reason "..."
+python3 .agents/skills/internal-rag/irag.py forget <ref>      # moves to archive/
+python3 .agents/skills/internal-rag/irag.py link --from <ref> --to <ref>
+
+# Overview
+python3 .agents/skills/internal-rag/irag.py status
+python3 .agents/skills/internal-rag/irag.py diff
+```
+
+## Multi-task stack (interrupts)
+
+When interrupted mid-task, push it and resume later:
+
+```bash
+python3 .agents/skills/internal-rag/irag.py push --task "interrupted work" --reason "user-priority"
+python3 .agents/skills/internal-rag/irag.py tasks
+python3 .agents/skills/internal-rag/irag.py resume
+```
+
+`resume` restores the pushed WORKING_STATE and reports whether project code still matches.
+
+## Compaction
+
+Before context compaction, archive and trim WORKING_STATE:
+
+```bash
+python3 .agents/skills/internal-rag/irag.py compact
+```
+
+## Diagnostics & transfer
+
+```bash
+python3 .agents/skills/internal-rag/irag.py doctor
+python3 .agents/skills/internal-rag/irag.py embeddings-info
+python3 .agents/skills/internal-rag/irag.py export                 # -> INTERNAL_RAG/exports/
+python3 .agents/skills/internal-rag/irag.py import <file.json> --overwrite
+python3 .agents/skills/internal-rag/irag.py config
+```
+
+## Optional Git hooks (auto-checkpoint)
+
+```bash
+python3 .agents/skills/internal-rag/irag_hooks.py install
+python3 .agents/skills/internal-rag/irag_hooks.py status
+python3 .agents/skills/internal-rag/irag_hooks.py uninstall
+```
+
+Hooks never block git operations.
+
+## MCP server (for Claude Code / Cursor / etc.)
+
+```bash
+python3 .agents/skills/internal-rag/irag.py mcp
+```
+
+Speaks a minimal JSON-RPC stdio protocol exposing `context`, `search`, `checkpoint`, `guard`, `remember`, `status`, `tasks`, `resume`.
 
 ## Privacy and Git
 

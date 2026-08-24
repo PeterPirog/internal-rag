@@ -2,14 +2,10 @@ import { tool } from "@opencode-ai/plugin"
 const py = process.platform === "win32" ? "python" : "python3"
 const script = (worktree: string) => `${worktree}/.agents/skills/internal-rag/irag.py`
 export default tool({
-  description: "Search persistent INTERNAL_RAG memory (BM25+MMR, optional embeddings).",
-  args: {
-    query: tool.schema.string(),
-    limit: tool.schema.number().optional(),
-    json: tool.schema.boolean().optional(),
-  },
+  description: "INTERNAL_RAG status overview: memory counts by type/status, checkpoint freshness, branch/HEAD.",
+  args: { json: tool.schema.boolean().optional() },
   async execute(args, context) {
-    const cmd = [py, script(context.worktree), "search", "--query", args.query, "--limit", String(args.limit ?? 8)]
+    const cmd = [py, script(context.worktree), "status"]
     if (args.json) cmd.push("--json")
     const p = Bun.spawn(cmd, { cwd: context.worktree, stdout: "pipe", stderr: "pipe" })
     const o = await new Response(p.stdout).text()

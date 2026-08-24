@@ -3,12 +3,12 @@ from __future__ import annotations
 import argparse, datetime as dt, shutil, subprocess
 from pathlib import Path
 
-VERSION='0.4.0'
+VERSION='1.0.0'
 AGENTS_START='<!-- INTERNAL_RAG_START -->'; AGENTS_END='<!-- INTERNAL_RAG_END -->'
 EXCLUDE_START='# >>> INTERNAL_RAG LOCAL-ONLY >>>'; EXCLUDE_END='# <<< INTERNAL_RAG LOCAL-ONLY <<<'
 MANAGED_PATHS=[
  Path('.agents/skills/internal-rag'),
- Path('.opencode/tools/memory-search.ts'),Path('.opencode/tools/memory-context.ts'),Path('.opencode/tools/memory-checkpoint.ts'),Path('.opencode/tools/memory-guard.ts'),
+ Path('.opencode/tools/memory-search.ts'),Path('.opencode/tools/memory-context.ts'),Path('.opencode/tools/memory-checkpoint.ts'),Path('.opencode/tools/memory-guard.ts'),Path('.opencode/tools/memory-remember.ts'),Path('.opencode/tools/memory-status.ts'),
  Path('.opencode/plugins/internal-rag-resilience.ts'),Path('.opencode/plugins/internal-rag-compaction.ts'),
  Path('.opencode/commands/memory.md'),Path('.opencode/commands/memory-check.md'),Path('.opencode/commands/checkpoint.md'),Path('.opencode/commands/memory-guard.md')]
 
@@ -60,7 +60,7 @@ def clean_exclude(target,broot):
 def tracked(target):
  out=git(target,'ls-files',check=False); r=[]
  for x in out.splitlines():
-  if x.startswith('INTERNAL_RAG/') or x.startswith('.agents/skills/internal-rag/') or x.startswith('.opencode/tools/memory-') or x.startswith('.opencode/plugins/internal-rag') or x.startswith('.opencode/commands/memory') or x=='.opencode/commands/checkpoint.md': r.append(x)
+   if x.startswith('INTERNAL_RAG/') or x.startswith('.agents/skills/internal-rag/') or x.startswith('.opencode/tools/memory-') or x.startswith('.opencode/plugins/internal-rag') or x.startswith('.opencode/commands/memory') or x=='.opencode/commands/checkpoint.md' or x=='.irag.yml': r.append(x)
  return r
 
 def main():
