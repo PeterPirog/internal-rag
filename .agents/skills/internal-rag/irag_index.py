@@ -26,7 +26,7 @@ import unicodedata
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def _canonical_content(text: str, fm: Dict[str, Any]) -> str:
@@ -148,7 +148,10 @@ class IndexDB:
         # v0 -> v1
         if current < 1:
             self._migrate_v0_to_v1()
-            self._set_user_version(SCHEMA_VERSION)
+        # v1 -> v2
+        if current < 2:
+            self._migrate_v1_to_v2()
+        self._set_user_version(SCHEMA_VERSION)
 
     def _migrate_v0_to_v1(self) -> None:
         c = self.conn
@@ -208,6 +211,244 @@ class IndexDB:
         except Exception:
             c.execute("ROLLBACK")
             raise
+
+    def _migrate_v1_to_v2(self) -> None:
+        """Add embeddings table for persistent embedding cache."""
+        c = self.conn
+        c.execute("BEGIN")
+        try:
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS embeddings (
+                    chunk_id TEXT NOT NULL,
+                    model_id TEXT NOT NULL,
+                    model_revision TEXT,
+                    dimension INTEGER NOT NULL,
+                    precision TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    vector BLOB NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(chunk_id, model_id, precision)
+                )
+            """)
+            c.execute("CREATE INDEX IF NOT EXISTS idx_embeddings_chunk ON embeddings(chunk_id)")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_embeddings_model ON embeddings(model_id)")
+            c.execute("COMMIT")
+        except Exception:
+            c.execute("ROLLBACK")
+            raise
+
+    # ----------------------- embedding cache -----------------------
+
+    EMBEDDING_DTYPE = "float32"
+    EMBEDDING_BYTE_ORDER = "little"
+
+    def _vector_to_blob(self, vector: Any) -> bytes:
+        """Convert a numpy array (or list) to a BLOB.
+        Format: float32, little-endian, raw bytes."""
+        try:
+            import numpy as _np
+            arr = _np.asarray(vector, dtype=_np.float32)
+            return arr.tobytes()
+        except ImportError:
+            # No numpy — pack manually
+            import struct
+            return b"".join(struct.pack("<f", float(v)) for v in vector)
+
+    def _blob_to_vector(self, blob: bytes, dimension: int):
+        """Convert a BLOB back to a numpy array (or list if numpy unavailable)."""
+        try:
+            import numpy as _np
+            arr = _np.frombuffer(blob, dtype=_np.float32)
+            if len(arr) != dimension:
+                raise ValueError(f"dimension mismatch: expected {dimension}, got {len(arr)}")
+            return arr
+        except ImportError:
+            import struct
+            floats = []
+            for i in range(dimension):
+                offset = i * 4
+                if offset + 4 > len(blob):
+                    raise ValueError(f"BLOB too short: expected {dimension*4} bytes, got {len(blob)}")
+                floats.append(struct.unpack("<f", blob[offset:offset+4])[0])
+            return floats
+
+    def get_embedding(self, chunk_id: str, model_id: str, precision: str = "float32"
+                      ) -> Optional[Tuple[Any, str]]:
+        """Get cached embedding for a chunk. Returns (vector, content_hash) or None."""
+        try:
+            row = self.conn.execute(
+                "SELECT vector, dimension, content_hash FROM embeddings "
+                "WHERE chunk_id=? AND model_id=? AND precision=?",
+                (chunk_id, model_id, precision)
+            ).fetchone()
+            if row is None:
+                return None
+            vec = self._blob_to_vector(row["vector"], row["dimension"])
+            return (vec, row["content_hash"])
+        except Exception:
+            return None
+
+    def set_embedding(self, chunk_id: str, model_id: str, vector: Any,
+                      content_hash: str, model_revision: str = "",
+                      precision: str = "float32") -> None:
+        """Store an embedding in the cache."""
+        try:
+            import numpy as _np
+            arr = _np.asarray(vector, dtype=_np.float32)
+            dim = len(arr)
+            blob = arr.tobytes()
+        except ImportError:
+            dim = len(vector)
+            blob = self._vector_to_blob(vector)
+        now_str = _dt.datetime.now().astimezone().isoformat(timespec="seconds")
+        c = self.conn
+        c.execute("BEGIN")
+        try:
+            c.execute("""
+                INSERT OR REPLACE INTO embeddings
+                (chunk_id, model_id, model_revision, dimension, precision,
+                 content_hash, vector, created_at)
+                VALUES (?,?,?,?,?,?,?,?)
+            """, (chunk_id, model_id, model_revision, dim, precision,
+                  content_hash, blob, now_str))
+            c.execute("COMMIT")
+        except Exception:
+            c.execute("ROLLBACK")
+            raise
+
+    def get_embeddings_batch(self, chunk_ids: List[str], model_id: str,
+                             precision: str = "float32"
+                             ) -> Dict[str, Tuple[Any, str]]:
+        """Get multiple cached embeddings. Returns {chunk_id: (vector, content_hash)}."""
+        if not chunk_ids:
+            return {}
+        result: Dict[str, Tuple[Any, str]] = {}
+        placeholders = ",".join("?" for _ in chunk_ids)
+        try:
+            rows = self.conn.execute(
+                f"SELECT chunk_id, vector, dimension, content_hash FROM embeddings "
+                f"WHERE chunk_id IN ({placeholders}) AND model_id=? AND precision=?",
+                (*chunk_ids, model_id, precision)
+            ).fetchall()
+            for row in rows:
+                try:
+                    vec = self._blob_to_vector(row["vector"], row["dimension"])
+                    result[row["chunk_id"]] = (vec, row["content_hash"])
+                except Exception:
+                    pass  # Corrupt row — skip, will be regenerated
+        except Exception:
+            pass
+        return result
+
+    def get_missing_chunks(self, chunk_ids: List[str], model_id: str,
+                           content_hashes: Dict[str, str],
+                           precision: str = "float32") -> List[str]:
+        """Return chunk_ids that need embedding (missing or stale content_hash)."""
+        if not chunk_ids:
+            return []
+        cached = self.get_embeddings_batch(chunk_ids, model_id, precision)
+        missing: List[str] = []
+        for cid in chunk_ids:
+            if cid not in cached:
+                missing.append(cid)
+            elif cached[cid][1] != content_hashes.get(cid, ""):
+                missing.append(cid)
+        return missing
+
+    def embeddings_status(self, model_id: str = "",
+                          precision: str = "float32") -> Dict[str, Any]:
+        """Return embedding cache status."""
+        try:
+            if model_id:
+                total = self.conn.execute(
+                    "SELECT COUNT(*) FROM embeddings WHERE model_id=? AND precision=?",
+                    (model_id, precision)
+                ).fetchone()[0]
+                disk_bytes = self.conn.execute(
+                    "SELECT COALESCE(SUM(LENGTH(vector)),0) FROM embeddings WHERE model_id=? AND precision=?",
+                    (model_id, precision)
+                ).fetchone()[0]
+            else:
+                total = self.conn.execute(
+                    "SELECT COUNT(*) FROM embeddings WHERE precision=?", (precision,)
+                ).fetchone()[0]
+                disk_bytes = self.conn.execute(
+                    "SELECT COALESCE(SUM(LENGTH(vector)),0) FROM embeddings WHERE precision=?",
+                    (precision,)
+                ).fetchone()[0]
+            n_chunks = self.conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+            models = [r[0] for r in self.conn.execute(
+                "SELECT DISTINCT model_id FROM embeddings").fetchall()]
+            dims = [r[0] for r in self.conn.execute(
+                "SELECT DISTINCT dimension FROM embeddings").fetchall()]
+            return {
+                "cached_chunks": total,
+                "total_chunks": n_chunks,
+                "missing_chunks": max(0, n_chunks - total),
+                "disk_bytes": disk_bytes,
+                "models": models,
+                "dimensions": dims,
+                "precision": precision,
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
+    def cleanup_stale_embeddings(self, current_chunk_ids: set[str],
+                                 model_id: str = "", precision: str = "float32") -> int:
+        """Remove embeddings for chunks that no longer exist. Returns count deleted."""
+        c = self.conn
+        deleted = 0
+        c.execute("BEGIN")
+        try:
+            if model_id:
+                rows = c.execute(
+                    "SELECT chunk_id FROM embeddings WHERE model_id=? AND precision=?",
+                    (model_id, precision)
+                ).fetchall()
+            else:
+                rows = c.execute(
+                    "SELECT chunk_id FROM embeddings WHERE precision=?", (precision,)
+                ).fetchall()
+            for row in rows:
+                if row["chunk_id"] not in current_chunk_ids:
+                    if model_id:
+                        c.execute(
+                            "DELETE FROM embeddings WHERE chunk_id=? AND model_id=? AND precision=?",
+                            (row["chunk_id"], model_id, precision))
+                    else:
+                        c.execute(
+                            "DELETE FROM embeddings WHERE chunk_id=? AND precision=?",
+                            (row["chunk_id"], precision))
+                    deleted += 1
+            c.execute("COMMIT")
+        except Exception:
+            c.execute("ROLLBACK")
+            raise
+        return deleted
+
+    def detect_corrupt_embeddings(self, model_id: str = "",
+                                   precision: str = "float32") -> List[str]:
+        """Detect embeddings with dimension mismatch or corrupt BLOB.
+        Returns list of chunk_ids with corrupt embeddings."""
+        corrupt: List[str] = []
+        try:
+            if model_id:
+                rows = self.conn.execute(
+                    "SELECT chunk_id, vector, dimension FROM embeddings "
+                    "WHERE model_id=? AND precision=?", (model_id, precision)
+                ).fetchall()
+            else:
+                rows = self.conn.execute(
+                    "SELECT chunk_id, vector, dimension FROM embeddings WHERE precision=?",
+                    (precision,)
+                ).fetchall()
+            for row in rows:
+                expected_len = row["dimension"] * 4
+                if len(row["vector"]) != expected_len:
+                    corrupt.append(row["chunk_id"])
+        except Exception:
+            pass
+        return corrupt
 
     # ----------------------- CRUD -----------------------
 
@@ -323,6 +564,7 @@ class IndexDB:
         c = self.conn
         c.execute("DELETE FROM chunks WHERE memory_id=?", (mem_id,))
         c.execute("DELETE FROM usage WHERE memory_id=?", (mem_id,))
+        c.execute("DELETE FROM embeddings WHERE chunk_id LIKE ?", (mem_id + "-c%",))
         c.execute("DELETE FROM documents WHERE memory_id=?", (mem_id,))
         if self.fts5_available():
             c.execute("DELETE FROM fts_memories WHERE memory_id=?", (mem_id,))

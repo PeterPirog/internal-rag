@@ -25,7 +25,7 @@ import unicodedata
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 
 ALLOWED_TYPES = {"decision", "knowledge", "constraint", "gotcha", "failure", "hypothesis", "session"}
 ALLOWED_STATUS = {"active", "tentative", "superseded", "invalid", "archived"}
@@ -1925,8 +1925,52 @@ def index_cmd(args) -> int:
             print("SQLite index: unavailable")
             return 1
         idx.vacuum()
+        # Cleanup stale embeddings
+        cands = [(p, p.read_text(encoding="utf-8", errors="replace"),
+                  parse_fm(p.read_text(encoding="utf-8", errors="replace")))
+                 for p in memory_files()]
+        current_chunk_ids = set()
+        for p, text, fm in cands:
+            mem_id = str(fm.get("id", str(p)))
+            current_chunk_ids.add(f"{mem_id}-c0")
+        deleted = idx.cleanup_stale_embeddings(current_chunk_ids)
+        # Detect and report corrupt embeddings
+        corrupt = idx.detect_corrupt_embeddings()
         idx.close()
-        print("SQLite index vacuumed.")
+        print(f"SQLite index vacuumed. Stale embeddings removed: {deleted}")
+        if corrupt:
+            print(f"Corrupt embeddings detected: {len(corrupt)} (will be regenerated on next search)")
+        return 0
+    if getattr(args, "embed_missing", False):
+        idx = _open_sqlite_index()
+        if idx is None:
+            print("SQLite index: unavailable")
+            return 1
+        cands = [(p, p.read_text(encoding="utf-8", errors="replace"),
+                  parse_fm(p.read_text(encoding="utf-8", errors="replace")))
+                 for p in memory_files()]
+        # First ensure documents are indexed
+        idx.sync_incremental(cands)
+        # Get model info
+        cfg = load_config()
+        model_name = str(cfg.get("retrieval", {}).get("embeddings_model", "all-MiniLM-L6-v2"))
+        # Compute content hashes for chunks
+        chunk_ids = []
+        content_hashes = {}
+        for p, text, fm in cands:
+            mem_id = str(fm.get("id", str(p)))
+            cid = f"{mem_id}-c0"
+            chunk_ids.append(cid)
+            body_start = text.find("\n---", 4)
+            body = text[body_start + 4:].strip() if body_start >= 0 else text
+            content_hashes[cid] = hashlib.sha256(body.encode("utf-8")).hexdigest()
+        missing = idx.get_missing_chunks(chunk_ids, model_name, content_hashes)
+        idx.close()
+        if not missing:
+            print(f"All {len(chunk_ids)} chunks have cached embeddings for model '{model_name}'.")
+            return 0
+        print(f"Missing/stale embeddings: {len(missing)}/{len(chunk_ids)} for model '{model_name}'")
+        print("Run a search or context command to lazily embed missing chunks.")
         return 0
     # Default: rebuild INDEX.md only
     rebuild_index()
@@ -2270,16 +2314,37 @@ def embeddings_info(args) -> int:
     cfg = load_config()
     mode = str(cfg.get("retrieval", {}).get("embeddings", "auto")).lower()
     avail = embeddings_search("test", [], 1, cfg) is not None
-    info = {"configured": mode, "available": avail,
+    model_name = str(cfg.get("retrieval", {}).get("embeddings_model", "all-MiniLM-L6-v2"))
+    info: Dict[str, Any] = {"configured": mode, "available": avail,
             "engine": "sentence-transformers" if avail else "bm25-fallback",
+            "model": model_name,
             "plugin_path": str(ROOT / ".agents" / "skills" / "internal-rag" / "irag_embeddings.py")}
+    # Persistent embedding cache status
+    idx = _open_sqlite_index()
+    if idx is not None:
+        emb_st = idx.embeddings_status(model_id=model_name if avail else "")
+        info["cache"] = emb_st
+        idx.close()
+    else:
+        info["cache"] = {"error": "index unavailable"}
     if args.json:
         print(json.dumps(info, indent=2))
         return 0
     print(f"Embeddings configured: {mode}")
     print(f"Available: {avail}")
     print(f"Engine: {info['engine']}")
+    print(f"Model: {model_name}")
     print(f"Plugin: {info['plugin_path']}")
+    cache = info.get("cache", {})
+    if "error" not in cache:
+        print(f"Cache: {cache.get('cached_chunks', 0)} cached, "
+              f"{cache.get('missing_chunks', 0)} missing, "
+              f"{cache.get('total_chunks', 0)} total, "
+              f"{cache.get('disk_bytes', 0)} bytes")
+        if cache.get("models"):
+            print(f"Cache models: {', '.join(str(m) for m in cache['models'])}")
+    else:
+        print(f"Cache: {cache.get('error', 'unavailable')}")
     return 0
 
 
@@ -2553,7 +2618,8 @@ def main() -> None:
     p = sub.add_parser("index")
     p.add_argument("--rebuild", action="store_true", help="Rebuild the SQLite index from Markdown.")
     p.add_argument("--status", action="store_true", help="Show SQLite index status.")
-    p.add_argument("--vacuum", action="store_true", help="VACUUM the SQLite database.")
+    p.add_argument("--vacuum", action="store_true", help="VACUUM the database and clean stale embeddings.")
+    p.add_argument("--embed-missing", action="store_true", help="Show missing/stale embeddings for the configured model.")
     p.add_argument("--json", action="store_true")
     sub.add_parser("validate")
     sub.add_parser("guard")

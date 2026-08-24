@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 AGENTS_START = "<!-- INTERNAL_RAG_START -->"
 AGENTS_END = "<!-- INTERNAL_RAG_END -->"
 EXCLUDE_START = "# >>> INTERNAL_RAG LOCAL-ONLY >>>"

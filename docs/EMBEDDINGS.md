@@ -1,13 +1,29 @@
-# Embeddings (optional, v1.1.0)
+# Embeddings (optional, v1.3.0)
 
 Since v1.1.0, INTERNAL_RAG uses **hybrid retrieval**: BM25 + optional dense embeddings combined via **Reciprocal Rank Fusion (RRF)**.
+
+Since v1.3.0, corpus embeddings are **persistently cached** in SQLite (`.index.sqlite3`), so repeated searches do not re-encode documents.
+
+## Persistent embedding cache
+
+- Location: `INTERNAL_RAG/.index.sqlite3` (same DB as FTS5 index).
+- Table: `embeddings(chunk_id, model_id, model_revision, dimension, precision, content_hash, vector, created_at)`.
+- Format: float32, little-endian BLOB.
+- Cache key: `(chunk_id, model_id, precision)` + `content_hash` match.
+- Only changed chunks are re-encoded; unchanged chunks use cached vectors.
+- Changing `last_accessed`/`access_count` does NOT invalidate embeddings.
+- Changing model creates a new cache series (old cache preserved).
 
 ## How hybrid retrieval works
 
 ```text
 query
   ├── BM25 sparse (always) ──→ sparse_ranked[]
-  ├── Dense embeddings (if available) ──→ dense_ranked[]
+  ├── Dense embeddings (if available)
+  │     ├── Check persistent SQLite cache for corpus embeddings
+  │     ├── Encode only missing/stale chunks
+  │     ├── Store new embeddings in SQLite
+  │     └── Compute cosine similarity ──→ dense_ranked[]
   └── RRF fusion ──→ fused[]
         ├── Policy boosts (status, type, recency)
         ├── MMR reranking (cosine diversity if dense, Jaccard fallback)

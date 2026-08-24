@@ -5,6 +5,7 @@ Uses only the standard library (unittest, sqlite3, tempfile).
 No external dependencies.
 """
 from __future__ import annotations
+import hashlib
 import importlib.util
 import os
 import shutil
@@ -84,10 +85,10 @@ class TestIndexDB(unittest.TestCase):
         idx.close()
 
     def test_schema_version(self):
-        """After migration, schema version should be 1."""
+        """After migration, schema version should be 2 (with embeddings table)."""
         idx = self._make_idx()
         st = idx.status()
-        self.assertEqual(st["schema_version"], 1)
+        self.assertEqual(st["schema_version"], 2)
         idx.close()
 
     def test_content_hash_excludes_usage(self):
@@ -305,6 +306,179 @@ class TestSearchDoesNotMutateMarkdown(unittest.TestCase):
         for p in fixture_files:
             after = p.read_bytes()
             self.assertEqual(before[str(p)], after, f"Markdown file was modified: {p}")
+
+
+class TestEmbeddingCache(unittest.TestCase):
+    """Test persistent embedding cache with a mock encoder."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="irag-emb-test-"))
+        self.root = self.tmp / "project"
+        self.rag = self.root / "INTERNAL_RAG"
+        self.rag.mkdir(parents=True, exist_ok=True)
+        (self.root / ".git").mkdir(exist_ok=True)
+        self.encode_calls = 0
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _make_idx(self) -> irag_index.IndexDB:
+        db_path = self.rag / ".index.sqlite3"
+        idx = irag_index.IndexDB(db_path, self.root)
+        idx.migrate()
+        return idx
+
+    def _mock_vector(self, text: str, dim: int = 8):
+        """Deterministic mock vector from text hash."""
+        h = hashlib.sha256(text.encode("utf-8")).digest()
+        vals = []
+        for i in range(dim):
+            vals.append((h[i % len(h)] / 255.0) * 2 - 1)
+        return vals
+
+    def test_set_and_get_embedding(self):
+        """Store and retrieve an embedding."""
+        idx = self._make_idx()
+        vec = self._mock_vector("test doc", 8)
+        idx.set_embedding("chunk-1-c0", "mock-model", vec, "hash123")
+        result = idx.get_embedding("chunk-1-c0", "mock-model")
+        self.assertIsNotNone(result)
+        retrieved_vec, content_hash = result
+        self.assertEqual(content_hash, "hash123")
+        # Check vector values
+        for i, v in enumerate(vec):
+            self.assertAlmostEqual(float(retrieved_vec[i]), v, places=5)
+        idx.close()
+
+    def test_content_hash_mismatch_invalidates(self):
+        """Changed content_hash should make cached embedding stale."""
+        idx = self._make_idx()
+        vec = self._mock_vector("doc v1", 8)
+        idx.set_embedding("chunk-1-c0", "mock-model", vec, "hash-v1")
+        # Same chunk_id, different content_hash
+        result = idx.get_embedding("chunk-1-c0", "mock-model")
+        self.assertIsNotNone(result)
+        _, stored_hash = result
+        self.assertEqual(stored_hash, "hash-v1")
+        # get_missing_chunks should flag it if hash differs
+        missing = idx.get_missing_chunks(["chunk-1-c0"], "mock-model",
+                                          {"chunk-1-c0": "hash-v2"})
+        self.assertIn("chunk-1-c0", missing)
+        idx.close()
+
+    def test_usage_metadata_does_not_invalidate(self):
+        """Changing last_accessed/access_count should not affect embedding cache.
+        content_hash for embeddings is based on document content, not usage."""
+        idx = self._make_idx()
+        vec = self._mock_vector("doc body", 8)
+        content_h = hashlib.sha256(b"doc body").hexdigest()
+        idx.set_embedding("chunk-1-c0", "mock-model", vec, content_h)
+        # Record access (simulating usage metadata change)
+        idx.record_access("chunk-1")
+        # Embedding should still be valid (same content_hash)
+        result = idx.get_embedding("chunk-1-c0", "mock-model")
+        self.assertIsNotNone(result)
+        _, stored_hash = result
+        self.assertEqual(stored_hash, content_h)
+        idx.close()
+
+    def test_model_change_creates_new_cache(self):
+        """Changing model_id should not delete old cache; creates a new one."""
+        idx = self._make_idx()
+        vec1 = self._mock_vector("doc", 8)
+        idx.set_embedding("chunk-1-c0", "model-A", vec1, "hash1")
+        vec2 = self._mock_vector("doc", 8)
+        idx.set_embedding("chunk-1-c0", "model-B", vec2, "hash1")
+        # Both should exist
+        r1 = idx.get_embedding("chunk-1-c0", "model-A")
+        r2 = idx.get_embedding("chunk-1-c0", "model-B")
+        self.assertIsNotNone(r1)
+        self.assertIsNotNone(r2)
+        idx.close()
+
+    def test_corrupt_vector_detected(self):
+        """Corrupt vector (wrong BLOB size) should be detected."""
+        idx = self._make_idx()
+        # Insert a valid embedding
+        vec = self._mock_vector("doc", 8)
+        idx.set_embedding("chunk-1-c0", "mock-model", vec, "hash1")
+        # Corrupt the BLOB directly
+        idx.conn.execute("UPDATE embeddings SET vector=? WHERE chunk_id=? AND model_id=?",
+                         (b"\x00\x01\x02", "chunk-1-c0", "mock-model"))
+        # Detect corrupt
+        corrupt = idx.detect_corrupt_embeddings(model_id="mock-model")
+        self.assertIn("chunk-1-c0", corrupt)
+        idx.close()
+
+    def test_batch_get_embeddings(self):
+        """Batch retrieval should return all cached embeddings."""
+        idx = self._make_idx()
+        for i in range(5):
+            vec = self._mock_vector(f"doc-{i}", 8)
+            idx.set_embedding(f"chunk-{i}-c0", "mock-model", vec, f"hash-{i}")
+        result = idx.get_embeddings_batch(
+            [f"chunk-{i}-c0" for i in range(5)], "mock-model")
+        self.assertEqual(len(result), 5)
+        idx.close()
+
+    def test_embeddings_status(self):
+        """embeddings_status should report cache statistics."""
+        idx = self._make_idx()
+        for i in range(3):
+            vec = self._mock_vector(f"doc-{i}", 8)
+            idx.set_embedding(f"chunk-{i}-c0", "mock-model", vec, f"hash-{i}")
+        st = idx.embeddings_status(model_id="mock-model")
+        self.assertEqual(st["cached_chunks"], 3)
+        self.assertIn("mock-model", st["models"])
+        idx.close()
+
+    def test_cleanup_stale_embeddings(self):
+        """cleanup_stale_embeddings should remove orphaned entries."""
+        idx = self._make_idx()
+        # Add embeddings for 5 chunks
+        for i in range(5):
+            vec = self._mock_vector(f"doc-{i}", 8)
+            idx.set_embedding(f"chunk-{i}-c0", "mock-model", vec, f"hash-{i}")
+        # Cleanup: only keep chunks 0, 1, 2
+        deleted = idx.cleanup_stale_embeddings({"chunk-0-c0", "chunk-1-c0", "chunk-2-c0"},
+                                                model_id="mock-model")
+        self.assertEqual(deleted, 2)
+        st = idx.embeddings_status(model_id="mock-model")
+        self.assertEqual(st["cached_chunks"], 3)
+        idx.close()
+
+    def test_first_search_encodes_second_uses_cache(self):
+        """Simulated: first call encodes N chunks, second call uses persistent cache."""
+        idx = self._make_idx()
+        chunk_ids = [f"chunk-{i}-c0" for i in range(5)]
+        content_hashes = {f"chunk-{i}-c0": f"hash-{i}" for i in range(5)}
+        # First call: all missing
+        missing1 = idx.get_missing_chunks(chunk_ids, "mock-model", content_hashes)
+        self.assertEqual(len(missing1), 5)
+        # Encode and store
+        for cid in chunk_ids:
+            vec = self._mock_vector(cid, 8)
+            idx.set_embedding(cid, "mock-model", vec, content_hashes[cid])
+        # Second call: all cached
+        missing2 = idx.get_missing_chunks(chunk_ids, "mock-model", content_hashes)
+        self.assertEqual(len(missing2), 0)
+        idx.close()
+
+    def test_single_chunk_reencode_on_content_change(self):
+        """Changing one document's content should only invalidate its chunk."""
+        idx = self._make_idx()
+        chunk_ids = [f"chunk-{i}-c0" for i in range(5)]
+        content_hashes = {f"chunk-{i}-c0": f"hash-{i}" for i in range(5)}
+        # Store all
+        for cid in chunk_ids:
+            vec = self._mock_vector(cid, 8)
+            idx.set_embedding(cid, "mock-model", vec, content_hashes[cid])
+        # Change content of chunk-2
+        content_hashes["chunk-2-c0"] = "hash-2-new"
+        missing = idx.get_missing_chunks(chunk_ids, "mock-model", content_hashes)
+        self.assertEqual(len(missing), 1)
+        self.assertIn("chunk-2-c0", missing)
+        idx.close()
 
 
 if __name__ == "__main__":

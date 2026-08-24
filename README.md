@@ -6,7 +6,7 @@
 
 Local, persistent project memory for terminal coding agents (Warp, OpenCode, Claude Code, Cursor).
 
-**Version:** 1.2.0  
+**Version:** 1.3.0  
 **Verified:** 2026-08-24  
 **Integrations:** Warp, OpenCode, MCP (Claude Code / Cursor)  
 **Requirements:** Python 3.8+, Git  

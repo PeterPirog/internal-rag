@@ -33,6 +33,10 @@ Warp / OpenCode / Claude Code / Cursor
   - If FTS5 available: uses SQLite `bm25()` with higher weights for title/tags/path.
   - If FTS5 unavailable: graceful fallback to pure-Python BM25 (same results, no error).
   - Markdown files remain the single source of truth; index is rebuildable cache.
+- **Persistent embedding cache** (schema v2): corpus embeddings stored as float32 BLOBs in SQLite.
+  - Only changed chunks are re-encoded; unchanged chunks use cached vectors.
+  - Multiple models coexist; model change creates new cache series.
+  - No `sqlite-vec` required — exact similarity via NumPy on BLOB read.
 - BM25 with standard IDF `log(1 + (N - df + 0.5) / (df + 0.5))` (k1=1.5, b=0.75, configurable).
 - Dense: sentence-transformers (`irag_embeddings.py`), lazy-loaded, graceful fallback to sparse-only.
 - **RRF**: `fused(doc) = sparse_weight/(rrf_k + sparse_rank) + dense_weight/(rrf_k + dense_rank)`.

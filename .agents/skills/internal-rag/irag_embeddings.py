@@ -128,13 +128,34 @@ def embeddings_search(query: str,
     return out
 
 
+def _get_persistent_cache(root: Path):
+    """Open the SQLite index for embedding cache. Returns IndexDB or None."""
+    try:
+        import importlib.util as _ilu
+        idx_path = root / ".agents" / "skills" / "internal-rag" / "irag_index.py"
+        spec = _ilu.spec_from_file_location("irag_index", str(idx_path))
+        if spec is None or spec.loader is None:
+            return None
+        mod = _ilu.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.open_index(root)
+    except Exception:
+        return None
+
+
+def _compute_content_hash_simple(text: str) -> str:
+    """Simple content hash for embedding cache (SHA-256 of doc text)."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 def dense_search_raw(query: str,
                      candidates: List[Tuple[Path, str, Dict[str, Any]]],
                      cfg: Dict[str, Any],
                      root: Path) -> Optional[List[Tuple[float, int]]]:
     """Raw dense retrieval — returns (cosine_similarity, candidate_index) pairs.
     No policy boosts, no limits, no snippets. Sorted by cosine descending.
-    Returns None if embeddings are unavailable or disabled."""
+    Returns None if embeddings are unavailable or disabled.
+    Uses persistent SQLite embedding cache when available."""
     mode = str(cfg.get("retrieval", {}).get("embeddings", "auto")).lower()
     if mode in ("off", "no", "false", "0"):
         return None
@@ -149,18 +170,72 @@ def dense_search_raw(query: str,
     if model is None:
         return None
     try:
+        # Build doc texts and chunk info
         docs = []
+        chunk_ids = []
+        content_hashes = []
         for p, text, fm in candidates:
             header = "\n".join(text.splitlines()[:40])
             body = " ".join(text.split())[:2000]
-            docs.append(f"{p.relative_to(root)}\n{header}\n{body}")
+            doc_text = f"{p.relative_to(root)}\n{header}\n{body}"
+            docs.append(doc_text)
+            mem_id = str(fm.get("id", str(p)))
+            chunk_ids.append(f"{mem_id}-c0")
+            content_hashes.append(_compute_content_hash_simple(doc_text))
+
+        # Query embedding (in-memory, not cached persistently)
         q_emb = _embed(model, [query])[0]
-        d_emb = _embed(model, docs)
+
+        # Try persistent cache
+        idx = _get_persistent_cache(root)
+        cached_vectors: Dict[str, Any] = {}
+        missing_indices: List[int] = []
+        if idx is not None:
+            cached = idx.get_embeddings_batch(chunk_ids, model_name, "float32")
+            for i, cid in enumerate(chunk_ids):
+                if cid in cached and cached[cid][1] == content_hashes[i]:
+                    cached_vectors[cid] = cached[cid][0]
+                else:
+                    missing_indices.append(i)
+        else:
+            missing_indices = list(range(len(docs)))
+
+        # Encode missing docs
+        new_vectors: Dict[str, Any] = {}
+        if missing_indices:
+            missing_docs = [docs[i] for i in missing_indices]
+            missing_embs = _embed(model, missing_docs)
+            for j, i in enumerate(missing_indices):
+                cid = chunk_ids[i]
+                new_vectors[cid] = missing_embs[j]
+                # Store in persistent cache
+                if idx is not None:
+                    try:
+                        idx.set_embedding(cid, model_name, missing_embs[j],
+                                          content_hashes[i])
+                    except Exception:
+                        pass
+
+        # Assemble full embedding matrix
+        all_embs = []
+        for i, cid in enumerate(chunk_ids):
+            if cid in cached_vectors:
+                all_embs.append(np.asarray(cached_vectors[cid], dtype=np.float32))
+            elif cid in new_vectors:
+                all_embs.append(np.asarray(new_vectors[cid], dtype=np.float32))
+            else:
+                # Should not happen, but fallback to encode
+                emb = _embed(model, [docs[i]])[0]
+                all_embs.append(emb)
+
+        d_emb = np.array(all_embs, dtype=np.float32)
         sims = (d_emb @ q_emb) if hasattr(d_emb, "@") else np.dot(d_emb, q_emb)
         scored: List[Tuple[float, int]] = []
         for i, sim in enumerate(sims):
             scored.append((float(sim), i))
         scored.sort(key=lambda x: -x[0])
+        if idx is not None:
+            idx.close()
         return scored
     except Exception:
         return None

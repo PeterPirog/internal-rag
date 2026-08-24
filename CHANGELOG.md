@@ -1,5 +1,40 @@
 # Changelog
 
+## 1.3.0 — 2026-08-24
+
+Persistent embedding cache in SQLite.
+
+### Embedding cache table (schema v2)
+- New `embeddings` table in `.index.sqlite3`: `chunk_id`, `model_id`, `model_revision`, `dimension`, `precision`, `content_hash`, `vector` (BLOB), `created_at`.
+- Migration v1→v2 via `PRAGMA user_version`.
+- BLOB format: float32, little-endian, raw bytes (deterministic byte order + dtype).
+- Primary key: `(chunk_id, model_id, precision)` — multiple models coexist.
+
+### Cache rules
+1. Same `content_hash` + `model_id` + `precision` → no re-encode.
+2. Changed content → only that chunk's embedding is invalidated.
+3. `last_accessed`/`access_count` changes → no embedding invalidation.
+4. Model change → new cache series, old cache preserved.
+5. `index --vacuum` cleans stale embedding entries + detects corrupt BLOBs.
+6. Query embedding stays in-memory; corpus embeddings are persistent.
+7. No `sqlite-vec` required — exact similarity via NumPy on BLOB read.
+8. If NumPy/sentence-transformers unavailable → sparse-only, no error.
+
+### Integration
+- `irag_embeddings.py` `dense_search_raw()` now checks persistent cache first.
+  Only missing/stale chunks are encoded; results stored back to SQLite.
+- In-process `_EMBED_CACHE` remains as L2 (session-level) cache.
+- `irag.py index --embed-missing` — show missing/stale embeddings for configured model.
+- `irag.py embeddings-info` — reports model, dimension, precision, cached/missing chunks, disk bytes.
+- `irag.py index --vacuum` — also cleans stale embeddings + reports corrupt vectors.
+
+### Tests
+- `tests/test_sqlite_index.py` — 29 tests (was 19): added embedding cache tests with mock encoder.
+  - set/get embedding, content hash mismatch, usage metadata isolation, model change,
+    corrupt vector detection, batch retrieval, status, cleanup, first/second process,
+    single chunk re-encode.
+- Total: 73 tests (44 retrieval + 29 SQLite index), all pass with zero dependencies.
+
 ## 1.2.0 — 2026-08-24
 
 Optional SQLite FTS5 index for retrieval acceleration.
