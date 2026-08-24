@@ -1,8 +1,57 @@
-# Embeddings (optional, v1.3.0)
+# Embeddings (optional, v1.4.0)
 
 Since v1.1.0, INTERNAL_RAG uses **hybrid retrieval**: BM25 + optional dense embeddings combined via **Reciprocal Rank Fusion (RRF)**.
 
 Since v1.3.0, corpus embeddings are **persistently cached** in SQLite (`.index.sqlite3`), so repeated searches do not re-encode documents.
+
+## Retrieval profiles (v1.4.0)
+
+| Profile | Model | Query/passage encoding |
+|---------|-------|------------------------|
+| `english-fast` (**default**) | `all-MiniLM-L6-v2` | no prefix (model card: plain encode) |
+| `multilingual` | `intfloat/multilingual-e5-small` | `query: ` / `passage: ` prefixes, as required by the E5 model card and Sentence Transformers |
+
+- `retrieval.profile` selects the profile; `retrieval.embeddings_model` (explicit value) overrides it — an explicit model is encoded with **no prefix**.
+- The in-memory embedding cache key **includes the model identity**, and the persistent cache is keyed by `(chunk_id, model_id, precision)` + content hash — switching profiles never reuses the other profile's vectors.
+- `irag.py embeddings-info` reports the **active profile** and resolved model.
+- `english-fast` remains the default for existing users; choose `multilingual` for Polish-English corpora (see Benchmark below).
+
+## Sparse channel: code tokens vs natural language
+
+- No external stemmer (pure stdlib `tokenize()`).
+- Identifiers are preserved verbatim by the tokenizer, so exact matching works for
+  `refresh_token_cache`, `AuthService.refresh()`, `src/auth/session.py` (underscores,
+  dots, slashes and `()`-wrapped calls survive tokenization).
+- A small, **opt-in** Polish stopword list exists (`retrieval.pl_stopwords`,
+  default `true`): it removes Polish function words from the sparse channel only.
+  It is benchmark-justified (see below) and conservative — identifiers, proper
+  nouns and technical terms are never dropped.
+- Hard-coded English query expansion remains as a compatibility layer and can be
+  disabled with `retrieval.query_expansion: false`.
+
+## Benchmark (v1.4.0, 22-memory fixture corpus)
+
+Query set: 15 Polish, 15 English, 10 PL+code-identifier mixed; Recall@1/3/5 and
+MRR per group; `tests/multilingual_benchmark.py` (run with
+`pip install -r requirements-optional.txt` installed):
+
+| pipeline / profile | PL R@1 / R@5 / MRR | EN R@1 / R@5 / MRR | MIXED R@1 / R@5 / MRR |
+|---|---|---|---|
+| sparse (BM25, default profile) | 62% / 81% / 0.690 | 81% / 100% / 0.870 | 60% / 70% / 0.625 |
+| hybrid `english-fast` | 12% / 50% / 0.227 | 25% / 50% / 0.300 | 10% / 60% / 0.205 |
+| hybrid `multilingual` | **19%** / 50% / **0.269** | 25% / **56%** / **0.319** | 10% / 60% / 0.205 |
+
+PL-stopword experiment (sparse): PL group R@1 62%→69%, MRR 0.690→0.721 — kept
+enabled by default (`pl_stopwords: true`) because it improves recall without
+dropping exact-matching tokens; set `pl_stopwords: false` to revert.
+
+Conclusions (do **not** treat multilingual as a universal default):
+- `multilingual` improves the PL group over `english-fast` and does not regress
+  EN/MIXED in hybrid mode → officially supported for PL/EN projects.
+- On this small corpus, dense hybrid currently adds little over the sparse
+  channel and costs significant latency; prefer `mode: sparse` (default) for
+  latency-sensitive paths and re-run the benchmark on your own corpus before
+  enabling hybrid.
 
 ## Persistent embedding cache
 

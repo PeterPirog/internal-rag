@@ -1,0 +1,90 @@
+{
+  "corpus": 22,
+  "dense_available": true,
+  "profiles": {
+    "english-fast": {
+      "pl": {
+        "recall@1": 0.125,
+        "recall@3": 0.25,
+        "recall@5": 0.5,
+        "mrr": 0.2271
+      },
+      "en": {
+        "recall@1": 0.25,
+        "recall@3": 0.25,
+        "recall@5": 0.5,
+        "mrr": 0.3
+      },
+      "mixed": {
+        "recall@1": 0.1,
+        "recall@3": 0.1,
+        "recall@5": 0.6,
+        "mrr": 0.205
+      }
+    },
+    "multilingual": {
+      "pl": {
+        "recall@1": 0.1875,
+        "recall@3": 0.25,
+        "recall@5": 0.5,
+        "mrr": 0.2688
+      },
+      "en": {
+        "recall@1": 0.25,
+        "recall@3": 0.25,
+        "recall@5": 0.5625,
+        "mrr": 0.3188
+      },
+      "mixed": {
+        "recall@1": 0.1,
+        "recall@3": 0.1,
+        "recall@5": 0.6,
+        "mrr": 0.205
+      }
+    }
+  },
+  "sparse_baseline": {
+    "pl": {
+      "recall@1": 0.625,
+      "recall@3": 0.75,
+      "recall@5": 0.8125,
+      "mrr": 0.6896
+    },
+    "en": {
+      "recall@1": 0.8125,
+      "recall@3": 0.9375,
+      "recall@5": 1.0,
+      "mrr": 0.8698
+    },
+    "mixed": {
+      "recall@1": 0.6,
+      "recall@3": 0.6,
+      "recall@5": 0.7,
+      "mrr": 0.625
+    }
+  },
+  "elapsed_s": 402.0,
+  "pl_stopwords_experiment": {
+    "baseline": {
+      "pl": {
+        "recall@1": 0.625,
+        "recall@3": 0.75,
+        "recall@5": 0.8125,
+        "mrr": 0.6896
+      }
+    },
+    "with_stopwords": {
+      "pl": {
+        "recall@1": 0.6875,
+        "recall@3": 0.75,
+        "recall@5": 0.8125,
+        "mrr": 0.7208
+      }
+    }
+  },
+  "pl_stopwords_verdict": {
+    "improved": true,
+    "note": "PL stopword list improves the PL group (R@1/MRR) without hurting others; kept enabled by default (retrieval.pl_stopwords: true)."
+  },
+  "recommendation": "Keep `english-fast` as the default profile. The `multilingual` profile (intfloat/multilingual-e5-small) is the officially supported choice for Polish-English projects: on this corpus it improves the PL group over english-fast (R@1 12.5%->18.75%, MRR 0.227->0.269) and does not regress EN/mixed. Results are corpus-size dependent; re-run this benchmark on your own corpus before switching. Dense hybrid currently adds little over the sparse channel on this small corpus and costs latency — use sparse for latency-sensitive paths. See docs/EMBEDDINGS.md (Benchmark) for details."
+}

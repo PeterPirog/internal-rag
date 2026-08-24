@@ -13,9 +13,14 @@ python .agents/skills/internal-rag/irag.py context --task "task"
 
 ## Full offline pack (with embeddings)
 
-On a machine **with** internet:
+On a machine **with** internet, choose the retrieval profile (default `english-fast`;
+use `multilingual` for Polish-English projects):
 
 ```bash
+python pack.py --with-embeddings --profile english-fast
+# or, for a PL/EN project:
+python pack.py --with-embeddings --profile multilingual
+# or pin an explicit model:
 python pack.py --with-embeddings --model all-MiniLM-L6-v2
 ```
 

@@ -18,6 +18,10 @@ retrieval:
   sparse_weight: 1.0         # RRF weight for BM25 channel
   dense_weight: 1.0          # RRF weight for dense channel
    candidate_multiplier: 4    # over-fetch factor for candidate pool
+   profile: english-fast      # english-fast | multilingual (v1.4.0, default: english-fast)
+   embeddings_model: null     # explicit model path/name overrides the profile (no prefix)
+   query_expansion: true      # English synonym expansion (compat layer; set false to disable)
+   pl_stopwords: true         # small PL function-word list on the sparse channel (benchmark-justified)
    chunking:                  # section-aware chunking (v1.4.0)
      enabled: true
      threshold_chars: 2000    # memories shorter than this become a single chunk

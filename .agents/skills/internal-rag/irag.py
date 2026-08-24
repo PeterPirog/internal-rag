@@ -51,6 +51,7 @@ DEFAULT_CONFIG = {
         "candidate_multiplier": 4,
         "profile": "english-fast",
         "query_expansion": True,
+        "pl_stopwords": True,
         "chunking": {
             "enabled": True,
             "threshold_chars": 2000,
@@ -853,6 +854,31 @@ STOPWORDS = {
     "use", "used", "using", "get", "set", "new", "one", "two", "via", "like", "etc",
 }
 
+# Polish function words. Applied ONLY when retrieval.pl_stopwords is enabled (opt-in).
+# Deliberately small and conservative so it never drops tokens needed for exact
+# matching (identifiers, proper nouns, technical terms are never touched).
+PL_STOPWORDS = {
+    "ze", "sie", "ktory", "ktora", "ktore", "ktorego", "ktorej", "ktorych", "i", "w", "na",
+    "z", "o", "do", "od", "po", "przez", "przy", "bez", "ale", "oraz", "bo", "by", "aby",
+    "nie", "tak", "jest", "są", "sa", "ma", "mają", "maja", "był", "byla", "bylo", "ten", "ta", "te",
+    "dla", "jak", "bardzo", "tez", "także", "takze", "wtedy", "gdy", "jesli", "albo", "czy",
+    "zostaje", "zostal", "zostala", "nalezy", "trzeba", "mozna", "musi", "musza", "musiał",
+    "taki", "taka", "takie", "nowe", "nowa", "nowy", "stare", "stara", "stary",
+    "wszystkie", "wszystkich", "wszystko", "kady", "kazdy", "kazde", "kazda", "inny", "inna", "inne",
+    "swoje", "ich", "jego", "jej", "nasz", "nasza", "wasz", "moj", "moja", "moje", "już", "jeszcze",
+    "poniewaz", "zeby", "tutaj", "tam", "tym", "te", "tej", "tego",
+}
+
+# Opt-in flag for the Polish stopword list (driven by retrieval.pl_stopwords).
+# Set by _search_with_cfg / search() before tokenization.
+_PL_STOPWORDS_ENABLED = False
+
+
+def set_pl_stopwords(enabled: bool) -> None:
+    """Enable/disable the (opt-in) Polish stopword list for the sparse channel."""
+    global _PL_STOPWORDS_ENABLED
+    _PL_STOPWORDS_ENABLED = bool(enabled)
+
 
 def tokenize(text: str) -> List[str]:
     text = text.lower()
@@ -862,6 +888,8 @@ def tokenize(text: str) -> List[str]:
     out: List[str] = []
     for tok in raw:
         if tok in STOPWORDS:
+            continue
+        if _PL_STOPWORDS_ENABLED and tok in PL_STOPWORDS:
             continue
         if len(tok) < 3 and not tok.isdigit():
             continue
@@ -1032,6 +1060,22 @@ def mmr_rerank(scored: List[Tuple[float, int, List[str]]],
     return selected
 
 
+def _load_embeddings_module():
+    """Load irag_embeddings.py (ROOT-relative, with __file__ fallback for tests)."""
+    import importlib.util as _ilu
+    emb_path = ROOT / ".agents" / "skills" / "internal-rag" / "irag_embeddings.py"
+    if not emb_path.exists():
+        emb_path = Path(__file__).resolve().parent / "irag_embeddings.py"
+    if not emb_path.exists():
+        return None
+    spec = _ilu.spec_from_file_location("irag_embeddings", str(emb_path))
+    if spec is None or spec.loader is None:
+        return None
+    mod = _ilu.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def embeddings_search(query: str, candidates: List[Tuple[Path, str, Dict[str, Any]]],
                       limit: int, cfg: Dict[str, Any]
                       ) -> Optional[List[Tuple[float, Path, Dict[str, Any], str, List[str]]]]:
@@ -1041,13 +1085,9 @@ def embeddings_search(query: str, candidates: List[Tuple[Path, str, Dict[str, An
     if mode in ("off", "no", "false", "0"):
         return None
     try:
-        import importlib.util as _ilu
-        spec = _ilu.spec_from_file_location(
-            "irag_embeddings", str(ROOT / ".agents" / "skills" / "internal-rag" / "irag_embeddings.py"))
-        if spec is None or spec.loader is None:
+        mod = _load_embeddings_module()
+        if mod is None:
             return None
-        mod = _ilu.module_from_spec(spec)
-        spec.loader.exec_module(mod)
         return mod.embeddings_search(query, candidates, limit, cfg, ROOT)
     except Exception:
         return None
@@ -1058,14 +1098,24 @@ def _dense_search_raw(query: str, candidates: List[Tuple[Path, str, Dict[str, An
     """Raw dense retrieval: (cosine_sim, candidate_idx) sorted desc.
     Returns None if unavailable."""
     try:
-        import importlib.util as _ilu
-        spec = _ilu.spec_from_file_location(
-            "irag_embeddings", str(ROOT / ".agents" / "skills" / "internal-rag" / "irag_embeddings.py"))
-        if spec is None or spec.loader is None:
+        mod = _load_embeddings_module()
+        if mod is None:
             return None
-        mod = _ilu.module_from_spec(spec)
-        spec.loader.exec_module(mod)
         return mod.dense_search_raw(query, candidates, cfg, ROOT)
+    except Exception:
+        return None
+
+
+def _dense_similarity_matrix(candidate_indices: List[int],
+                              candidates: List[Tuple[Path, str, Dict[str, Any]]],
+                              cfg: Dict[str, Any]) -> Optional[Any]:
+    """Compute pairwise cosine similarity matrix for MMR diversity.
+    Returns numpy matrix [n x n] or None if embeddings unavailable."""
+    try:
+        mod = _load_embeddings_module()
+        if mod is None:
+            return None
+        return mod.dense_similarity_matrix(candidate_indices, candidates, cfg, ROOT)
     except Exception:
         return None
 
@@ -1076,13 +1126,9 @@ def _dense_similarity_matrix(candidate_indices: List[int],
     """Compute pairwise cosine similarity matrix for MMR diversity.
     Returns numpy matrix or None."""
     try:
-        import importlib.util as _ilu
-        spec = _ilu.spec_from_file_location(
-            "irag_embeddings", str(ROOT / ".agents" / "skills" / "internal-rag" / "irag_embeddings.py"))
-        if spec is None or spec.loader is None:
+        mod = _load_embeddings_module()
+        if mod is None:
             return None
-        mod = _ilu.module_from_spec(spec)
-        spec.loader.exec_module(mod)
         return mod.dense_similarity_matrix(candidate_indices, candidates, cfg, ROOT)
     except Exception:
         return None
@@ -1404,6 +1450,7 @@ def _search_with_cfg(query: str, limit: int, cfg: Dict[str, Any],
     cand_mult = int(r_cfg.get("candidate_multiplier", 4))
     cand_limit = limit * cand_mult
     chunking_cfg = r_cfg.get("chunking", {})
+    set_pl_stopwords(bool(r_cfg.get("pl_stopwords", False)))
     # Filter candidates at memory level (type/status filters before retrieval)
     cands: List[Tuple[Path, str, Dict[str, Any]]] = []
     for p in memory_files():
@@ -1438,9 +1485,10 @@ def _search_with_cfg(query: str, limit: int, cfg: Dict[str, Any],
         docs_tok.append(tokenize(combined))
 
     # 1. Sparse BM25 on chunks
-    q_tokens = tokenize(query)
+    expanded_query = expand_query(query, cfg)
+    q_tokens = tokenize(expanded_query)
     if not q_tokens:
-        q_tokens = re.findall(r"[A-Za-z0-9_./:@+-]{2,}", query.lower())
+        q_tokens = re.findall(r"[a-z0-9_./:@+-]{2,}", expanded_query.lower())
     chunk_docs_tok: List[List[str]] = []
     for chunk_id, cand_idx, section_slug, chunk_text, chash in chunks:
         chunk_docs_tok.append(tokenize(chunk_text))

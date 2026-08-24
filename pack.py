@@ -66,6 +66,7 @@ def main() -> int:
     ap.add_argument("--model", default="", help="Model to pre-download (overrides profile).")
     ap.add_argument("--profile", default="english-fast", choices=["english-fast", "multilingual"],
                     help="Retrieval profile (default: english-fast).")
+    ap.add_argument("--out", default="", help="Output ZIP path (default: internal-rag-offline-<version>.zip).")
     args = ap.parse_args()
 
     out_zip = Path(args.out) if args.out else ROOT / f"internal-rag-offline-{VERSION}.zip"
@@ -78,7 +79,9 @@ def main() -> int:
     print("Copying package files...")
     for item in ROOT.rglob("*"):
         rel = item.relative_to(ROOT)
-        if any(p in rel.parts for p in (".git", "__pycache__", ".offline-staging", ".venv", "venv")):
+        if any(p in rel.parts for p in (".git", "__pycache__", ".offline-staging", ".venv", "venv", "node_modules")):
+            continue
+        if any(p.startswith(".venv") for p in rel.parts):
             continue
         if str(rel).startswith("internal-rag-offline-"):
             continue

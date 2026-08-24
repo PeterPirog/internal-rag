@@ -36,12 +36,18 @@ Section-aware chunking, read-only search, SimHash dedup, multilingual profiles, 
 - Tests: `tests/test_dedup.py` (identical text different title, near rephrase, opposing decision, Polish/whitespace normalization, force bypass, archived informational, JSON shape, import idempotency).
 
 ### Multilingual PL/EN profile (task 8)
-- `retrieval.profile: english-fast | multilingual` (default: english-fast).
-- english-fast: all-MiniLM-L6-v2 (unchanged).
-- multilingual: intfloat/multilingual-e5-small with query/passage prefix.
-- Cache key includes model/profile. `embeddings-info` shows active profile.
-- `pack.py --profile english-fast|multilingual`.
-- `retrieval.query_expansion: false` to disable synonym expansion.
+- `retrieval.profile: english-fast | multilingual` (default: english-fast — kept for existing users).
+- english-fast: all-MiniLM-L6-v2, no query/passage prefix (per model card).
+- multilingual: intfloat/multilingual-e5-small with `query: `/`passage: ` prefixes (per E5 model card + Sentence Transformers).
+- In-memory embedding cache key includes model identity; persistent cache keyed by `(chunk_id, model_id, precision)` — profiles never share vectors.
+- `embeddings-info` reports the active profile and resolved model.
+- `retrieval.embeddings_model` (explicit) overrides the profile; explicit models are encoded without prefix.
+- Sparse channel: no external stemmer; code identifiers preserved verbatim (`refresh_token_cache`, `AuthService.refresh()`, `src/auth/session.py`); conservative PL stopword list gated behind `retrieval.pl_stopwords` (default `true`, benchmark-justified); `retrieval.query_expansion: false` disables the English synonym compatibility layer.
+- Benchmark (`tests/multilingual_benchmark.py`, 15 PL + 15 EN + 10 mixed queries, Recall@1/3/5 + MRR per group, report `tests/benchmark_multilingual.json`):
+  - hybrid multilingual > hybrid english-fast on the PL group (R@1 12.5%→18.75%, MRR 0.227→0.269), EN/MIXED not regressed → multilingual is the officially supported choice for PL/EN projects, **not** the default.
+  - dense hybrid adds little over sparse on the small fixture corpus and costs latency — re-run the benchmark on your corpus before enabling hybrid.
+  - PL stopwords: PL group R@1 62%→69%, MRR 0.690→0.721 → kept enabled by default.
+- `pack.py --with-embeddings --profile english-fast|multilingual` (or `--model` to pin an explicit model).
 
 ### Temporal metadata + consolidate (task 9)
 - Frontmatter: `schema:2`, `valid_from`, `valid_to`, `confidence`, `supersedes`, `derived_from`.
