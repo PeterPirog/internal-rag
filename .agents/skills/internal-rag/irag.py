@@ -1187,8 +1187,23 @@ def _mmr_post_fusion(fused: List[Tuple[float, int, Dict[str, Any]]],
     return selected
 
 
+def _mark_accessed_db(mem_ids: List[str]) -> None:
+    """Record access in SQLite usage table (does NOT modify Markdown)."""
+    idx = _open_sqlite_index()
+    if idx is None:
+        return
+    try:
+        for mid in mem_ids:
+            idx.record_access(mid)
+    except Exception:
+        pass
+    finally:
+        idx.close()
+
+
 def _mark_accessed(paths: List[Path]) -> None:
-    """H7: Update last_accessed timestamp in frontmatter of returned memories."""
+    """Legacy: write last_accessed to frontmatter. Kept for migrate-usage only.
+    Search/context no longer call this — use _mark_accessed_db instead."""
     for p in paths:
         try:
             text = p.read_text(encoding="utf-8", errors="replace")
@@ -1359,7 +1374,7 @@ def _search_with_cfg(query: str, limit: int, cfg: Dict[str, Any],
         # Attach explain to fm for --explain consumers
         if explain:
             fm["_explain"] = expl
-    _mark_accessed([p for _, p, _, _ in out])
+    _mark_accessed_db([str(fm.get("id", str(p))) for _, p, fm, _ in out])
     return out
 
 
@@ -2202,16 +2217,7 @@ def doctor(args) -> int:
         issues.append({"severity": "info", "issue": f"config: {CONFIG_PATH.relative_to(ROOT)}"})
     else:
         issues.append({"severity": "info", "issue": "config: defaults (no .irag.yml)"})
-    # H7: report never-accessed memories
-    never_accessed = 0
-    total_mem = 0
-    for p in memory_files():
-        total_mem += 1
-        fm = parse_fm(p.read_text(encoding="utf-8", errors="replace"))
-        if not fm.get("last_accessed"):
-            never_accessed += 1
-    if total_mem > 0 and never_accessed > 0:
-        issues.append({"severity": "info", "issue": f"memories never accessed: {never_accessed}/{total_mem} (candidates for archive)"})
+    # Usage stats now from SQLite DB (see below)
     # SQLite index status
     try:
         import sqlite3 as _sqlite3
@@ -2235,6 +2241,30 @@ def doctor(args) -> int:
             issues.append({"severity": "info", "issue": f"SQLite: v{sqlite_ver}, index not available"})
     except Exception:
         issues.append({"severity": "info", "issue": "SQLite: not available"})
+    # Usage stats from DB (replaces frontmatter-based never-accessed check)
+    try:
+        idx2 = _open_sqlite_index()
+        if idx2 is not None:
+            total_mem = 0
+            never_accessed_db = 0
+            top_accessed: List[Tuple[str, int]] = []
+            for p in memory_files():
+                total_mem += 1
+                fm = parse_fm(p.read_text(encoding="utf-8", errors="replace"))
+                mid = str(fm.get("id", str(p)))
+                row = idx2.conn.execute("SELECT access_count, last_accessed FROM usage WHERE memory_id=?", (mid,)).fetchone()
+                if row is None or (row["access_count"] == 0 and not row["last_accessed"]):
+                    never_accessed_db += 1
+                elif row["access_count"] > 0:
+                    top_accessed.append((mid, row["access_count"]))
+            if total_mem > 0 and never_accessed_db > 0:
+                issues.append({"severity": "info", "issue": f"memories never accessed: {never_accessed_db}/{total_mem} (candidates for archive)"})
+            top_accessed.sort(key=lambda x: -x[1])
+            for mid, cnt in top_accessed[:3]:
+                issues.append({"severity": "info", "issue": f"top accessed: {mid} ({cnt}x)"})
+            idx2.close()
+    except Exception:
+        pass
     if args.json:
         print(json.dumps({"issues": issues, "version": VERSION,
                           "python": py_ver, "root": str(ROOT)}, indent=2, ensure_ascii=False))
@@ -2246,6 +2276,63 @@ def doctor(args) -> int:
         print(f"  [{i['severity'].upper()}] {i['issue']}")
     crit = sum(1 for i in issues if i["severity"] == "critical")
     return 2 if crit else 0
+
+
+# ----------------------------- migrate-usage ------------------------------
+
+def migrate_usage_cmd(args) -> int:
+    """Migrate last_accessed from Markdown frontmatter to SQLite usage table.
+    --dry-run: report what would change. --apply: write to DB, optionally strip from Markdown."""
+    dry_run = getattr(args, "dry_run", False)
+    apply_changes = getattr(args, "apply", False)
+    strip_markdown = getattr(args, "strip", False)
+    if not dry_run and not apply_changes:
+        print("Specify --dry-run or --apply", file=sys.stderr)
+        return 1
+    idx = _open_sqlite_index()
+    if idx is None and apply_changes:
+        print("SQLite index unavailable — cannot apply migration.", file=sys.stderr)
+        return 1
+    changed_files: List[str] = []
+    imported = 0
+    stripped = 0
+    for p in memory_files():
+        text = p.read_text(encoding="utf-8", errors="replace")
+        fm = parse_fm(text)
+        mid = str(fm.get("id", str(p)))
+        fm_last = str(fm.get("last_accessed", ""))
+        if not fm_last:
+            continue
+        # Check if DB already has a value
+        existing = None
+        if idx is not None:
+            row = idx.conn.execute("SELECT access_count, last_accessed FROM usage WHERE memory_id=?", (mid,)).fetchone()
+            if row and row["last_accessed"]:
+                existing = row["last_accessed"]
+        if existing:
+            continue  # Already in DB
+        imported += 1
+        changed_files.append(str(p.relative_to(ROOT)))
+        if apply_changes and idx is not None:
+            idx.record_access(mid)
+        if apply_changes and strip_markdown:
+            # Remove last_accessed from frontmatter
+            fm.pop("last_accessed", None)
+            body_start = text.find("\n---", 4)
+            body = text[body_start + 4:].lstrip("\n") if body_start >= 0 else text
+            p.write_text(write_fm(fm) + "\n" + body, encoding="utf-8")
+            stripped += 1
+    if idx is not None:
+        idx.close()
+    if getattr(args, "json", False):
+        print(json.dumps({"dry_run": dry_run, "imported": imported, "stripped": stripped,
+                          "changed_files": changed_files}, indent=2, ensure_ascii=False))
+        return 0
+    action = "DRY RUN" if dry_run else "APPLIED"
+    print(f"migrate-usage {action}: {imported} entries to import, {stripped} stripped from Markdown")
+    for f in changed_files:
+        print(f"  {f}")
+    return 0
 
 
 # ----------------------------- export / import ------------------------------
@@ -2739,6 +2826,12 @@ def main() -> None:
     p.add_argument("file")
     p.add_argument("--overwrite", action="store_true")
 
+    p = sub.add_parser("migrate-usage")
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--apply", action="store_true")
+    p.add_argument("--strip", action="store_true", help="Also remove last_accessed from Markdown.")
+    p.add_argument("--json", action="store_true")
+
     p = sub.add_parser("config")
     p.add_argument("--json", action="store_true")
     p.add_argument("--init", action="store_true")
@@ -2829,6 +2922,8 @@ def main() -> None:
         raise SystemExit(export_cmd(a))
     elif a.cmd == "import":
         raise SystemExit(import_cmd(a))
+    elif a.cmd == "migrate-usage":
+        raise SystemExit(migrate_usage_cmd(a))
     elif a.cmd == "embeddings-info":
         raise SystemExit(embeddings_info(a))
     elif a.cmd == "config":
