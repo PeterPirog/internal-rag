@@ -1,5 +1,39 @@
 # Changelog
 
+## 1.0.2 — 2026-08-24
+
+Quality and reliability release.
+
+### Token budget enforcement (G1)
+- `context` now sorts results by score and cuts memories to fit `tokens.context_budget`.
+- Reports `dropped=N` when memories are excluded for budget.
+
+### Stale memory detection (G2)
+- `validate` now checks `sources:` (evidence) paths and warns if they no longer exist.
+- Non-blocking warning (exit 0 unless there are errors).
+
+### Duplicate detection (G3)
+- `remember` checks for similar existing memories (Jaccard title similarity >= 0.7).
+- Warns and suggests `update` instead. `--force` overrides.
+
+### Privacy scan at write-time (G4)
+- `remember` scans `body`, `title`, `evidence`, `consequence` for secret patterns.
+- Refuses to write if secrets detected. `--allow-secret` bypasses (use with caution).
+
+### Auto-checkpoint timer (G5)
+- `checkpoints.max_age_minutes` config (default 0 = disabled).
+- `guard` and `context` warn (non-blocking) if last checkpoint exceeds the age threshold.
+
+### Recent git log in context (G6)
+- `context` now includes a `## RECENT COMMITS` section (last 5 commits).
+- Helps recovery by showing what was recently committed.
+
+### Offline / air-gapped support
+- `pack.py` — creates a self-contained ZIP with wheels + pre-downloaded model.
+- `irag_embeddings.py` supports local model paths (via `IRAG_EMBED_MODEL` or config).
+- New `docs/OFFLINE.md` — full guide for air-gapped installation.
+- Zero-dependency core (BM25+MMR) works fully offline without any pip install.
+
 ## 1.0.1 — 2026-08-24
 
 Patch release: full English documentation and professionalization.

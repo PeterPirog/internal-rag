@@ -6,15 +6,24 @@
 
 Local, persistent project memory for terminal coding agents (Warp, OpenCode, Claude Code, Cursor).
 
-**Version:** 1.0.1  
+**Version:** 1.0.2  
 **Verified:** 2026-08-24  
 **Integrations:** Warp, OpenCode, MCP (Claude Code / Cursor)  
 **Requirements:** Python 3.8+, Git  
-**Optional:** `sentence-transformers`, `numpy` (better semantic retrieval)
+**Optional:** `sentence-transformers`, `numpy` (better semantic retrieval)  
+**Offline:** Fully functional without internet (BM25 core, optional pre-packaged embeddings)
 
 INTERNAL_RAG stores the minimum state needed to resume complex work without keeping the full session history in the model's context window. It works as a checkpoint + RAG for the agent.
 
-## What's new in 1.0.1
+## What's new in 1.0.2
+
+- **Token budget enforcement**: `context` cuts memories to fit `context_budget` (sorted by score).
+- **Stale memory detection**: `validate` warns when evidence paths no longer exist.
+- **Duplicate detection**: `remember` blocks duplicates (use `--force` to override).
+- **Privacy scan at write-time**: `remember` refuses secrets (use `--allow-secret` to bypass).
+- **Auto-checkpoint timer**: `guard`/`context` warn if checkpoint is too old (`max_age_minutes`).
+- **Recent commits in context**: `context` shows last 5 git commits for recovery.
+- **Offline / air-gapped**: `pack.py` creates self-contained ZIP with wheels + model.
 
 - Full English documentation.
 - `search --json` now returns `matched_tokens`.
@@ -188,6 +197,24 @@ pip install -r requirements-optional.txt
 
 When the package is available and `.irag.yml` has `embeddings: auto` (default), retrieval uses embeddings with fallback to BM25. Override at runtime with `--embeddings on|off|auto`.
 
+## Offline / air-gapped
+
+INTERNAL_RAG works fully offline (BM25 core, zero dependencies). For embeddings on air-gapped machines:
+
+```bash
+# On a machine with internet:
+python pack.py --with-embeddings --model all-MiniLM-L6-v2
+# -> internal-rag-offline-1.0.2.zip
+
+# On the air-gapped machine:
+unzip internal-rag-offline-*.zip -d internal-rag-offline
+cd internal-rag-offline
+pip install --no-index --find-links wheels/ -r requirements-optional.txt
+python install.py "/path/to/project"
+```
+
+See `docs/OFFLINE.md` for details.
+
 ## Privacy & Git
 
 The default install mode is **local-only**. The installer uses `.git/info/exclude`, not the project's `.gitignore`, so local memory and integration files are not accidentally committed.
@@ -225,6 +252,7 @@ The uninstaller creates a backup outside the repository, then removes INTERNAL_R
 - [MCP](docs/MCP.md)
 - [Configuration](docs/CONFIG.md)
 - [Embeddings](docs/EMBEDDINGS.md)
+- [Offline / air-gapped](docs/OFFLINE.md)
 - [Git hooks](docs/GIT-HOOKS.md)
 - [Privacy & Git](docs/PRIVACY-AND-GIT.md)
 - [Uninstall](docs/UNINSTALL.md)

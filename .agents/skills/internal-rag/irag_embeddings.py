@@ -34,13 +34,21 @@ def _load_model(model_name: str):
         from sentence_transformers import SentenceTransformer
     except Exception:
         return None
-    try:
-        model = SentenceTransformer(model_name)
-    except Exception:
+    # Support local model paths (for offline / air-gapped use)
+    model_path = Path(model_name)
+    if model_path.is_dir():
         try:
-            model = SentenceTransformer("all-MiniLM-L6-v2")
+            model = SentenceTransformer(str(model_path))
         except Exception:
             return None
+    else:
+        try:
+            model = SentenceTransformer(model_name)
+        except Exception:
+            try:
+                model = SentenceTransformer("all-MiniLM-L6-v2")
+            except Exception:
+                return None
     _MODEL_CACHE[model_name] = model
     return model
 

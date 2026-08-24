@@ -28,8 +28,8 @@ Verify no project-code changes are missing from the last checkpoint. Exit code 0
 ### `search --query "<q>" [--limit N] [--json] [--embeddings on|off|auto] [--type T1 T2 ...] [--status S1 S2 ...]`
 Search durable memories (BM25+MMR, optional embeddings). `--json` returns `path`, `score`, `type`, `status`, `snippet`, `matched_tokens`. `--type` filters by memory type(s). `--status` filters by status(es). Query is auto-expanded with synonyms.
 
-### `remember --type T --title "..." --body "..." [--status S] [--scope SC] [--tags T1,T2] [--evidence E] [--consequence C] [--links L1,L2]`
-Create a durable memory. Types: `decision`, `knowledge`, `constraint`, `gotcha`, `failure`, `hypothesis`, `session`. `--links` is stored in frontmatter.
+### `remember --type T --title "..." --body "..." [--status S] [--scope SC] [--tags T1,T2] [--evidence E] [--consequence C] [--links L1,L2] [--force] [--allow-secret]`
+Create a durable memory. Types: `decision`, `knowledge`, `constraint`, `gotcha`, `failure`, `hypothesis`, `session`. `--links` is stored in frontmatter. `--force` overrides duplicate detection. `--allow-secret` bypasses the secret-pattern scan (use with caution).
 
 ### `show <ref> [--section NAME] [--json]`
 Read a memory by path, basename, or id. `--section` extracts one section (e.g. `Knowledge`, `Consequence`, `Links`).
@@ -62,7 +62,7 @@ List checkpoint history (reason, at, head, fingerprint prefix).
 Rebuild `INTERNAL_RAG/INDEX.md` from durable memories.
 
 ### `validate`
-Validate all memory frontmatter (required fields, allowed types/status). Exit 1 on errors.
+Validate all memory frontmatter (required fields, allowed types/status) and check evidence paths still exist. Exit 1 on errors, 0 on success (warnings do not fail).
 
 ### `push --task "<task>" [--reason R]`
 Push the current task onto the stack (with WORKING_STATE snapshot).

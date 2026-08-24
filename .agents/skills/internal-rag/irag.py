@@ -24,7 +24,7 @@ import unicodedata
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-VERSION = "1.0.1"
+VERSION = "1.0.2"
 
 ALLOWED_TYPES = {"decision", "knowledge", "constraint", "gotcha", "failure", "hypothesis", "session"}
 ALLOWED_STATUS = {"active", "tentative", "superseded", "invalid", "archived"}
@@ -41,7 +41,7 @@ INFRA_EXACT = {"AGENTS.md"}
 DEFAULT_CONFIG = {
     "retrieval": {"limit": 8, "mmr_lambda": 0.5, "min_score": 0.5, "embeddings": "auto"},
     "tokens": {"context_budget": 4000, "warn_ratio": 0.8},
-    "checkpoints": {"auto_archive_sessions": True, "max_task_stack": 16},
+    "checkpoints": {"auto_archive_sessions": True, "max_task_stack": 16, "max_age_minutes": 0},
     "privacy": {"scan_on_checkpoint": False},
 }
 
@@ -522,13 +522,25 @@ def context(args) -> int:
     text = set_section(text, "Current request", task)
     if get_section(text, "Objective") in ("", "No active objective yet.", "None.", "- None."):
         text = set_section(text, "Objective", task)
+    # G5: checkpoint age warning
+    age_warn = ""
+    cp_at = cp.get("at", "")
+    if cp_at:
+        try:
+            cp_dt = dt.datetime.fromisoformat(cp_at)
+            age_min = (dt.datetime.now().astimezone() - cp_dt).total_seconds() / 60.0
+            max_age = float(cfg.get("checkpoints", {}).get("max_age_minutes", 0) or 0)
+            if max_age and age_min > max_age:
+                age_warn = f"\n- WARNING: last checkpoint was {int(age_min)} min ago (max_age_minutes={int(max_age)})."
+        except Exception:
+            pass
     health = (
         "- RECOVERY REQUIRED: project code differs from the last checkpoint.\n"
         "- Inspect `git status` and `git diff`, reconstruct state, checkpoint it, then run guard."
         if recovery else
         "- Checkpoint fingerprint matches current project state.\n"
         "- Create a task-start checkpoint before the first new code edit."
-    )
+    ) + age_warn
     text = set_section(text, "Checkpoint health", health)
     text = set_header(text, "updated", now())
     save_working(text)
@@ -538,8 +550,29 @@ def context(args) -> int:
     results = search(expanded, limit, types=types_f, statuses=statuses_f)
     ws_text = WORKING.read_text(encoding="utf-8", errors="replace")
     ws_tokens = estimate_tokens(ws_text)
-    mem_tokens = sum(estimate_tokens(sn) for _, _, _, sn in results)
     budget = int(cfg.get("tokens", {}).get("context_budget", 4000))
+    # G1: token budget enforcement — sort by score, cut to budget
+    results.sort(key=lambda x: -x[0])
+    kept: List[Tuple[float, Path, Dict[str, Any], str]] = []
+    used = ws_tokens
+    dropped = 0
+    for score, p, fm, sn in results:
+        sn_t = estimate_tokens(sn)
+        if used + sn_t > budget:
+            dropped += 1
+            continue
+        kept.append((score, p, fm, sn))
+        used += sn_t
+    mem_tokens = used - ws_tokens
+    # G6: recent git log
+    git_log = ""
+    try:
+        raw = git("log", "--oneline", "-5", "--no-decorate")
+        if raw:
+            lines = [l.strip() for l in raw.splitlines() if l.strip()][:5]
+            git_log = "\n".join(f"- {l}" for l in lines)
+    except Exception:
+        pass
     if args.json:
         out = {
             "irag_version": VERSION, "task": task,
@@ -549,10 +582,12 @@ def context(args) -> int:
             "candidate_memories": [
                 {"path": str(p.relative_to(ROOT)), "type": fm.get("type", "?"),
                  "status": fm.get("status", "?"), "score": round(score, 2), "snippet": sn}
-                for score, p, fm, sn in results
+                for score, p, fm, sn in kept
             ],
             "memory_tokens": mem_tokens,
             "context_budget": budget,
+            "memories_dropped_for_budget": dropped,
+            "recent_commits": [l for l in git_log.splitlines() if l.strip()],
             "next": "RECOVER -> CHECKPOINT -> GUARD OK -> continue." if recovery
                     else "Checkpoint before first code edit, then continue.",
         }
@@ -562,15 +597,18 @@ def context(args) -> int:
     print("irag_version:", VERSION)
     print("task:", task)
     print("recovery_required:", "YES" if recovery else "NO")
-    print(f"tokens: working_state={ws_tokens} memories={mem_tokens} budget={budget}")
+    print(f"tokens: working_state={ws_tokens} memories={mem_tokens} budget={budget}"
+          + (f" dropped={dropped}" if dropped else ""))
     if recovery:
         print("\n!!! RECOVERY REQUIRED !!!\nInspect git status/diff and checkpoint recovered state BEFORE new edits.")
     print("\n## WORKING_STATE\n" + ws_text[:10000].rstrip())
+    if git_log:
+        print("\n## RECENT COMMITS\n" + git_log)
     print("\n## CANDIDATE MEMORIES")
-    if not results:
+    if not kept:
         print("No relevant durable memories found.")
     grouped: Dict[str, List[Tuple[float, Path, Dict[str, Any], str]]] = {}
-    for score, p, fm, snip in results:
+    for score, p, fm, snip in kept:
         mtype = str(fm.get("type", "other"))
         grouped.setdefault(mtype, []).append((score, p, fm, snip))
     type_order = ["decision", "knowledge", "constraint", "gotcha", "failure", "hypothesis", "session", "other"]
@@ -592,6 +630,8 @@ def context(args) -> int:
             i += 1
             print(f"{i}. {p.relative_to(ROOT)} [{fm.get('type','?')}/{fm.get('status','?')}] score={score:.1f}")
             print(f"   {snip}")
+    if dropped:
+        print(f"\n({dropped} memory result(s) dropped to fit token budget)")
     print("\n## NEXT")
     print("RECOVER -> CHECKPOINT -> GUARD OK -> continue." if recovery
           else "Checkpoint before first code edit, then continue.")
@@ -612,6 +652,20 @@ def guard() -> int:
         for s, p in changed_entries()[:40]:
             print(f"- `{s}` {p}")
         return 2
+    # G5: checkpoint age warning (non-blocking)
+    cfg = load_config()
+    cp_at = cp.get("at", "")
+    if cp_at:
+        try:
+            cp_dt = dt.datetime.fromisoformat(cp_at)
+            age_min = (dt.datetime.now().astimezone() - cp_dt).total_seconds() / 60.0
+            max_age = float(cfg.get("checkpoints", {}).get("max_age_minutes", 0) or 0)
+            if max_age and age_min > max_age:
+                print(f"GUARD OK (WARNING: last checkpoint {int(age_min)} min ago, max_age_minutes={int(max_age)})")
+                print("fingerprint:", cur[:16])
+                return 0
+        except Exception:
+            pass
     print("GUARD OK")
     print("fingerprint:", cur[:16])
     return 0
@@ -963,7 +1017,48 @@ def _matched_for(fm: Dict[str, Any], query: str = "") -> List[str]:
 
 # ----------------------------- remember -------------------------------------
 
+SECRET_PATTERNS = [
+    re.compile(r"(?i)(?:password|passwd|pwd)\s*[:=]\s*\S{4,}"),
+    re.compile(r"(?i)(?:api[_-]?key|apikey)\s*[:=]\s*\S{8,}"),
+    re.compile(r"(?i)(?:secret|token)\s*[:=]\s*\S{8,}"),
+    re.compile(r"(?i)(?:AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[A-Z0-9]{16}"),
+    re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |)PRIVATE KEY-----"),
+    re.compile(r"(?i)Bearer\s+[A-Za-z0-9\-._~+]{20,}"),
+    re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,}"),
+    re.compile(r"sk-[A-Za-z0-9]{20,}"),
+    re.compile(r"(?i)xox[baprs]-[A-Za-z0-9\-]{10,}"),
+    re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"),
+]
+
+
+def scan_secrets(text: str) -> List[str]:
+    """Return list of detected secret pattern descriptions."""
+    found: List[str] = []
+    for pat in SECRET_PATTERNS:
+        if pat.search(text):
+            found.append(pat.pattern[:60])
+    return found
+
+
 def remember(args) -> None:
+    # G4: privacy scan at write-time
+    scan_text = f"{args.title}\n{args.body}\n{args.consequence or ''}\n{args.evidence or ''}"
+    secrets = scan_secrets(scan_text)
+    allow_secret = getattr(args, "allow_secret", False)
+    if secrets and not allow_secret:
+        print("REFUSED: potential secret pattern detected in memory content:", file=sys.stderr)
+        for s in secrets:
+            print(f"  pattern: {s}", file=sys.stderr)
+        print("If this is a false positive, re-run with --allow-secret.", file=sys.stderr)
+        return
+    # G3: duplicate detection by title similarity
+    dupes = _find_duplicates(args.title, args.type)
+    if dupes and not getattr(args, "force", False):
+        print(f"WARNING: similar memory already exists:", file=sys.stderr)
+        for d in dupes:
+            print(f"  {d}", file=sys.stderr)
+        print("Use --force to create anyway, or `update` the existing memory.", file=sys.stderr)
+        return
     status = "tentative" if args.type == "hypothesis" and args.status == "active" else args.status
     folder = RAG / TYPE_DIR[args.type]
     folder.mkdir(parents=True, exist_ok=True)
@@ -1008,6 +1103,32 @@ def remember(args) -> None:
     path.write_text(content, encoding="utf-8")
     rebuild_index()
     print(path.relative_to(ROOT))
+
+
+def _find_duplicates(title: str, mtype: str, threshold: float = 0.7) -> List[str]:
+    """Find existing memories with similar title (Jaccard on tokens)."""
+    title_toks = set(tokenize(title))
+    if not title_toks:
+        return []
+    dupes: List[str] = []
+    for p in memory_files():
+        fm = parse_fm(p.read_text(encoding="utf-8", errors="replace"))
+        if str(fm.get("type", "")).lower() != mtype.lower():
+            continue
+        existing_title = ""
+        for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("# "):
+                existing_title = line[2:].strip()
+                break
+        if not existing_title:
+            continue
+        ext_toks = set(tokenize(existing_title))
+        if not ext_toks:
+            continue
+        jaccard = len(title_toks & ext_toks) / len(title_toks | ext_toks)
+        if jaccard >= threshold:
+            dupes.append(f"{p.relative_to(ROOT)} (title: {existing_title}, similarity: {jaccard:.0%})")
+    return dupes
 
 
 # ----------------------------- memory CRUD ----------------------------------
@@ -1270,6 +1391,28 @@ def validate() -> int:
         if fm.get("status") and fm.get("status") not in ALLOWED_STATUS:
             print(f"ERROR {rel}: invalid status `{fm.get('status')}`")
             errors += 1
+        # G2: stale evidence path check
+        sources = fm.get("sources", [])
+        if isinstance(sources, str):
+            if sources in ("[]", ""):
+                sources = []
+            else:
+                sources = [sources]
+        if not isinstance(sources, list):
+            sources = []
+        for src in sources:
+            src_s = str(src).strip()
+            if not src_s:
+                continue
+            if src_s.startswith("http") or src_s.startswith("https"):
+                continue
+            check_path = src_s.split(":")[0].split("#")[0].strip()
+            if not check_path:
+                continue
+            candidate = ROOT / check_path
+            if not candidate.exists():
+                print(f"WARN {rel}: evidence path not found: {src_s}")
+                warnings += 1
     print(f"Validation complete: {errors} error(s), {warnings} warning(s).")
     return 1 if errors else 0
 
@@ -1544,7 +1687,7 @@ def embeddings_info(args) -> int:
 
 # ----------------------------- config ---------------------------------------
 
-CONFIG_TEMPLATE = """# INTERNAL_RAG configuration (v1.0.1)
+CONFIG_TEMPLATE = """# INTERNAL_RAG configuration (v1.0.2)
 # Optional — remove this file to use built-in defaults.
 
 retrieval:
@@ -1559,6 +1702,7 @@ tokens:
 checkpoints:
   auto_archive_sessions: true
   max_task_stack: 16
+  max_age_minutes: 0       # 0=disabled; e.g. 60 = warn if checkpoint older than 1h
 privacy:
   scan_on_checkpoint: false
 """
@@ -1808,6 +1952,8 @@ def main() -> None:
     p.add_argument("--body", required=True)
     p.add_argument("--consequence", default="")
     p.add_argument("--links", default="")
+    p.add_argument("--force", action="store_true", help="Create even if a similar memory exists.")
+    p.add_argument("--allow-secret", action="store_true", help="Bypass secret-pattern scan (use with caution).")
 
     p = sub.add_parser("show")
     p.add_argument("ref")

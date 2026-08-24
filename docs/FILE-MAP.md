@@ -6,6 +6,7 @@
 - `uninstall.py` — full removal with backup.
 - `privacy_check.py` — privacy & git audit.
 - `self_test.py` — regression test.
+- `pack.py` — offline packer (air-gapped support).
 - `requirements-optional.txt` — optional embeddings dependencies.
 - `README.md`, `docs/` — documentation.
 - `VERSION`, `CHANGELOG.md` — versioning.

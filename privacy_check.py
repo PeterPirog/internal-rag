@@ -22,7 +22,7 @@ def repo(p):
  return Path(o).resolve()
 def gp(t,r):
  _,o,_=git(t,'rev-parse','--git-path',r); p=Path(o); return (p if p.is_absolute() else t/p).resolve()
-def managed(x): return x.startswith('INTERNAL_RAG/') or x.startswith('.agents/skills/internal-rag/') or x.startswith('.opencode/tools/memory-') or x.startswith('.opencode/plugins/internal-rag') or x.startswith('.opencode/commands/memory') or x=='.opencode/commands/checkpoint.md' or x=='.irag.yml' or x=='requirements-optional.txt'
+def managed(x): return x.startswith('INTERNAL_RAG/') or x.startswith('.agents/skills/internal-rag/') or x.startswith('.opencode/tools/memory-') or x.startswith('.opencode/plugins/internal-rag') or x.startswith('.opencode/commands/memory') or x=='.opencode/commands/checkpoint.md' or x=='.irag.yml' or x=='requirements-optional.txt' or x=='pack.py'
 def scan(t):
  root=t/'INTERNAL_RAG'; hits=[]
  if not root.exists(): return hits
