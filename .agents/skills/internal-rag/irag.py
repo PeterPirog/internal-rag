@@ -1789,7 +1789,7 @@ def main() -> None:
     elif a.cmd == "guard":
         raise SystemExit(guard())
     elif a.cmd == "search":
-        emb_override = a.embeddings or getattr(a, "embeddings", None)
+        emb_override = getattr(a, "embeddings", None)
         if emb_override:
             cfg = load_config()
             cfg["retrieval"]["embeddings"] = emb_override
@@ -1801,6 +1801,11 @@ def main() -> None:
                                "type": fm.get("type"), "status": fm.get("status"),
                                "snippet": sn, "matched_tokens": _matched_for(fm, a.query)}
                               for s, p, fm, sn in r], ensure_ascii=False, indent=2))
+        elif getattr(a, "verbose", False) and r:
+            for i, (s, p, fm, sn) in enumerate(r, 1):
+                print(f"{i}. {p.relative_to(ROOT)} score={s:.2f}")
+                print(f"   type={fm.get('type')} status={fm.get('status')}")
+                print(f"   {sn}")
         else:
             print("No matching durable memories." if not r else "\n".join(
                 f"{i}. {p.relative_to(ROOT)} score={s:.1f}\n   {sn}"
