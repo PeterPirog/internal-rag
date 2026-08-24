@@ -147,7 +147,32 @@ def ensure_repo(path: Path) -> Path:
         die(f'Target path does not exist: {path}')
     p = subprocess.run(['git','-C',str(path),'rev-parse','--show-toplevel'], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if p.returncode != 0:
-        die(f'Target is not inside a Git repository: {path}')
+        # Not a git repo — ask whether to init one
+        print(f'\n"{path}" is not a Git repository.')
+        print('INTERNAL_RAG requires Git for fingerprinting, recovery detection, and checkpoints.')
+        try:
+            answer = input('Initialize a local Git repository here? [Y/n] ').strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            answer = 'n'
+        if answer in ('', 'y', 'yes'):
+            print(f'Initializing Git repository in {path} ...')
+            subprocess.run(['git', 'init', str(path)], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            # Set local identity if missing
+            try:
+                subprocess.run(['git', '-C', str(path), 'config', 'user.email'], check=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            except Exception:
+                subprocess.run(['git', '-C', str(path), 'config', 'user.email', 'agent@internal-rag'], check=False)
+            try:
+                subprocess.run(['git', '-C', str(path), 'config', 'user.name'], check=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            except Exception:
+                subprocess.run(['git', '-C', str(path), 'config', 'user.name', 'INTERNAL_RAG Agent'], check=False)
+            print('Git repository initialized.')
+        else:
+            die('A Git repository is required. Run `git init` manually, then re-run install.py.')
+    # Re-check
+    p = subprocess.run(['git','-C',str(path),'rev-parse','--show-toplevel'], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if p.returncode != 0:
+        die(f'Failed to initialize or access a Git repository: {path}')
     return Path(p.stdout.strip()).resolve()
 
 

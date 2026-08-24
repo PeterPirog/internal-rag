@@ -7,7 +7,7 @@ python --version   # 3.8+
 git --version
 ```
 
-The target project must be a Git repository.
+The target project should be a Git repository. If it is not, the installer will ask whether to initialize one (Git is required for fingerprinting, recovery detection, and checkpoints).
 
 ## Recommended mode: local-only
 
