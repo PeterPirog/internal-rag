@@ -753,6 +753,20 @@ def memory_files() -> List[Path]:
     return sorted(out)
 
 
+def all_memory_files() -> List[Path]:
+    """Like memory_files() but also includes archived memories (for informational dedup)."""
+    if not RAG.exists():
+        return []
+    out = []
+    for p in RAG.rglob("*.md"):
+        if p.name in SKIP_SEARCH:
+            continue
+        if "sessions" in p.parts and ".snapshots" in p.parts:
+            continue
+        out.append(p)
+    return sorted(out)
+
+
 def find_memory_by_id_or_path(ref: str) -> Optional[Path]:
     """Resolve a memory reference: relative path, basename, or id."""
     if not ref:
@@ -1685,46 +1699,69 @@ def remember(args) -> None:
     secrets = scan_secrets(scan_text)
     allow_secret = getattr(args, "allow_secret", False)
     if secrets and not allow_secret:
-        print("REFUSED: potential secret pattern detected in memory content:", file=sys.stderr)
-        for s in secrets:
-            print(f"  pattern: {s}", file=sys.stderr)
-        print("If this is a false positive, re-run with --allow-secret.", file=sys.stderr)
-        return
+        if getattr(args, "json", False):
+            print(json.dumps({"status": "refused", "reason": "secret", "secrets": secrets}, ensure_ascii=False))
+        else:
+            print("REFUSED: potential secret pattern detected in memory content:", file=sys.stderr)
+            for s in secrets:
+                print(f"  pattern: {s}", file=sys.stderr)
+            print("If this is a false positive, re-run with --allow-secret.", file=sys.stderr)
+        return "refused"
     # Content-based duplicate detection (SimHash + exact fingerprint)
     dup_check = _check_duplicates(args.title, args.body, args.consequence or "",
                                    args.type, args.tags, args.scope)
     force = getattr(args, "force", False)
+    want_json = getattr(args, "json", False)
+    active_near = [d for d in dup_check["near"] if "archived" not in d]
     if dup_check["exact"] and not force:
-        print("BLOCKED: exact duplicate detected:", file=sys.stderr)
-        for d in dup_check["near"]:
-            print(f"  {d}", file=sys.stderr)
-        print("Use --force to create anyway, or `update` the existing memory.", file=sys.stderr)
-        return
-    if dup_check["near"] and not force:
-        print("WARNING: near duplicate detected:", file=sys.stderr)
-        for d in dup_check["near"]:
-            if "exact" not in d:
+        if want_json:
+            print(json.dumps({"status": "blocked", "duplicate": dup_check,
+                              "recommended_action": dup_check.get("recommended_action")}, ensure_ascii=False, indent=2))
+        else:
+            print("BLOCKED: exact duplicate detected:", file=sys.stderr)
+            for d in dup_check["near"]:
                 print(f"  {d}", file=sys.stderr)
-        action = dup_check.get("recommended_action")
-        if action:
-            print(f"Recommended action: {action} (or --force to create anyway)", file=sys.stderr)
-        return
+            print("Use --force to create anyway, or `update` the existing memory.", file=sys.stderr)
+        return "blocked"
+    if active_near and not force:
+        if want_json:
+            print(json.dumps({"status": "blocked", "duplicate": dup_check,
+                              "recommended_action": dup_check.get("recommended_action")}, ensure_ascii=False, indent=2))
+        else:
+            print("WARNING: near duplicate detected:", file=sys.stderr)
+            for d in dup_check["near"]:
+                if "exact" not in d:
+                    print(f"  {d}", file=sys.stderr)
+            action = dup_check.get("recommended_action")
+            if action:
+                print(f"Recommended action: {action} (or --force to create anyway)", file=sys.stderr)
+        return "blocked"
     # Title-Jaccard as additional signal
     title_dupes = _find_duplicates(args.title, args.type)
     if title_dupes and not force:
-        print(f"WARNING: similar title already exists:", file=sys.stderr)
-        for d in title_dupes:
-            print(f"  {d}", file=sys.stderr)
-        print("Use --force to create anyway, or `update` the existing memory.", file=sys.stderr)
-        return
+        if want_json:
+            print(json.dumps({"status": "blocked",
+                              "duplicate": dict(dup_check, title_similar=title_dupes),
+                              "recommended_action": "force"}, ensure_ascii=False, indent=2))
+        else:
+            print(f"WARNING: similar title already exists:", file=sys.stderr)
+            for d in title_dupes:
+                print(f"  {d}", file=sys.stderr)
+            print("Use --force to create anyway, or `update` the existing memory.", file=sys.stderr)
+        return "blocked"
     # H2: conflict detection (separate from duplicate detection)
     conflicts = _find_conflicts(args.type, args.body, args.scope)
     if conflicts and not force:
-        print("WARNING: potential conflict with active memory of same type/scope:", file=sys.stderr)
-        for c in conflicts:
-            print(f"  {c}", file=sys.stderr)
-        print("Consider `supersede` instead. Use --force to create anyway.", file=sys.stderr)
-        return
+        if want_json:
+            print(json.dumps({"status": "blocked", "conflict": conflicts,
+                              "duplicate": dup_check, "recommended_action": "supersede"},
+                             ensure_ascii=False, indent=2))
+        else:
+            print("WARNING: potential conflict with active memory of same type/scope:", file=sys.stderr)
+            for c in conflicts:
+                print(f"  {c}", file=sys.stderr)
+            print("Consider `supersede` instead. Use --force to create anyway.", file=sys.stderr)
+        return "blocked"
     status = "tentative" if args.type == "hypothesis" and args.status == "active" else args.status
     folder = RAG / TYPE_DIR[args.type]
     folder.mkdir(parents=True, exist_ok=True)
@@ -1768,7 +1805,12 @@ def remember(args) -> None:
     )
     path.write_text(content, encoding="utf-8")
     rebuild_index()
-    print(path.relative_to(ROOT))
+    if want_json:
+        print(json.dumps({"status": "created", "path": str(path.relative_to(ROOT)),
+                          "duplicate": dup_check}, ensure_ascii=False, indent=2))
+    else:
+        print(path.relative_to(ROOT))
+    return "created"
 
 
 def remember_batch(args) -> int:
@@ -1803,24 +1845,37 @@ def remember_batch(args) -> int:
             body = item.get("body", "")
             consequence = item.get("consequence", "")
             links = item.get("links", "")
-            force = True
+            force = bool(getattr(args, "force", False)) or bool(item.get("force", False))
             allow_secret = False
-        remember(_BatchArgs())
-        created += 1
-    print(f"Batch complete: {created} created, {skipped} skipped.")
+            json = bool(getattr(args, "json", False))
+        res = remember(_BatchArgs())
+        if res == "created":
+            created += 1
+        else:
+            skipped += 1
+    if getattr(args, "json", False):
+        print(json.dumps({"created": created, "skipped": skipped}, ensure_ascii=False, indent=2))
+    else:
+        print(f"Batch complete: {created} created, {skipped} skipped.")
     return 0
 
 
 def _canonical_memory_text(title: str, body: str, consequence: str,
-                           tags: str = "", scope: str = "") -> str:
+                            tags: str = "", scope: str = "") -> str:
     """Build canonical text for dedup fingerprinting.
-    Excludes timestamps, status, last_accessed, created/updated."""
-    parts = [title.strip().lower()]
-    # Extract Knowledge section content
-    parts.append(body.strip().lower())
+
+    Includes: title, Knowledge body, Consequence, and significant tags/scope.
+    Excludes: created/updated/last_accessed timestamps, status, and other
+    volatile metadata. Normalized with NFKD + whitespace collapse so Polish
+    diacritics and formatting differences do not break exact comparison."""
+    def norm(s: str) -> str:
+        s = unicodedata.normalize("NFKD", s or "")
+        s = "".join(c for c in s if not unicodedata.combining(c))
+        return re.sub(r"\s+", " ", s).strip().lower()
+
+    parts = [norm(title), norm(body)]
     if consequence:
-        parts.append(consequence.strip().lower())
-    # Tags and scope (sorted for determinism)
+        parts.append(norm(consequence))
     tag_list = sorted(x.strip().lower() for x in (tags or "").split(",") if x.strip())
     if tag_list:
         parts.append(" ".join(tag_list))
@@ -1874,7 +1929,7 @@ def _check_duplicates(title: str, body: str, consequence: str,
         "exact": False, "near": [], "title_similar": [],
         "recommended_action": None,
     }
-    for p in memory_files():
+    for p in all_memory_files():
         text = p.read_text(encoding="utf-8", errors="replace")
         fm = parse_fm(text)
         if str(fm.get("type", "")).lower() != mtype.lower():
@@ -1900,28 +1955,34 @@ def _check_duplicates(title: str, body: str, consequence: str,
         # Exact match
         if existing_fp == exact_fp:
             if is_archived:
+                # Informational only — archived is not an active duplicate
                 result["near"].append(f"{rel} (archived exact match)")
             else:
                 result["exact"] = True
                 result["near"].append(f"{rel} (exact duplicate)")
                 result["recommended_action"] = "update"
-        # Near duplicate (SimHash)
-        elif not is_archived:
+        # Near duplicate (SimHash) — archived shown informationally only
+        elif is_archived:
+            dist = _hamming_distance(query_simhash, existing_simhash)
+            if dist <= simhash_threshold:
+                result["near"].append(f"{rel} (archived near match, SimHash distance={dist})")
+        else:
             dist = _hamming_distance(query_simhash, existing_simhash)
             if dist <= simhash_threshold:
                 result["near"].append(f"{rel} (SimHash distance={dist})")
                 if result["recommended_action"] is None:
                     result["recommended_action"] = "supersede"
-        # Title similarity (Jaccard) — additional signal
+        # Title similarity (Jaccard) — additional signal (active memories only)
         if title_toks and not is_archived:
             ext_title_toks = set(tokenize(existing_title))
             if ext_title_toks:
                 jaccard = len(title_toks & ext_title_toks) / len(title_toks | ext_title_toks)
                 if jaccard >= 0.7:
                     result["title_similar"].append(f"{rel} (title: {existing_title}, {jaccard:.0%})")
+    active_near = [d for d in result["near"] if "archived" not in d]
     if result["exact"]:
         result["recommended_action"] = "update"
-    elif result["near"] and result["recommended_action"] is None:
+    elif active_near and result["recommended_action"] is None:
         result["recommended_action"] = "force"
     return result
 
@@ -3270,7 +3331,7 @@ def main() -> None:
     p.add_argument("--json", action="store_true")
 
     p = sub.add_parser("remember")
-    p.add_argument("--type", required=True, choices=sorted(ALLOWED_TYPES))
+    p.add_argument("--type", required=True, choices=sorted(TYPE_DIR.keys()))
     p.add_argument("--status", default="active", choices=sorted(ALLOWED_STATUS))
     p.add_argument("--title", required=True)
     p.add_argument("--scope", default="")
@@ -3281,6 +3342,7 @@ def main() -> None:
     p.add_argument("--links", default="")
     p.add_argument("--force", action="store_true", help="Create even if a similar/conflicting memory exists.")
     p.add_argument("--allow-secret", action="store_true", help="Bypass secret-pattern scan (use with caution).")
+    p.add_argument("--json", action="store_true", help="Machine-readable result (including duplicate detection).")
 
     p = sub.add_parser("remember-batch")
     p.add_argument("file", help="JSON file: array of {type, title, body, ...}")

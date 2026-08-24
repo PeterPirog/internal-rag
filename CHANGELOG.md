@@ -24,10 +24,16 @@ Section-aware chunking, read-only search, SimHash dedup, multilingual profiles, 
 - Tests: search leaves mtime/hash of Markdown unchanged; usage count grows in DB; dry-run/apply/strip + backup; search works with DB unavailable; rebuild/sync preserve usage.
 
 ### SimHash deduplication (task 7)
-- `canonical_memory_text()`, exact fingerprint (SHA-256), 64-bit SimHash (stdlib).
-- `remember`/`remember-batch`/`import`: exact block, near warn, title-Jaccard as extra signal.
-- Archived memories excluded from active duplicate check (shown informacyjnie).
-- `--force` bypasses all checks. `--json` returns `duplicate` field.
+- `_canonical_memory_text()`: title + Knowledge + Consequence + significant tags/scope; NFKD + casefold + whitespace-collapse normalization (PL diacritics & formatting differences do not break comparison); excludes created/updated/last_accessed/status.
+- Exact fingerprint: SHA-256 of normalized canonical text.
+- Near fingerprint: 64-bit SimHash over tokens (pure stdlib, no datasketch/MinHash); Hamming distance ≤ 3 = near duplicate.
+- `remember`/`remember-batch`: exact match => blocked by default; near => warning; title-Jaccard remains an additional signal; `--force` bypasses.
+- Conflict detection stays **separate** from duplicate detection (opposing decisions are conflicts, never duplicates).
+- Archived memories: not active duplicates (no block), shown informationally in `near`.
+- `remember --json` returns: `status`, `duplicate: {exact, near, title_similar, recommended_action: update|supersede|force|null}`, and a separate `conflict` list when applicable.
+- `import` remains idempotent: second import of the same bundle is skipped without `--overwrite`.
+- Algorithm + limitations documented in `docs/DEDUP.md`.
+- Tests: `tests/test_dedup.py` (identical text different title, near rephrase, opposing decision, Polish/whitespace normalization, force bypass, archived informational, JSON shape, import idempotency).
 
 ### Multilingual PL/EN profile (task 8)
 - `retrieval.profile: english-fast | multilingual` (default: english-fast).

@@ -28,11 +28,11 @@ Verify no project-code changes are missing from the last checkpoint. Exit code 0
 ### `search --query "<q>" [--limit N] [--json] [--explain] [--embeddings on|off|auto] [--type T1 T2 ...] [--status S1 S2 ...]`
 Search durable memories via hybrid retrieval (BM25 + optional dense → RRF → MMR). `--json` returns `path`, `score`, `type`, `status`, `snippet`, `matched_tokens`. `--explain` adds per-channel breakdown: `sparse_score`, `sparse_rank`, `dense_score`, `dense_rank`, `rrf_score`, `policy_boost`, `final_score`, `retrieval_mode`. `--type` filters by memory type(s). `--status` filters by status(es). Query is auto-expanded with synonyms.
 
-### `remember --type T --title "..." --body "..." [--status S] [--scope SC] [--tags T1,T2] [--evidence E] [--consequence C] [--links L1,L2] [--force] [--allow-secret]`
-Create a durable memory. Types: `decision`, `knowledge`, `constraint`, `gotcha`, `failure`, `hypothesis`, `session`. `--links` is stored in frontmatter. `--force` overrides duplicate and conflict detection. `--allow-secret` bypasses the secret-pattern scan (use with caution).
+### `remember --type T --title "..." --body "..." [--status S] [--scope SC] [--tags T1,T2] [--evidence E] [--consequence C] [--links L1,L2] [--force] [--allow-secret] [--json]`
+Create a durable memory. Types: `decision`, `knowledge`, `constraint`, `gotcha`, `failure`, `hypothesis`, `session`. `--links` is stored in frontmatter. Exact/near duplicates are blocked by default (see `docs/DEDUP.md`); conflict detection is a separate signal recommending `supersede`. `--force` overrides duplicate and conflict detection. `--allow-secret` bypasses the secret-pattern scan (use with caution). `--json` returns `status` plus `duplicate: {exact, near, title_similar, recommended_action}` and, when applicable, a separate `conflict` list.
 
 ### `remember-batch <file.json>`
-Create multiple memories from a JSON array. Each element needs `type`, `title`, `body` (optional: `status`, `scope`, `tags`, `evidence`, `consequence`, `links`). Duplicates are forced.
+Create multiple memories from a JSON array. Each element needs `type`, `title`, `body` (optional: `status`, `scope`, `tags`, `evidence`, `consequence`, `links`, `force`). Duplicate detection runs per entry: exact/near duplicates are skipped (counted as skipped, not created); pass `force` in the entry or on the command line to override.
 
 ### `clean [--force]`
 Permanently delete all files from `INTERNAL_RAG/archive/` (forgotten memories). `--force` confirms deletion.
