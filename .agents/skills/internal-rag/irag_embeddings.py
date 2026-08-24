@@ -86,20 +86,25 @@ def embeddings_search(query: str,
         q_emb = _embed(model, [query])[0]
         d_emb = _embed(model, docs)
         sims = (d_emb @ q_emb) if hasattr(d_emb, "@") else np.dot(d_emb, q_emb)
-        # Combine with status heuristic
+        TYPE_PRIORITY = {
+            "decision": 0.8, "knowledge": 0.6, "constraint": 0.5,
+            "gotcha": 0.4, "failure": 0.3, "hypothesis": 0.2, "session": 0.1,
+        }
         scored: List[Tuple[float, int]] = []
         for i, sim in enumerate(sims):
             fm = candidates[i][2]
             status = str(fm.get("status", "active")).lower()
             score = float(sim)
             if status == "active":
-                score += 0.05
+                score += 0.1
             elif status == "tentative":
-                score += 0.02
+                score += 0.06
             elif status == "superseded":
                 score -= 0.2
             elif status in ("invalid", "archived"):
                 score -= 10.0
+            mtype = str(fm.get("type", "")).lower()
+            score += TYPE_PRIORITY.get(mtype, 0.0)
             if score > 0:
                 scored.append((score, i))
         scored.sort(key=lambda x: -x[0])

@@ -30,8 +30,12 @@ Warp / OpenCode / Claude Code / Cursor
 ### Retrieval
 - Default: BM25 (k1=1.5, b=0.75) with MMR (lambda from config).
 - Optional: sentence-transformers (`irag_embeddings.py`), lazy-loaded, fallback to BM25.
-- Stopwords, light stemming, status weighting (active/tentative/superseded/invalid).
+- Stopwords, light stemming, status weighting (active +1.0, tentative +0.6, superseded -4.0).
+- Type-priority scoring: decision (+0.8) > knowledge (+0.6) > constraint (+0.5) > gotcha (+0.4) > failure (+0.3) > hypothesis (+0.2) > session (+0.1).
+- Query expansion with synonyms (e.g. "db" → "database", "auth" → "authentication") for better recall.
+- `--type` and `--status` filters in `search` and `context`.
 - `--embeddings on|off|auto` CLI override.
+- `context` output groups memories: Verified facts, Lessons & pitfalls, Unverified hypotheses.
 
 ### Lifecycle
 - `context` compares the fingerprint with the last checkpoint → `RECOVERY REQUIRED` or fresh.

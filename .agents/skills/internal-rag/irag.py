@@ -532,7 +532,10 @@ def context(args) -> int:
     text = set_section(text, "Checkpoint health", health)
     text = set_header(text, "updated", now())
     save_working(text)
-    results = search(task, limit)
+    types_f = getattr(args, "type", None)
+    statuses_f = getattr(args, "status", None)
+    expanded = expand_query(task)
+    results = search(expanded, limit, types=types_f, statuses=statuses_f)
     ws_text = WORKING.read_text(encoding="utf-8", errors="replace")
     ws_tokens = estimate_tokens(ws_text)
     mem_tokens = sum(estimate_tokens(sn) for _, _, _, sn in results)
@@ -566,9 +569,29 @@ def context(args) -> int:
     print("\n## CANDIDATE MEMORIES")
     if not results:
         print("No relevant durable memories found.")
-    for i, (score, p, fm, snip) in enumerate(results, 1):
-        print(f"{i}. {p.relative_to(ROOT)} [{fm.get('type','?')}/{fm.get('status','?')}] score={score:.1f}")
-        print(f"   {snip}")
+    grouped: Dict[str, List[Tuple[float, Path, Dict[str, Any], str]]] = {}
+    for score, p, fm, snip in results:
+        mtype = str(fm.get("type", "other"))
+        grouped.setdefault(mtype, []).append((score, p, fm, snip))
+    type_order = ["decision", "knowledge", "constraint", "gotcha", "failure", "hypothesis", "session", "other"]
+    i = 0
+    for mtype in type_order:
+        items = grouped.get(mtype, [])
+        if not items:
+            continue
+        label = mtype.upper() if mtype != "other" else "OTHER"
+        if mtype in ("decision", "knowledge", "constraint"):
+            print(f"\n### Verified facts ({label})")
+        elif mtype in ("gotcha", "failure"):
+            print(f"\n### Lessons & pitfalls ({label})")
+        elif mtype == "hypothesis":
+            print(f"\n### Unverified hypotheses ({label}) — treat as tentative")
+        else:
+            print(f"\n### {label}")
+        for score, p, fm, snip in items:
+            i += 1
+            print(f"{i}. {p.relative_to(ROOT)} [{fm.get('type','?')}/{fm.get('status','?')}] score={score:.1f}")
+            print(f"   {snip}")
     print("\n## NEXT")
     print("RECOVER -> CHECKPOINT -> GUARD OK -> continue." if recovery
           else "Checkpoint before first code edit, then continue.")
@@ -684,6 +707,48 @@ def find_memory_by_id_or_path(ref: str) -> Optional[Path]:
 
 # ----------------------------- retrieval: BM25 + MMR ------------------------
 
+SYNONYMS: List[Tuple[str, str]] = [
+    ("database", "db"), ("db", "database"),
+    ("config", "configuration"), ("configuration", "config"),
+    ("auth", "authentication"), ("authentication", "auth"),
+    ("api", "endpoint"), ("endpoint", "api"),
+    ("test", "testing"), ("testing", "test"),
+    ("deploy", "deployment"), ("deployment", "deploy"),
+    ("perf", "performance"), ("performance", "perf"),
+    ("refactor", "refactoring"), ("refactoring", "refactor"),
+    ("bug", "defect"), ("defect", "bug"),
+    ("cache", "caching"), ("caching", "cache"),
+    ("error", "exception"), ("exception", "error"),
+    ("async", "asynchronous"), ("asynchronous", "async"),
+    ("sync", "synchronous"), ("synchronous", "sync"),
+    ("migration", "migrate"), ("migrate", "migration"),
+    ("schema", "model"), ("model", "schema"),
+    ("route", "endpoint"), ("handler", "controller"),
+    ("session", "cookie"), ("token", "jwt"),
+    ("redis", "cache"), ("postgres", "database"),
+    ("docker", "container"), ("kubernetes", "k8s"),
+    ("react", "frontend"), ("vue", "frontend"),
+    ("pytest", "test"), ("unittest", "test"),
+    ("ssl", "tls"), ("https", "tls"),
+    ("env", "environment"), ("var", "variable"),
+    ("cron", "scheduler"), ("queue", "worker"),
+    ("lint", "linter"), ("format", "formatter"),
+]
+
+
+def expand_query(query: str) -> str:
+    """Expand query with synonyms for better recall."""
+    tokens = re.findall(r"[A-Za-z0-9_./:@+-]{2,}", query.lower())
+    extra: List[str] = []
+    for tok in tokens:
+        for src, dst in SYNONYMS:
+            if tok == src and dst not in tokens and dst not in extra:
+                extra.append(dst)
+    if not extra:
+        return query
+    return query + " " + " ".join(extra)
+
+
 STOPWORDS = {
     "a", "an", "the", "and", "or", "but", "if", "then", "else", "for", "of", "to", "in", "on",
     "at", "by", "with", "from", "is", "are", "was", "were", "be", "been", "being", "this", "that",
@@ -716,6 +781,12 @@ def tokenize(text: str) -> List[str]:
         if tok.endswith("ed") and len(tok) > 5:
             out.append(tok[:-2])
     return out
+
+
+TYPE_PRIORITY = {
+    "decision": 0.8, "knowledge": 0.6, "constraint": 0.5,
+    "gotcha": 0.4, "failure": 0.3, "hypothesis": 0.2, "session": 0.1,
+}
 
 
 def bm25_search(query: str, candidates: List[Tuple[Path, str, Dict[str, Any]]],
@@ -760,11 +831,13 @@ def bm25_search(query: str, candidates: List[Tuple[Path, str, Dict[str, Any]]],
         if status == "active":
             score += 1.0
         elif status == "tentative":
-            score += 0.3
+            score += 0.6
         elif status == "superseded":
             score -= 4.0
         elif status in ("invalid", "archived"):
             score -= 100.0
+        mtype = str(fm.get("type", "")).lower()
+        score += TYPE_PRIORITY.get(mtype, 0.0)
         if score > 0:
             scored.append((score, i, matched))
     scored.sort(key=lambda x: -x[0])
@@ -836,11 +909,15 @@ def embeddings_search(query: str, candidates: List[Tuple[Path, str, Dict[str, An
         return None
 
 
-def search(query: str, limit: int = 8) -> List[Tuple[float, Path, Dict[str, Any], str]]:
-    return _search_with_cfg(query, limit, load_config())
+def search(query: str, limit: int = 8, types: Optional[List[str]] = None,
+           statuses: Optional[List[str]] = None) -> List[Tuple[float, Path, Dict[str, Any], str]]:
+    return _search_with_cfg(query, limit, load_config(), types, statuses)
 
 
-def _search_with_cfg(query: str, limit: int, cfg: Dict[str, Any]) -> List[Tuple[float, Path, Dict[str, Any], str]]:
+def _search_with_cfg(query: str, limit: int, cfg: Dict[str, Any],
+                     types: Optional[List[str]] = None,
+                     statuses: Optional[List[str]] = None
+                     ) -> List[Tuple[float, Path, Dict[str, Any], str]]:
     if limit <= 0:
         limit = int(cfg.get("retrieval", {}).get("limit", 8))
     cands: List[Tuple[Path, str, Dict[str, Any]]] = []
@@ -850,6 +927,13 @@ def _search_with_cfg(query: str, limit: int, cfg: Dict[str, Any]) -> List[Tuple[
         status = str(fm.get("status", "active")).lower()
         if status in {"invalid", "archived"}:
             continue
+        if types:
+            mt = str(fm.get("type", "")).lower()
+            if mt not in [t.lower() for t in types]:
+                continue
+        if statuses:
+            if status not in [s.lower() for s in statuses]:
+                continue
         cands.append((p, text, fm))
     if not cands:
         return []
@@ -1597,7 +1681,13 @@ def _mcp_dispatch(name: str, args_d: Dict[str, Any]) -> str:
     if name == "search":
         q = args_d.get("query", "")
         limit = int(args_d.get("limit", 8))
-        results = search(q, limit)
+        types_f = args_d.get("types")
+        statuses_f = args_d.get("statuses")
+        if isinstance(types_f, str):
+            types_f = [types_f]
+        if isinstance(statuses_f, str):
+            statuses_f = [statuses_f]
+        results = search(q, limit, types=types_f, statuses=statuses_f)
         return json.dumps([{"path": str(p.relative_to(ROOT)), "score": round(s, 2),
                             "type": fm.get("type"), "status": fm.get("status"), "snippet": sn}
                            for s, p, fm, sn in results], ensure_ascii=False, indent=2)
@@ -1683,6 +1773,8 @@ def main() -> None:
     p = sub.add_parser("context")
     p.add_argument("--task", required=True)
     p.add_argument("--limit", type=int, default=6)
+    p.add_argument("--type", nargs="*", default=None, help="Filter by memory type(s).")
+    p.add_argument("--status", nargs="*", default=None, help="Filter by memory status(es).")
     p.add_argument("--json", action="store_true")
 
     p = sub.add_parser("checkpoint")
@@ -1701,6 +1793,8 @@ def main() -> None:
     p = sub.add_parser("search")
     p.add_argument("--query", required=True)
     p.add_argument("--limit", type=int, default=0)
+    p.add_argument("--type", nargs="*", default=None, help="Filter by memory type(s).")
+    p.add_argument("--status", nargs="*", default=None, help="Filter by memory status(es).")
     p.add_argument("--json", action="store_true")
     p.add_argument("--embeddings", choices=["on", "off", "auto"], default=None)
 
@@ -1789,13 +1883,15 @@ def main() -> None:
     elif a.cmd == "guard":
         raise SystemExit(guard())
     elif a.cmd == "search":
+        types_f = getattr(a, "type", None)
+        statuses_f = getattr(a, "status", None)
         emb_override = getattr(a, "embeddings", None)
         if emb_override:
             cfg = load_config()
             cfg["retrieval"]["embeddings"] = emb_override
-            r = _search_with_cfg(a.query, a.limit, cfg)
+            r = _search_with_cfg(a.query, a.limit, cfg, types=types_f, statuses=statuses_f)
         else:
-            r = search(a.query, a.limit)
+            r = search(a.query, a.limit, types=types_f, statuses=statuses_f)
         if a.json:
             print(json.dumps([{"path": str(p.relative_to(ROOT)), "score": round(s, 2),
                                "type": fm.get("type"), "status": fm.get("status"),

@@ -16,8 +16,8 @@ All commands are invoked as `irag.py <command> [options]`. Use `python` on Windo
 ### `init`
 Initialize the `INTERNAL_RAG/` skeleton. Idempotent.
 
-### `context --task "<task>" [--limit N] [--json]`
-Start or resume a task. Compares the project fingerprint with the last checkpoint. Returns a context packet (WORKING_STATE, candidate memories, token estimates, recovery guidance). `--json` for structured output.
+### `context --task "<task>" [--limit N] [--json] [--type T1 T2 ...] [--status S1 S2 ...]`
+Start or resume a task. Compares the project fingerprint with the last checkpoint. Returns a context packet with memories **grouped by type**: Verified facts (decisions/knowledge/constraints), Lessons & pitfalls (gotchas/failures), Unverified hypotheses. `--type` and `--status` filter candidates. Query is auto-expanded with synonyms. `--json` for structured output.
 
 ### `checkpoint [--reason R] [--task T] [--objective O] [--phase P] [--completed C] [--in-progress I] [--blockers B] [--decisions D] [--next N] [--memory M] [--json]`
 Persist the current operational state. Saves a fingerprint. Auto-archives a session snapshot when `checkpoints.auto_archive_sessions` is true.
@@ -25,8 +25,8 @@ Persist the current operational state. Saves a fingerprint. Auto-archives a sess
 ### `guard`
 Verify no project-code changes are missing from the last checkpoint. Exit code 0 = `GUARD OK`, 2 = `GUARD STALE`.
 
-### `search --query "<q>" [--limit N] [--json] [--embeddings on|off|auto]`
-Search durable memories (BM25+MMR, optional embeddings). `--json` returns `path`, `score`, `type`, `status`, `snippet`, `matched_tokens`.
+### `search --query "<q>" [--limit N] [--json] [--embeddings on|off|auto] [--type T1 T2 ...] [--status S1 S2 ...]`
+Search durable memories (BM25+MMR, optional embeddings). `--json` returns `path`, `score`, `type`, `status`, `snippet`, `matched_tokens`. `--type` filters by memory type(s). `--status` filters by status(es). Query is auto-expanded with synonyms.
 
 ### `remember --type T --title "..." --body "..." [--status S] [--scope SC] [--tags T1,T2] [--evidence E] [--consequence C] [--links L1,L2]`
 Create a durable memory. Types: `decision`, `knowledge`, `constraint`, `gotcha`, `failure`, `hypothesis`, `session`. `--links` is stored in frontmatter.
@@ -35,7 +35,7 @@ Create a durable memory. Types: `decision`, `knowledge`, `constraint`, `gotcha`,
 Read a memory by path, basename, or id. `--section` extracts one section (e.g. `Knowledge`, `Consequence`, `Links`).
 
 ### `update <ref> [--status S] [--verified DATE] [--add-tags T] [--remove-tags T] [--append "..."]`
-Update a memory's frontmatter and/or append a dated section.
+Update a memory's frontmatter and/or append a dated section. Use `--status active` to promote a hypothesis to verified knowledge.
 
 ### `supersede <ref> [--by <new-ref>] [--reason "..."]`
 Mark a memory as superseded. Records `superseded_by`, `superseded_at`, `supersede_reason` in frontmatter.
