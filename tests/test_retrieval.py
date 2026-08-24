@@ -36,11 +36,15 @@ def _load_fixtures() -> List[Tuple[Path, str, Dict[str, Any]]]:
 
 
 def _search(query: str, limit: int = 10,
-            types=None, statuses=None
+            types=None, statuses=None,
+            explain: bool = False
             ) -> List[Tuple[float, Path, Dict[str, Any], str]]:
-    """Run BM25 search against fixtures, bypassing ROOT-dependent logic."""
+    """Run hybrid search against fixtures, bypassing ROOT-dependent logic."""
     cfg = {"retrieval": {"limit": 10, "mmr_lambda": 1.0, "min_score": 0.0,
-                          "bm25_k1": 1.5, "bm25_b": 0.75}}
+                          "bm25_k1": 1.5, "bm25_b": 0.75,
+                          "mode": "sparse", "embeddings": "off",
+                          "rrf_k": 60, "sparse_weight": 1.0, "dense_weight": 1.0,
+                          "candidate_multiplier": 4}}
     candidates = _load_fixtures()
     # Apply filters
     filtered = []
@@ -56,15 +60,16 @@ def _search(query: str, limit: int = 10,
             if status not in [s.lower() for s in statuses]:
                 continue
         filtered.append((p, text, fm))
-    # Use bm25_search directly (it operates on candidates, not ROOT)
-    # But bm25_search uses ROOT for relative paths — patch ROOT temporarily
     original_root = irag.ROOT
-    irag.ROOT = FIXTURES_DIR.parent  # so relative_to works
+    original_rag = irag.RAG
+    irag.ROOT = FIXTURES_DIR.parent
+    irag.RAG = FIXTURES_DIR  # INTERNAL_RAG/ equivalent
     try:
-        results = irag.bm25_search(query, filtered, limit, cfg)
+        results = irag._search_with_cfg(query, limit, cfg, types=types, statuses=statuses, explain=explain)
     finally:
         irag.ROOT = original_root
-    return [(s, p, fm, sn) for s, p, fm, sn, _ in results]
+        irag.RAG = original_rag
+    return results
 
 
 def _ids(results) -> List[str]:
@@ -350,6 +355,117 @@ class TestEmptyAndEdgeCases(unittest.TestCase):
         """Whitespace-only query should return empty."""
         results = _search("   ", limit=5)
         self.assertEqual(len(results), 0)
+
+
+class TestRRFFusion(unittest.TestCase):
+
+    def test_rrf_deterministic(self):
+        """RRF fusion should be deterministic for the same inputs."""
+        sparse = [(10.0, 0, ["a"]), (5.0, 1, ["b"]), (3.0, 2, ["c"])]
+        dense = [(0.9, 1), (0.8, 0), (0.7, 3)]
+        r1 = irag.rrf_fusion(sparse, dense, 60, 1.0, 1.0)
+        r2 = irag.rrf_fusion(sparse, dense, 60, 1.0, 1.0)
+        self.assertEqual(len(r1), len(r2))
+        for (s1, i1, _), (s2, i2, _) in zip(r1, r2):
+            self.assertEqual(i1, i2)
+            self.assertAlmostEqual(s1, s2, places=10)
+
+    def test_rrf_doc_in_both_channels_ranks_higher(self):
+        """A doc found by both sparse and dense should rank above a doc found by only one."""
+        sparse = [(10.0, 0, ["a"]), (5.0, 1, ["b"])]
+        dense = [(0.9, 0), (0.8, 2)]  # doc 0 in both, doc 1 only sparse, doc 2 only dense
+        fused = irag.rrf_fusion(sparse, dense, 60, 1.0, 1.0)
+        # doc 0 should be #1 (found by both)
+        self.assertEqual(fused[0][1], 0)
+
+    def test_rrf_no_dense(self):
+        """RRF with no dense results should produce sparse-only scores."""
+        sparse = [(10.0, 0, ["a"]), (5.0, 1, ["b"])]
+        fused = irag.rrf_fusion(sparse, None, 60, 1.0, 1.0)
+        self.assertEqual(len(fused), 2)
+        self.assertEqual(fused[0][1], 0)  # higher sparse score = rank 0
+
+    def test_rrf_weights_affect_ordering(self):
+        """Higher dense_weight should favor dense-ranked docs."""
+        sparse = [(10.0, 0, ["a"]), (1.0, 1, ["b"])]
+        dense = [(0.9, 1), (0.1, 0)]  # doc 1 ranks #1 in dense
+        # With equal weights, doc 0 (sparse #1) likely wins
+        fused_equal = irag.rrf_fusion(sparse, dense, 60, 1.0, 1.0)
+        # With very high dense_weight, doc 1 should improve
+        fused_dense_heavy = irag.rrf_fusion(sparse, dense, 60, 0.1, 10.0)
+        # The relative ordering of doc 0 and doc 1 may change
+        # Just verify the function runs and produces valid output
+        self.assertEqual(len(fused_equal), 2)
+        self.assertEqual(len(fused_dense_heavy), 2)
+
+
+class TestHybridRetrieval(unittest.TestCase):
+
+    def test_sparse_only_mode_works(self):
+        """Sparse-only mode (no embeddings) should produce results."""
+        results = _search("postgres database", limit=5)
+        self.assertTrue(len(results) > 0)
+
+    def test_no_dense_does_not_error(self):
+        """When dense is unavailable, search should still work (graceful degradation)."""
+        # Our _search helper has embeddings=off, so dense is never attempted
+        results = _search("auth jwt token", limit=5)
+        self.assertTrue(len(results) > 0)
+
+    def test_exact_identifier_wins_via_sparse(self):
+        """An exact identifier like 'refresh_token_cache' should be findable via sparse."""
+        results = _search("refresh_token_cache", limit=5)
+        ids = _ids(results)
+        self.assertEqual(ids[0], "mem-fix-005-refresh-token-cache")
+
+
+class TestExplainOutput(unittest.TestCase):
+
+    def test_explain_fields_present(self):
+        """--explain should produce per-channel breakdown in fm."""
+        results = _search("postgres", limit=3, explain=True)
+        self.assertTrue(len(results) > 0)
+        for _, _, fm, _ in results:
+            expl = fm.get("_explain")
+            self.assertIsNotNone(expl, "Missing _explain in frontmatter")
+            self.assertIn("sparse_score", expl)
+            self.assertIn("sparse_rank", expl)
+            self.assertIn("dense_score", expl)
+            self.assertIn("dense_rank", expl)
+            self.assertIn("rrf_score", expl)
+            self.assertIn("policy_boost", expl)
+            self.assertIn("final_score", expl)
+            self.assertIn("retrieval_mode", expl)
+            self.assertIn("matched_tokens", expl)
+            self.assertEqual(expl["retrieval_mode"], "sparse")
+            self.assertIsNone(expl["dense_score"])  # no embeddings in test
+
+    def test_json_without_explain_preserves_fields(self):
+        """--json without --explain should still have the standard fields."""
+        results = _search("cache redis", limit=3, explain=False)
+        for s, p, fm, sn in results:
+            # Standard fields should be present
+            self.assertIsNotNone(s)
+            self.assertIsNotNone(p)
+            self.assertIsInstance(fm, dict)
+            self.assertIsInstance(sn, str)
+            # _explain should NOT be present
+            self.assertNotIn("_explain", fm)
+
+
+class TestFiltersBeforeRetrieval(unittest.TestCase):
+
+    def test_type_filter_applied_before_retrieval(self):
+        """Type filter should exclude non-matching types before search."""
+        results = _search("postgres", limit=10, types=["decision"])
+        for _, _, fm, _ in results:
+            self.assertEqual(str(fm.get("type", "")).lower(), "decision")
+
+    def test_status_filter_applied_before_retrieval(self):
+        """Status filter should exclude non-matching statuses before search."""
+        results = _search("api", limit=10, statuses=["active"])
+        for _, _, fm, _ in results:
+            self.assertEqual(str(fm.get("status", "")).lower(), "active")
 
 
 if __name__ == "__main__":

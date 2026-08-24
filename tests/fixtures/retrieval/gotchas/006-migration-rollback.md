@@ -14,6 +14,7 @@ tags:
 sources:
   - migrations/versions/0042_add_index.py
 links: []
+last_accessed: 2026-08-24
 ---
 
 # Alembic migration rollback fails on partial indexes

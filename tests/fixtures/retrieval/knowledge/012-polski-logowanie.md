@@ -14,6 +14,7 @@ tags:
 sources:
   - src/ui/login_form.py:12
 links: []
+last_accessed: 2026-08-24
 ---
 
 # Formularz logowania waliduje email i hasło

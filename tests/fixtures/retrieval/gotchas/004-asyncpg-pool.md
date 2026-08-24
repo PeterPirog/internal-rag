@@ -14,6 +14,7 @@ tags:
 sources:
   - src/db/pool.py:42
 links: []
+last_accessed: 2026-08-24
 ---
 
 # asyncpg pool exhausts under load

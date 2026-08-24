@@ -14,6 +14,7 @@ tags:
 sources:
   - src/cache/redis_client.py:25
 links: []
+last_accessed: 2026-08-24
 ---
 
 # Pułapka: klucze cache muszą mieć prefiks środowiska

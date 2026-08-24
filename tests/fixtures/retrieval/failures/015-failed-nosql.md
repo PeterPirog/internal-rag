@@ -12,6 +12,7 @@ tags:
   - nosql
 sources: []
 links: []
+last_accessed: 2026-08-24
 ---
 
 # Failed approach: MongoDB for transactional data

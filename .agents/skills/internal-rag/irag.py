@@ -25,7 +25,7 @@ import unicodedata
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-VERSION = "1.0.4"
+VERSION = "1.1.0"
 
 ALLOWED_TYPES = {"decision", "knowledge", "constraint", "gotcha", "failure", "hypothesis", "session"}
 ALLOWED_STATUS = {"active", "tentative", "superseded", "invalid", "archived"}
@@ -40,8 +40,16 @@ INFRA_PREFIXES = (
 )
 INFRA_EXACT = {"AGENTS.md"}
 DEFAULT_CONFIG = {
-    "retrieval": {"limit": 8, "mmr_lambda": 0.5, "min_score": 0.5, "embeddings": "auto",
-                  "bm25_k1": 1.5, "bm25_b": 0.75},
+    "retrieval": {
+        "limit": 8, "mmr_lambda": 0.5, "min_score": 0.5,
+        "embeddings": "auto",
+        "bm25_k1": 1.5, "bm25_b": 0.75,
+        "mode": "hybrid",
+        "rrf_k": 60,
+        "sparse_weight": 1.0,
+        "dense_weight": 1.0,
+        "candidate_multiplier": 4,
+    },
     "tokens": {"context_budget": 4000, "warn_ratio": 0.8},
     "checkpoints": {"auto_archive_sessions": True, "max_task_stack": 16, "max_age_minutes": 0},
     "privacy": {"scan_on_checkpoint": False},
@@ -999,7 +1007,8 @@ def mmr_rerank(scored: List[Tuple[float, int, List[str]]],
 def embeddings_search(query: str, candidates: List[Tuple[Path, str, Dict[str, Any]]],
                       limit: int, cfg: Dict[str, Any]
                       ) -> Optional[List[Tuple[float, Path, Dict[str, Any], str, List[str]]]]:
-    """Try sentence-transformers via irag_embeddings.py. Returns None if unavailable."""
+    """Legacy interface — full embeddings search with policy boosts.
+    Kept for backward compatibility. New hybrid pipeline uses dense_search_raw."""
     mode = str(cfg.get("retrieval", {}).get("embeddings", "auto")).lower()
     if mode in ("off", "no", "false", "0"):
         return None
@@ -1014,6 +1023,168 @@ def embeddings_search(query: str, candidates: List[Tuple[Path, str, Dict[str, An
         return mod.embeddings_search(query, candidates, limit, cfg, ROOT)
     except Exception:
         return None
+
+
+def _dense_search_raw(query: str, candidates: List[Tuple[Path, str, Dict[str, Any]]],
+                      cfg: Dict[str, Any]) -> Optional[List[Tuple[float, int]]]:
+    """Raw dense retrieval: (cosine_sim, candidate_idx) sorted desc.
+    Returns None if unavailable."""
+    try:
+        import importlib.util as _ilu
+        spec = _ilu.spec_from_file_location(
+            "irag_embeddings", str(ROOT / ".agents" / "skills" / "internal-rag" / "irag_embeddings.py"))
+        if spec is None or spec.loader is None:
+            return None
+        mod = _ilu.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.dense_search_raw(query, candidates, cfg, ROOT)
+    except Exception:
+        return None
+
+
+def _dense_similarity_matrix(candidate_indices: List[int],
+                              candidates: List[Tuple[Path, str, Dict[str, Any]]],
+                              cfg: Dict[str, Any]) -> Optional[Any]:
+    """Compute pairwise cosine similarity matrix for MMR diversity.
+    Returns numpy matrix or None."""
+    try:
+        import importlib.util as _ilu
+        spec = _ilu.spec_from_file_location(
+            "irag_embeddings", str(ROOT / ".agents" / "skills" / "internal-rag" / "irag_embeddings.py"))
+        if spec is None or spec.loader is None:
+            return None
+        mod = _ilu.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.dense_similarity_matrix(candidate_indices, candidates, cfg, ROOT)
+    except Exception:
+        return None
+
+
+# ----------------------------- RRF Fusion -----------------------------------
+
+def rrf_fusion(sparse_ranked: List[Tuple[float, int, List[str]]],
+               dense_ranked: Optional[List[Tuple[float, int]]],
+               rrf_k: float,
+               sparse_weight: float,
+               dense_weight: float
+               ) -> List[Tuple[float, int, Dict[str, Any]]]:
+    """Reciprocal Rank Fusion.
+
+    fused(doc) = sparse_weight/(rrf_k + sparse_rank) + dense_weight/(rrf_k + dense_rank)
+
+    Returns list of (fused_score, candidate_idx, explain_dict) sorted by fused_score desc.
+    """
+    sparse_map: Dict[int, Tuple[int, float]] = {}  # idx -> (rank, score)
+    for rank, (score, idx, matched) in enumerate(sparse_ranked):
+        sparse_map[idx] = (rank, score)
+
+    dense_map: Dict[int, Tuple[int, float]] = {}
+    if dense_ranked:
+        for rank, (score, idx) in enumerate(dense_ranked):
+            dense_map[idx] = (rank, score)
+
+    all_indices = set(sparse_map.keys()) | set(dense_map.keys())
+    fused: List[Tuple[float, int, Dict[str, Any]]] = []
+    for idx in all_indices:
+        rrf_score = 0.0
+        sparse_rank = None
+        sparse_score = None
+        dense_rank = None
+        dense_score = None
+        if idx in sparse_map:
+            sr, ss = sparse_map[idx]
+            sparse_rank = sr
+            sparse_score = ss
+            rrf_score += sparse_weight / (rrf_k + sr)
+        if idx in dense_map:
+            dr, ds = dense_map[idx]
+            dense_rank = dr
+            dense_score = ds
+            rrf_score += dense_weight / (rrf_k + dr)
+        explain = {
+            "sparse_score": round(sparse_score, 4) if sparse_score is not None else None,
+            "sparse_rank": sparse_rank,
+            "dense_score": round(dense_score, 4) if dense_score is not None else None,
+            "dense_rank": dense_rank,
+            "rrf_score": round(rrf_score, 6),
+        }
+        fused.append((rrf_score, idx, explain))
+    fused.sort(key=lambda x: -x[0])
+    return fused
+
+
+def _policy_boost(fm: Dict[str, Any]) -> float:
+    """Status + type + recency boost applied after fusion."""
+    boost = 0.0
+    status = str(fm.get("status", "active")).lower()
+    if status == "active":
+        boost += 1.0
+    elif status == "tentative":
+        boost += 0.6
+    elif status == "superseded":
+        boost -= 4.0
+    elif status in ("invalid", "archived"):
+        boost -= 100.0
+    mtype = str(fm.get("type", "")).lower()
+    boost += TYPE_PRIORITY.get(mtype, 0.0)
+    boost += recency_boost(fm)
+    return boost
+
+
+def _mmr_post_fusion(fused: List[Tuple[float, int, Dict[str, Any]]],
+                     candidates: List[Tuple[Path, str, Dict[str, Any]]],
+                     docs_tok: List[List[str]],
+                     cfg: Dict[str, Any],
+                     limit: int
+                     ) -> List[Tuple[float, int, Dict[str, Any]]]:
+    """MMR reranking after fusion. Uses dense cosine similarity for diversity
+    if embeddings available, otherwise token-Jaccard fallback."""
+    if not fused:
+        return []
+    if len(fused) <= limit:
+        return fused
+    lam = float(cfg.get("retrieval", {}).get("mmr_lambda", 0.5))
+
+    # Try dense similarity for MMR diversity
+    candidate_indices = [idx for _, idx, _ in fused]
+    dense_sim = _dense_similarity_matrix(candidate_indices, candidates, cfg)
+
+    selected: List[Tuple[float, int, Dict[str, Any]]] = [fused[0]]
+    remaining = list(fused[1:])
+    while remaining and len(selected) < limit:
+        best = None
+        best_val = -1e18
+        best_idx = 0
+        for idx_pos, (rrf_sc, cand_idx, explain) in enumerate(remaining):
+            max_sim = 0.0
+            if dense_sim is not None:
+                # Use dense cosine similarity
+                cur_pos = candidate_indices.index(cand_idx)
+                for sel in selected:
+                    sel_pos = candidate_indices.index(sel[1])
+                    sim = float(dense_sim[cur_pos][sel_pos])
+                    if sim > max_sim:
+                        max_sim = sim
+            else:
+                # Fallback: token-Jaccard
+                cur_set = set(docs_tok[cand_idx])
+                for sel in selected:
+                    sel_set = set(docs_tok[sel[1]])
+                    inter = len(cur_set & sel_set)
+                    union = len(cur_set | sel_set) or 1
+                    sim = inter / union
+                    if sim > max_sim:
+                        max_sim = sim
+            mmr = lam * rrf_sc - (1 - lam) * max_sim
+            if mmr > best_val:
+                best_val = mmr
+                best = (rrf_sc, cand_idx, explain)
+                best_idx = idx_pos
+        if best is None:
+            break
+        selected.append(best)
+        remaining.pop(best_idx)
+    return selected
 
 
 def _mark_accessed(paths: List[Path]) -> None:
@@ -1031,16 +1202,25 @@ def _mark_accessed(paths: List[Path]) -> None:
 
 
 def search(query: str, limit: int = 8, types: Optional[List[str]] = None,
-           statuses: Optional[List[str]] = None) -> List[Tuple[float, Path, Dict[str, Any], str]]:
-    return _search_with_cfg(query, limit, load_config(), types, statuses)
+           statuses: Optional[List[str]] = None,
+           explain: bool = False
+           ) -> List[Tuple[float, Path, Dict[str, Any], str]]:
+    return _search_with_cfg(query, limit, load_config(), types, statuses, explain=explain)
 
 
 def _search_with_cfg(query: str, limit: int, cfg: Dict[str, Any],
                      types: Optional[List[str]] = None,
-                     statuses: Optional[List[str]] = None
+                     statuses: Optional[List[str]] = None,
+                     explain: bool = False
                      ) -> List[Tuple[float, Path, Dict[str, Any], str]]:
     if limit <= 0:
         limit = int(cfg.get("retrieval", {}).get("limit", 8))
+    r_cfg = cfg.get("retrieval", {})
+    mode = str(r_cfg.get("mode", "hybrid")).lower()
+    emb_setting = str(r_cfg.get("embeddings", "auto")).lower()
+    cand_mult = int(r_cfg.get("candidate_multiplier", 4))
+    cand_limit = limit * cand_mult
+    # Filter candidates
     cands: List[Tuple[Path, str, Dict[str, Any]]] = []
     for p in memory_files():
         text = p.read_text(encoding="utf-8", errors="replace")
@@ -1058,15 +1238,94 @@ def _search_with_cfg(query: str, limit: int, cfg: Dict[str, Any],
         cands.append((p, text, fm))
     if not cands:
         return []
-    emb = embeddings_search(query, cands, limit, cfg)
-    if emb is not None:
-        result = [(s, p, fm, sn) for s, p, fm, sn, _ in emb]
-        _mark_accessed([p for _, p, _, _ in result])
-        return result
-    bm = bm25_search(query, cands, limit, cfg)
-    result = [(s, p, fm, sn) for s, p, fm, sn, _ in bm]
-    _mark_accessed([p for _, p, _, _ in result])
-    return result
+
+    # 1. Sparse BM25 — always
+    q_tokens = tokenize(query)
+    if not q_tokens:
+        q_tokens = re.findall(r"[A-Za-z0-9_./:@+-]{2,}", query.lower())
+    docs_tok: List[List[str]] = []
+    for p, text, fm in cands:
+        header = "\n".join(text.splitlines()[:40])
+        body = "\n".join(text.splitlines())
+        rel = str(p.relative_to(ROOT))
+        combined = f"{rel}\n{header}\n{body}"
+        docs_tok.append(tokenize(combined))
+    N = len(docs_tok)
+    avgdl = sum(len(d) for d in docs_tok) / N if N else 0
+    df: Dict[str, int] = {}
+    for d in docs_tok:
+        for t in set(d):
+            df[t] = df.get(t, 0) + 1
+    k1 = float(r_cfg.get("bm25_k1", 1.5))
+    b = float(r_cfg.get("bm25_b", 0.75))
+    sparse_scored: List[Tuple[float, int, List[str]]] = []
+    for i, d in enumerate(docs_tok):
+        score, matched = bm25_doc_score(q_tokens, d, df, N, avgdl, k1, b)
+        if score > 0:
+            sparse_scored.append((score, i, matched))
+    sparse_scored.sort(key=lambda x: -x[0])
+    sparse_scored = sparse_scored[:cand_limit]
+
+    # 2. Dense retrieval — if mode != sparse and embeddings available
+    dense_ranked: Optional[List[Tuple[float, int]]] = None
+    retrieval_mode = "sparse"
+    if mode != "sparse" and emb_setting not in ("off", "no", "false", "0"):
+        dense_ranked = _dense_search_raw(query, cands, cfg)
+        if dense_ranked is not None:
+            retrieval_mode = "hybrid"
+            dense_ranked = dense_ranked[:cand_limit]
+    # If mode was "dense" but dense failed, fall back to sparse gracefully
+
+    # 3. RRF fusion (or sparse-only)
+    rrf_k = float(r_cfg.get("rrf_k", 60))
+    sp_w = float(r_cfg.get("sparse_weight", 1.0))
+    dn_w = float(r_cfg.get("dense_weight", 1.0))
+    if retrieval_mode == "hybrid" and dense_ranked is not None:
+        fused = rrf_fusion(sparse_scored, dense_ranked, rrf_k, sp_w, dn_w)
+    else:
+        # Sparse-only: convert to fused format
+        fused = []
+        for rank, (score, idx, matched) in enumerate(sparse_scored):
+            explain_dict = {
+                "sparse_score": round(score, 4),
+                "sparse_rank": rank,
+                "dense_score": None,
+                "dense_rank": None,
+                "rrf_score": round(sp_w / (rrf_k + rank), 6),
+            }
+            fused.append((explain_dict["rrf_score"], idx, explain_dict))
+
+    # 4. Apply policy boost
+    min_score = float(r_cfg.get("min_score", 0.5))
+    boosted: List[Tuple[float, int, Dict[str, Any]]] = []
+    for rrf_sc, idx, expl in fused:
+        fm = cands[idx][2]
+        pb = _policy_boost(fm)
+        final_score = rrf_sc + pb
+        if final_score >= min_score:
+            expl["policy_boost"] = round(pb, 4)
+            expl["final_score"] = round(final_score, 6)
+            boosted.append((final_score, idx, expl))
+    boosted.sort(key=lambda x: -x[0])
+
+    # 5. MMR post-fusion
+    selected = _mmr_post_fusion(boosted, cands, docs_tok, cfg, limit)
+
+    # 6. Build output
+    out = []
+    for rank, (final_score, idx, expl) in enumerate(selected):
+        p, text, fm = cands[idx]
+        snip = " ".join(text.split())[:420]
+        # Add rank and retrieval_mode to explain
+        expl["final_rank"] = rank
+        expl["retrieval_mode"] = retrieval_mode
+        expl["matched_tokens"] = _matched_for(fm, query)
+        out.append((final_score, p, fm, snip))
+        # Attach explain to fm for --explain consumers
+        if explain:
+            fm["_explain"] = expl
+    _mark_accessed([p for _, p, _, _ in out])
+    return out
 
 
 def _matched_for(fm: Dict[str, Any], query: str = "") -> List[str]:
@@ -2195,6 +2454,7 @@ def main() -> None:
     p.add_argument("--type", nargs="*", default=None, help="Filter by memory type(s).")
     p.add_argument("--status", nargs="*", default=None, help="Filter by memory status(es).")
     p.add_argument("--json", action="store_true")
+    p.add_argument("--explain", action="store_true", help="Include per-channel scoring breakdown in JSON output.")
     p.add_argument("--embeddings", choices=["on", "off", "auto"], default=None)
 
     p = sub.add_parser("remember")
@@ -2294,17 +2554,23 @@ def main() -> None:
         types_f = getattr(a, "type", None)
         statuses_f = getattr(a, "status", None)
         emb_override = getattr(a, "embeddings", None)
+        want_explain = getattr(a, "explain", False)
         if emb_override:
             cfg = load_config()
             cfg["retrieval"]["embeddings"] = emb_override
-            r = _search_with_cfg(a.query, a.limit, cfg, types=types_f, statuses=statuses_f)
+            r = _search_with_cfg(a.query, a.limit, cfg, types=types_f, statuses=statuses_f, explain=want_explain)
         else:
-            r = search(a.query, a.limit, types=types_f, statuses=statuses_f)
+            r = search(a.query, a.limit, types=types_f, statuses=statuses_f, explain=want_explain)
         if a.json:
-            print(json.dumps([{"path": str(p.relative_to(ROOT)), "score": round(s, 2),
-                               "type": fm.get("type"), "status": fm.get("status"),
-                               "snippet": sn, "matched_tokens": _matched_for(fm, a.query)}
-                              for s, p, fm, sn in r], ensure_ascii=False, indent=2))
+            items = []
+            for s, p, fm, sn in r:
+                item = {"path": str(p.relative_to(ROOT)), "score": round(s, 2),
+                        "type": fm.get("type"), "status": fm.get("status"),
+                        "snippet": sn, "matched_tokens": _matched_for(fm, a.query)}
+                if want_explain and "_explain" in fm:
+                    item["explain"] = fm.pop("_explain")
+                items.append(item)
+            print(json.dumps(items, ensure_ascii=False, indent=2))
         elif getattr(a, "verbose", False) and r:
             for i, (s, p, fm, sn) in enumerate(r, 1):
                 print(f"{i}. {p.relative_to(ROOT)} score={s:.2f}")

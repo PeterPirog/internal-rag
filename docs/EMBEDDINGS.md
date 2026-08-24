@@ -1,6 +1,26 @@
-# Embeddings (optional, v1.0.1)
+# Embeddings (optional, v1.1.0)
 
-By default INTERNAL_RAG uses **BM25 + MMR** (pure Python, zero dependencies). For better semantic retrieval you can add sentence-transformers.
+Since v1.1.0, INTERNAL_RAG uses **hybrid retrieval**: BM25 + optional dense embeddings combined via **Reciprocal Rank Fusion (RRF)**.
+
+## How hybrid retrieval works
+
+```text
+query
+  ├── BM25 sparse (always) ──→ sparse_ranked[]
+  ├── Dense embeddings (if available) ──→ dense_ranked[]
+  └── RRF fusion ──→ fused[]
+        ├── Policy boosts (status, type, recency)
+        ├── MMR reranking (cosine diversity if dense, Jaccard fallback)
+        └── Final top-k
+```
+
+RRF formula:
+```
+fused(doc) = sparse_weight / (rrf_k + sparse_rank)
+           + dense_weight / (rrf_k + dense_rank)
+```
+
+This means a document found by **both** channels ranks higher than one found by only one — without summing incomparable raw scores.
 
 ## Install
 
@@ -8,30 +28,30 @@ By default INTERNAL_RAG uses **BM25 + MMR** (pure Python, zero dependencies). Fo
 pip install -r requirements-optional.txt
 ```
 
-First use will download the model (~80–400 MB depending on the model) to the user cache.
-
 ## Enable
 
 In `.irag.yml`:
 
 ```yaml
 retrieval:
-  embeddings: auto      # auto (default) | on | off
-  embeddings_model: all-MiniLM-L6-v2
+  mode: hybrid      # sparse | dense | hybrid (default: hybrid)
+  embeddings: auto  # auto | on | off (legacy, still works)
+  rrf_k: 60
+  sparse_weight: 1.0
+  dense_weight: 1.0
 ```
 
-- `auto` — embeddings if the package is available, otherwise BM25.
-- `on` — prefer embeddings, fallback to BM25 on error.
-- `off` — always BM25.
+- `hybrid` — BM25 + dense → RRF (default, best quality).
+- `sparse` — BM25 only (zero-dependency).
+- `dense` — dense only (graceful fallback to sparse if unavailable).
 
-CLI override: `irag.py search --query "..." --embeddings on`.
+## `--explain`
 
-## How it works
+```bash
+irag.py search --query "auth" --json --explain
+```
 
-1. `irag.py` lazy-imports `irag_embeddings.py` (which imports `sentence_transformers`).
-2. Embeddings are cached in-process (SHA-256 key).
-3. Embedding scores are combined with status heuristics (active/tentative/superseded).
-4. On any failure — automatic fallback to BM25+MMR.
+Returns per-result breakdown: `sparse_score`, `sparse_rank`, `dense_score`, `dense_rank`, `rrf_score`, `policy_boost`, `final_score`, `retrieval_mode`.
 
 ## Diagnostics
 
@@ -41,25 +61,23 @@ irag.py embeddings-info --json
 irag.py doctor
 ```
 
-## Models
-
-Default: `all-MiniLM-L6-v2` (fast, ~80 MB). Alternatives:
-
-```yaml
-retrieval:
-  embeddings_model: paraphrase-multilingual-MiniLM-L12-v2   # better for non-English
-```
-
-or `IRAG_EMBED_MODEL=...` env var.
-
 ## When embeddings help
 
 - Synonyms and paraphrases (BM25 misses these).
 - Queries in a different language than the memory content.
 - Longer, descriptive queries.
+- Semantic similarity that exact token matching cannot capture.
 
 ## When BM25 suffices
 
-- Exact token matches (file names, identifiers).
+- Exact token matches (file names, identifiers like `refresh_token_cache`).
 - Small memory corpora.
 - Environments where packages cannot be installed.
+
+## Graceful degradation
+
+If `sentence-transformers` is not installed, the model fails to load, or any error occurs:
+- Dense channel returns `None`.
+- RRF uses sparse-only results.
+- No error is raised.
+- `retrieval_mode` in `--explain` shows `sparse`.

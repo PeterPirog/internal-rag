@@ -14,6 +14,7 @@ tags:
 sources:
   - src/validators/pesel.py:8
 links: []
+last_accessed: 2026-08-24
 ---
 
 # Walidacja numeru PESEL w backendzie

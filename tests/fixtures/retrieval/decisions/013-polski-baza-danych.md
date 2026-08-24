@@ -12,6 +12,7 @@ tags:
   - decyzja
 sources: []
 links: []
+last_accessed: 2026-08-24
 ---
 
 # Decyzja: baza danych PostgreSQL dla wszystkich środowisk

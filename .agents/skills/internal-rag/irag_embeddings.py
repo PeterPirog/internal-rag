@@ -72,6 +72,69 @@ def embeddings_search(query: str,
                       limit: int,
                       cfg: Dict[str, Any],
                       root: Path) -> Optional[List[Tuple[float, Path, Dict[str, Any], str, List[str]]]]:
+    """Legacy interface — returns full results with policy boosts applied.
+    Kept for backward compatibility. New code should call dense_search_raw."""
+    raw = dense_search_raw(query, candidates, cfg, root)
+    if raw is None:
+        return None
+    TYPE_PRIORITY = {
+        "decision": 0.8, "knowledge": 0.6, "constraint": 0.5,
+        "gotcha": 0.4, "failure": 0.3, "hypothesis": 0.2, "session": 0.1,
+    }
+
+    def _recency_boost(fm):
+        import datetime as _dt
+        date_str = str(fm.get("updated") or fm.get("created") or "")
+        if not date_str:
+            return 0.0
+        try:
+            mem_date = _dt.date.fromisoformat(date_str[:10])
+        except Exception:
+            return 0.0
+        age_days = (_dt.date.today() - mem_date).days
+        if age_days < 0:
+            age_days = 0
+        if age_days <= 7:
+            return 0.03
+        if age_days <= 30:
+            return 0.01
+        return 0.0
+
+    scored: List[Tuple[float, int]] = []
+    for cosine_sim, i in raw:
+        fm = candidates[i][2]
+        status = str(fm.get("status", "active")).lower()
+        score = float(cosine_sim)
+        if status == "active":
+            score += 0.1
+        elif status == "tentative":
+            score += 0.06
+        elif status == "superseded":
+            score -= 0.2
+        elif status in ("invalid", "archived"):
+            score -= 10.0
+        mtype = str(fm.get("type", "")).lower()
+        score += TYPE_PRIORITY.get(mtype, 0.0)
+        score += _recency_boost(fm)
+        if score > 0:
+            scored.append((score, i))
+    scored.sort(key=lambda x: -x[0])
+    out = []
+    for score, i in scored[:limit]:
+        p, text, fm = candidates[i]
+        snip = " ".join(text.split())[:420]
+        matched = _tokenize_light(query)
+        out.append((score, p, fm, snip, matched))
+    return out
+
+
+def dense_search_raw(query: str,
+                     candidates: List[Tuple[Path, str, Dict[str, Any]]],
+                     cfg: Dict[str, Any],
+                     root: Path) -> Optional[List[Tuple[float, int]]]:
+    """Raw dense retrieval — returns (cosine_similarity, candidate_index) pairs.
+    No policy boosts, no limits, no snippets. Sorted by cosine descending.
+    Returns None if embeddings are unavailable or disabled."""
     mode = str(cfg.get("retrieval", {}).get("embeddings", "auto")).lower()
     if mode in ("off", "no", "false", "0"):
         return None
@@ -94,54 +157,38 @@ def embeddings_search(query: str,
         q_emb = _embed(model, [query])[0]
         d_emb = _embed(model, docs)
         sims = (d_emb @ q_emb) if hasattr(d_emb, "@") else np.dot(d_emb, q_emb)
-        TYPE_PRIORITY = {
-            "decision": 0.8, "knowledge": 0.6, "constraint": 0.5,
-            "gotcha": 0.4, "failure": 0.3, "hypothesis": 0.2, "session": 0.1,
-        }
-
-        def _recency_boost(fm):
-            import datetime as _dt
-            date_str = str(fm.get("updated") or fm.get("created") or "")
-            if not date_str:
-                return 0.0
-            try:
-                mem_date = _dt.date.fromisoformat(date_str[:10])
-            except Exception:
-                return 0.0
-            age_days = (_dt.date.today() - mem_date).days
-            if age_days < 0:
-                age_days = 0
-            if age_days <= 7:
-                return 0.03
-            if age_days <= 30:
-                return 0.01
-            return 0.0
-
         scored: List[Tuple[float, int]] = []
         for i, sim in enumerate(sims):
-            fm = candidates[i][2]
-            status = str(fm.get("status", "active")).lower()
-            score = float(sim)
-            if status == "active":
-                score += 0.1
-            elif status == "tentative":
-                score += 0.06
-            elif status == "superseded":
-                score -= 0.2
-            elif status in ("invalid", "archived"):
-                score -= 10.0
-            mtype = str(fm.get("type", "")).lower()
-            score += TYPE_PRIORITY.get(mtype, 0.0)
-            score += _recency_boost(fm)
-            if score > 0:
-                scored.append((score, i))
+            scored.append((float(sim), i))
         scored.sort(key=lambda x: -x[0])
-        out = []
-        for score, i in scored[:limit]:
+        return scored
+    except Exception:
+        return None
+
+
+def dense_similarity_matrix(candidate_indices: List[int],
+                             candidates: List[Tuple[Path, str, Dict[str, Any]]],
+                             cfg: Dict[str, Any],
+                             root: Path) -> Optional[Any]:
+    """Compute pairwise cosine similarity matrix for MMR diversity.
+    Returns numpy matrix [n x n] or None if embeddings unavailable."""
+    try:
+        import numpy as np
+    except Exception:
+        return None
+    model_name = str(cfg.get("retrieval", {}).get("embeddings_model", DEFAULT_MODEL))
+    model = _load_model(model_name)
+    if model is None:
+        return None
+    try:
+        docs = []
+        for i in candidate_indices:
             p, text, fm = candidates[i]
-            snip = " ".join(text.split())[:420]
-            matched = _tokenize_light(query)
-            out.append((score, p, fm, snip, matched))
-        return out
+            header = "\n".join(text.splitlines()[:40])
+            body = " ".join(text.split())[:2000]
+            docs.append(f"{p.relative_to(root)}\n{header}\n{body}")
+        emb = _embed(model, docs)
+        sims = emb @ emb.T if hasattr(emb, "T") else np.dot(emb, emb.T)
+        return sims
     except Exception:
         return None

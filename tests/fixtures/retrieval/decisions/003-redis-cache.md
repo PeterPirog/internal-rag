@@ -12,6 +12,7 @@ tags:
   - cache
 sources: []
 links: []
+last_accessed: 2026-08-24
 ---
 
 # Use Redis for session cache

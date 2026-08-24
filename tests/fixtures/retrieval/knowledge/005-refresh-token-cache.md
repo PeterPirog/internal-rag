@@ -14,6 +14,7 @@ tags:
 sources:
   - src/auth/token.py:78
 links: []
+last_accessed: 2026-08-24
 ---
 
 # refresh_token_cache function invalidates on password change

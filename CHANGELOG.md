@@ -1,5 +1,43 @@
 # Changelog
 
+## 1.1.0 — 2026-08-24
+
+Hybrid retrieval with Reciprocal Rank Fusion.
+
+### Hybrid retrieval pipeline
+- BM25 sparse retrieval is **always** executed.
+- Dense embeddings retrieval is executed when `mode: hybrid` (default) and encoder is available.
+- If dense fails, graceful degradation to sparse-only — no error.
+- **Reciprocal Rank Fusion (RRF)** combines channels:
+  `fused(doc) = sparse_weight/(rrf_k + sparse_rank) + dense_weight/(rrf_k + dense_rank)`
+- MMR reranking runs **after** fusion, using dense cosine similarity for diversity when available, token-Jaccard fallback otherwise.
+
+### New config options
+```yaml
+retrieval:
+  mode: hybrid           # sparse | dense | hybrid
+  rrf_k: 60              # RRF smoothing constant
+  sparse_weight: 1.0     # RRF weight for BM25 channel
+  dense_weight: 1.0      # RRF weight for dense channel
+  candidate_multiplier: 4  # over-fetch factor for candidate pool
+```
+- `retrieval.embeddings` (old) remains compatible — mapped to mode behavior.
+- Existing `.irag.yml` files are not broken.
+
+### `--explain` flag
+- `search --json --explain` returns per-result breakdown:
+  `sparse_score`, `sparse_rank`, `dense_score`, `dense_rank`, `rrf_score`, `policy_boost`, `final_score`, `final_rank`, `matched_tokens`, `retrieval_mode`.
+- `search --json` (without `--explain`) preserves the existing JSON fields.
+
+### Embeddings module
+- New `dense_search_raw()` — returns raw (cosine_sim, idx) pairs without policy boosts.
+- New `dense_similarity_matrix()` — for MMR diversity using cosine similarity.
+- `embeddings_search()` (legacy) preserved for backward compatibility.
+
+### Tests
+- 44 tests (was 33): added RRF fusion, hybrid retrieval, explain output, filter-before-retrieval, determinism tests.
+- All 44 tests pass with zero dependencies (sparse-only mode in test harness).
+
 ## 1.0.4 — 2026-08-24
 
 Sparse retrieval fix and deterministic test suite.

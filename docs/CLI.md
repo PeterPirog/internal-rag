@@ -25,8 +25,8 @@ Persist the current operational state. Saves a fingerprint. Auto-archives a sess
 ### `guard`
 Verify no project-code changes are missing from the last checkpoint. Exit code 0 = `GUARD OK`, 2 = `GUARD STALE`.
 
-### `search --query "<q>" [--limit N] [--json] [--embeddings on|off|auto] [--type T1 T2 ...] [--status S1 S2 ...]`
-Search durable memories (BM25+MMR, optional embeddings). `--json` returns `path`, `score`, `type`, `status`, `snippet`, `matched_tokens`. `--type` filters by memory type(s). `--status` filters by status(es). Query is auto-expanded with synonyms.
+### `search --query "<q>" [--limit N] [--json] [--explain] [--embeddings on|off|auto] [--type T1 T2 ...] [--status S1 S2 ...]`
+Search durable memories via hybrid retrieval (BM25 + optional dense → RRF → MMR). `--json` returns `path`, `score`, `type`, `status`, `snippet`, `matched_tokens`. `--explain` adds per-channel breakdown: `sparse_score`, `sparse_rank`, `dense_score`, `dense_rank`, `rrf_score`, `policy_boost`, `final_score`, `retrieval_mode`. `--type` filters by memory type(s). `--status` filters by status(es). Query is auto-expanded with synonyms.
 
 ### `remember --type T --title "..." --body "..." [--status S] [--scope SC] [--tags T1,T2] [--evidence E] [--consequence C] [--links L1,L2] [--force] [--allow-secret]`
 Create a durable memory. Types: `decision`, `knowledge`, `constraint`, `gotcha`, `failure`, `hypothesis`, `session`. `--links` is stored in frontmatter. `--force` overrides duplicate and conflict detection. `--allow-secret` bypasses the secret-pattern scan (use with caution).

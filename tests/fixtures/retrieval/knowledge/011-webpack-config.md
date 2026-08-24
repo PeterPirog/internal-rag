@@ -14,6 +14,7 @@ tags:
 sources:
   - frontend/webpack.config.js
 links: []
+last_accessed: 2026-08-24
 ---
 
 # Webpack config splits vendor and app bundles

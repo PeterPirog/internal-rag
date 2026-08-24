@@ -14,6 +14,7 @@ tags:
 sources:
   - docker-compose.yml
 links: []
+last_accessed: 2026-08-24
 ---
 
 # Docker Compose setup for local development

@@ -12,6 +12,7 @@ tags:
   - security
 sources: []
 links: []
+last_accessed: 2026-08-24
 ---
 
 # Authentication uses JWT tokens

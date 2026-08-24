@@ -12,6 +12,7 @@ tags:
   - hypothesis
 sources: []
 links: []
+last_accessed: 2026-08-24
 ---
 
 # Hypothesis: GraphQL might reduce API calls

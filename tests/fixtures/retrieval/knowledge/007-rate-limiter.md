@@ -13,6 +13,7 @@ tags:
 sources:
   - src/middleware/rate_limit.py:15
 links: []
+last_accessed: 2026-08-24
 ---
 
 # Rate limiter uses sliding window algorithm
