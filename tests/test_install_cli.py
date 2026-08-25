@@ -92,5 +92,87 @@ class TestInstallSelfInstallGuard(unittest.TestCase):
                 self.fail(f"copy_update_files crashed on self-install: {e}")
 
 
+class TestWindowsAppsStubDetection(unittest.TestCase):
+    """The detector must reject the WindowsApps Python stub."""
+
+    def _load(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("_install_mod", str(INSTALL_PY))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_is_windowsapps_stub_true(self):
+        mod = self._load()
+        from pathlib import Path
+        stub = Path("C:/Users/test/AppData/Local/Microsoft/WindowsApps/python.exe")
+        self.assertTrue(mod._is_windowsapps_stub(stub))
+
+    def test_is_windowsapps_stub_false_for_real_python(self):
+        mod = self._load()
+        from pathlib import Path
+        real = Path("C:/Python312/python.exe")
+        self.assertFalse(mod._is_windowsapps_stub(real))
+
+    def test_detect_python_returns_verified_path(self):
+        """detect_python must return a path that actually works with --version."""
+        mod = self._load()
+        py = mod.detect_python()
+        import subprocess
+        r = subprocess.run([py, "--version"], stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE, timeout=10)
+        self.assertEqual(r.returncode, 0)
+        self.assertIn(b"Python", r.stdout + r.stderr)
+
+
+class TestUnregisterCleanup(unittest.TestCase):
+    """--unregister must remove empty config files + parent dirs."""
+
+    def setUp(self):
+        import tempfile, shutil
+        self.tmp = Path(tempfile.mkdtemp(prefix="irag-unreg-"))
+        (self.tmp / ".git").mkdir()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _load(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("_install_mod2", str(INSTALL_PY))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_unregister_removes_empty_warp_config(self):
+        import json
+        mod = self._load()
+        warp_dir = self.tmp / ".warp"
+        warp_dir.mkdir()
+        cfg = warp_dir / ".mcp.json"
+        cfg.write_text(json.dumps({"mcpServers": {
+            "mcp-light-memory": {"command": "python", "args": ["x"]}
+        }}), encoding="utf-8")
+        mod.unregister_client("warp", self.tmp, False, "mcp-light-memory")
+        self.assertFalse(cfg.exists(), "config file should be deleted when empty")
+        self.assertFalse(warp_dir.exists(), ".warp/ dir should be deleted when empty")
+
+    def test_unregister_keeps_config_if_other_servers(self):
+        import json
+        mod = self._load()
+        warp_dir = self.tmp / ".warp"
+        warp_dir.mkdir()
+        cfg = warp_dir / ".mcp.json"
+        cfg.write_text(json.dumps({"mcpServers": {
+            "mcp-light-memory": {"command": "python", "args": ["x"]},
+            "other-server": {"command": "node", "args": ["y"]}
+        }}), encoding="utf-8")
+        mod.unregister_client("warp", self.tmp, False, "mcp-light-memory")
+        self.assertTrue(cfg.exists(), "config should remain (other server present)")
+        data = json.loads(cfg.read_text(encoding="utf-8"))
+        self.assertNotIn("mcp-light-memory", data["mcpServers"])
+        self.assertIn("other-server", data["mcpServers"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
