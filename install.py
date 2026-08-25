@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-VERSION = "1.7.1"
+VERSION = "1.7.2"
 PRODUCT_NAME = "MCP Light Memory"
 PRODUCT_SLUG = "mcp-light-memory"
 LEGACY_NAME = "internal-rag"  # deprecated; kept for compatibility
@@ -352,6 +352,13 @@ def register_client(client: str, project: Path, global_cfg: bool,
         }
         if client == "warp":
             server_entry["working_directory"] = str(project.resolve())
+        elif client == "jetbrains":
+            # JetBrains MCP config does not support a cwd/working_directory field
+            # in the JSON file. The Working Directory must be set in the IDE UI:
+            # Settings → Tools → AI Assistant → MCP. We write it anyway as a
+            # hint (some JetBrains versions may read it), but also print a
+            # prominent warning below.
+            server_entry["working_directory"] = str(project.resolve())
     # Read existing config (merge)
     if cfg_path.exists():
         try:
@@ -371,6 +378,14 @@ def register_client(client: str, project: Path, global_cfg: bool,
                         encoding="utf-8")
     print(f"Registered MCP server '{server_name}' in {cfg_path}")
     _verify_registered_server(server_entry, client)
+    # JetBrains does not reliably read working_directory from the config file;
+    # the user must set it in Settings → Tools → AI Assistant → MCP.
+    if client == "jetbrains":
+        wd = server_entry.get("working_directory", str(project.resolve()))
+        print(f"\n  WARNING: JetBrains MCP config does not reliably set cwd from the JSON file.")
+        print(f"  Set Working Directory in: Settings -> Tools -> AI Assistant -> MCP")
+        print(f"  to: {wd}")
+        print(f"  Otherwise the memory store will be created in the IDE's default cwd.\n")
     return cfg_path
 
 
@@ -601,7 +616,16 @@ def main():
     print(f'Git local exclude: {exclude_path}')
     if args.client:
         print(f'MCP server registered for {args.client}.')
-    print('Restart Warp/OpenCode, then run context for the current task.')
+    # Client-specific restart instruction
+    restart_msgs = {
+        'warp': 'Restart Warp, then run context for the current task.',
+        'opencode': 'Restart OpenCode, then run context for the current task.',
+        'jetbrains': 'Restart PyCharm/JetBrains IDE (or reload MCP servers in Settings), then run context for the current task.',
+    }
+    print(restart_msgs.get(args.client, 'Restart Warp/OpenCode/PyCharm, then run context for the current task.'))
+    # Show the memory store path so the user can verify it landed in the right place
+    mem_store = target / 'INTERNAL_RAG'
+    print(f'Memory store: {mem_store}')
     print('\nBefore publishing the target repository, run:')
     print(f'  {sys.executable} "{HERE / "privacy_check.py"}" "{target}"')
 
