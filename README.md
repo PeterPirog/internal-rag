@@ -152,29 +152,69 @@
 
 ## Quick start
 
-### Windows
+### One-command install + client registration (recommended)
+
+Clone this repo once, then install into any project and auto-register the MCP
+server in your client:
+
+```powershell
+# Windows (PowerShell)
+git clone https://github.com/PeterPirog/mcp-light-memory.git ~/mcp-light-memory
+python ~/mcp-light-memory/install.py . --client warp          # project-local config
+# or --global for ~/.warp/.mcp.json; or --client opencode / --client jetbrains
+```
+
+```bash
+# Linux/macOS
+git clone https://github.com/PeterPirog/mcp-light-memory.git ~/mcp-light-memory
+python3 ~/mcp-light-memory/install.py . --client warp
+```
+
+The installer:
+- copies skill files + creates `INTERNAL_RAG/` + `AGENTS.md`
+- runs `init` + `checkpoint` + `validate` (so `guard` is `OK` immediately)
+- **auto-registers** the MCP server in the correct client config file
+- writes the **absolute path** to the Python interpreter (survives Windows PATH issues)
+
+Restart Warp/OpenCode/PyCharm, then:
+
+```powershell
+python .agents\skills\internal-rag\mlm.py context --task "current task"
+```
+
+### Zero-shot agent prompts
+
+Prefer your agent to do everything? Paste a prompt from
+[`docs/ZERO-SHOT-SETUP-PROMPTS.md`](docs/ZERO-SHOT-SETUP-PROMPTS.md) into Warp /
+OpenCode / PyCharm — it clones, installs, registers, and verifies automatically.
+
+### Legacy manual install
 
 ```powershell
 python .\install.py "D:\path\to\project"
 ```
 
-Then restart Warp/OpenCode and in the project:
-
-```powershell
-python .agents\skills\internal-rag\irag.py context --task "current task"
-```
-
-### Linux/macOS
-
-```bash
-python3 install.py "/path/to/project"
-```
-
 Then:
 
-```bash
-python3 .agents/skills/internal-rag/irag.py context --task "current task"
+```powershell
+python .agents\skills\internal-rag\mlm.py context --task "current task"
 ```
+
+### Path mapping (rebrand: internal-rag → MCP Light Memory)
+
+| New name | Legacy path (kept for compatibility) |
+|---|---|
+| `MCP Light Memory` (product) | `internal-rag` (deprecated product name) |
+| `mlm` / `mlm.py` (primary CLI) | `irag.py` (legacy alias, still works) |
+| `mcp-light-memory` (MCP server name) | `internal-rag` (legacy, still works in configs) |
+| `mcp-light-memory-router` (router name) | `internal-rag-router` (legacy) |
+| `INTERNAL_RAG/` (storage folder — unchanged) | — |
+| `.agents/skills/internal-rag/` (skill dir — unchanged) | — |
+
+The on-disk folder `INTERNAL_RAG/` and the skill directory
+`.agents/skills/internal-rag/` are intentionally kept under their legacy names
+for **zero-migration** backward compatibility. See
+[`docs/MIGRATION-TO-MCP-LIGHT-MEMORY.md`](docs/MIGRATION-TO-MCP-LIGHT-MEMORY.md).
 
 ## Workflow
 

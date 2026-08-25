@@ -218,12 +218,17 @@ def backup_existing(target: Path, backup_root: Path, rel: Path):
 
 def copy_update_files(target: Path, backup_root: Path):
     for rel in UPDATE_PATHS:
-        src = HERE / rel
+        src = (HERE / rel).resolve()
         if not src.exists():
             continue
         backup_existing(target, backup_root, rel)
-        dst = target / rel
+        dst = (target / rel).resolve()
         dst.parent.mkdir(parents=True, exist_ok=True)
+        # Self-install guard: if src == dst (installing into the tool's own
+        # checkout), skip the copy. On Windows the .py files are locked by
+        # the running python process and shutil.copy2 would raise WinError 32.
+        if src == dst:
+            continue
         if src.is_dir():
             shutil.copytree(src, dst, dirs_exist_ok=True)
         else:
@@ -234,6 +239,108 @@ def copy_update_files(target: Path, backup_root: Path):
             backup_existing(target, backup_root, rel)
             shutil.rmtree(dst) if dst.is_dir() else dst.unlink()
             print(f'Removed legacy file: {rel}')
+
+
+def detect_python() -> str:
+    """Detect the best available Python interpreter as an absolute path.
+
+    Order: sys.executable (current) -> python -> py -> python3.
+    Returns an absolute path string suitable for MCP client configs.
+    """
+    candidates = [shutil.which("python"), shutil.which("py"),
+                 shutil.which("python3")]
+    for c in candidates:
+        if c:
+            return str(Path(c).resolve())
+    return sys.executable  # fallback to the running interpreter
+
+
+def client_config_path(client: str, project: Path, global_cfg: bool) -> Path:
+    """Return the MCP config file path for a given client."""
+    home = Path.home()
+    if client == "warp":
+        # Warp reads ~/.warp/.mcp.json (global) or {repo}/.warp/.mcp.json (project)
+        if global_cfg:
+            return home / ".warp" / ".mcp.json"
+        return project / ".warp" / ".mcp.json"
+    elif client == "opencode":
+        # OpenCode V2 reads opencode.json / opencode.jsonc in the project root
+        return project / "opencode.json"
+    elif client == "jetbrains":
+        # JetBrains AI Assistant reads ~/.config/jetbrains/mcp.json (Linux/macOS)
+        # or %USERPROFILE%\.jetbrains\mcp.json (Windows)
+        if global_cfg:
+            return home / ".jetbrains" / "mcp.json"
+        return project / ".jetbrains" / "mcp.json"
+    else:
+        raise ValueError(f"Unknown client: {client}")
+
+
+def register_client(client: str, project: Path, global_cfg: bool,
+                    server_name: str, script_rel: str, extra_args: list[str]):
+    """Register the MCP server in the client's config file (merge, preserve existing)."""
+    cfg_path = client_config_path(client, project, global_cfg)
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    py = detect_python()
+    script_abs = str((project / script_rel).resolve())
+    full_args = [py, script_abs] + extra_args
+    if client == "opencode":
+        server_entry = {
+            "type": "local",
+            "command": full_args,
+            "cwd": str(project.resolve()),
+        }
+    else:
+        server_entry = {
+            "command": full_args[0],
+            "args": full_args[1:],
+        }
+        if client == "warp":
+            server_entry["working_directory"] = str(project.resolve())
+    # Read existing config (merge)
+    if cfg_path.exists():
+        try:
+            data = json.loads(cfg_path.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+    else:
+        data = {}
+    # Navigate to the servers container
+    if client == "opencode":
+        mcp = data.setdefault("mcp", {})
+        servers = mcp.setdefault("servers", {})
+    else:
+        servers = data.setdefault("mcpServers", {})
+    servers[server_name] = server_entry
+    cfg_path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n",
+                        encoding="utf-8")
+    print(f"Registered MCP server '{server_name}' in {cfg_path}")
+    return cfg_path
+
+
+def unregister_client(client: str, project: Path, global_cfg: bool,
+                      server_name: str):
+    """Remove the MCP server from the client's config file (if present)."""
+    cfg_path = client_config_path(client, project, global_cfg)
+    if not cfg_path.exists():
+        print(f"No config at {cfg_path} — nothing to unregister.")
+        return
+    try:
+        data = json.loads(cfg_path.read_text(encoding="utf-8"))
+    except Exception:
+        print(f"Could not parse {cfg_path} — leaving unchanged.")
+        return
+    if client == "opencode":
+        servers = data.get("mcp", {}).get("servers", {})
+    else:
+        servers = data.get("mcpServers", {})
+    if server_name in servers:
+        del servers[server_name]
+        cfg_path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n",
+                            encoding="utf-8")
+        print(f"Unregistered MCP server '{server_name}' from {cfg_path}")
+    else:
+        print(f"Server '{server_name}' not found in {cfg_path} — nothing to unregister.")
 
 
 def install_memory_skeleton(target: Path):
@@ -350,15 +457,28 @@ def write_manifest(target: Path, backup_root: Path, agent_info: dict, mode: str,
 
 
 def main():
-    ap = argparse.ArgumentParser(description=f'Install/update INTERNAL_RAG v{VERSION} in an existing Git repository.')
+    ap = argparse.ArgumentParser(description=f'Install/update MCP Light Memory v{VERSION} in an existing Git repository.')
     ap.add_argument('repo', nargs='?', help='Target Git repository; default current directory.')
     ap.add_argument('--share-tools', action='store_true', help='Allow integration/tool files to be tracked. INTERNAL_RAG memory remains locally excluded.')
+    ap.add_argument('--client', choices=['warp', 'opencode', 'jetbrains'],
+                    help='Register the MCP server in the given client config after install.')
+    ap.add_argument('--global', dest='global_cfg', action='store_true',
+                    help="Use the client's global config (default: project-local).")
+    ap.add_argument('--server-name', default='mcp-light-memory',
+                    help='MCP server name in the client config (default: mcp-light-memory).')
+    ap.add_argument('--unregister', action='store_true',
+                    help='Remove the MCP server from the client config and exit (no install).')
     args = ap.parse_args()
     target = ensure_repo(Path(args.repo) if args.repo else Path.cwd())
+    if args.unregister:
+        if not args.client:
+            die("--unregister requires --client <warp|opencode|jetbrains>")
+        unregister_client(args.client, target, args.global_cfg, args.server_name)
+        return
     mode = 'shared-tools' if args.share_tools else 'local'
     stamp = dt.datetime.now().strftime('%Y%m%d-%H%M%S')
     backup_root = safe_backup_root(target, f'{target.name}-{stamp}')
-    print(f'INTERNAL_RAG v{VERSION} -> {target}')
+    print(f'MCP Light Memory v{VERSION} -> {target}')
     print(f'Install mode: {mode}')
     print(f'Backup: {backup_root}')
     copy_update_files(target, backup_root)
@@ -372,9 +492,14 @@ def main():
     if not memory_existed_before:
         run_irag(target, 'checkpoint', '--reason', 'install-init')
     run_irag(target, 'validate')
+    if args.client:
+        script_rel = '.agents/skills/internal-rag/mlm.py'
+        register_client(args.client, target, args.global_cfg, args.server_name, script_rel, ['mcp'])
     print('\nINSTALLATION COMPLETE')
     print('Existing INTERNAL_RAG memory was preserved.')
     print(f'Git local exclude: {exclude_path}')
+    if args.client:
+        print(f'MCP server registered for {args.client}.')
     print('Restart Warp/OpenCode, then run context for the current task.')
     print('\nBefore publishing the target repository, run:')
     print(f'  {sys.executable} "{HERE / "privacy_check.py"}" "{target}"')

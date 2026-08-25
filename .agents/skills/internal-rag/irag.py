@@ -740,6 +740,10 @@ def init_repo() -> None:
         (RAG / d).mkdir(exist_ok=True)
     if not existed:
         save_working(default_working())
+    # Always ensure a checkpoint exists so guard does not report STALE
+    # immediately after install/init (the skeleton may pre-create
+    # WORKING_STATE.md, causing `existed=True` and skipping the checkpoint).
+    if not CHECKPOINT.exists():
         save_checkpoint("init")
     rebuild_index()
     print(f"Initialized INTERNAL_RAG (irag {VERSION})")
