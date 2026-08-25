@@ -118,12 +118,13 @@ class TestRegistry(unittest.TestCase):
 
     def test_relative_root_resolves_against_registry(self):
         with tempfile.TemporaryDirectory() as td:
-            root = Path(td) / "proj"
+            root = (Path(td) / "proj").resolve()
             root.mkdir()
-            reg = Path(td) / "reg.json"
+            reg = (Path(td) / "reg.json").resolve()
             reg.write_text(json.dumps({"projects": {"p1": {"root": "proj"}}}), encoding="utf-8")
             data = router.load_registry(reg)
-            self.assertEqual(data["p1"]["root"], str(root))
+            # Compare resolved paths (Windows 8.3 short-name safe)
+            self.assertEqual(Path(data["p1"]["root"]).resolve(), root)
 
     def test_bad_registry_errors(self):
         with tempfile.TemporaryDirectory() as td:
