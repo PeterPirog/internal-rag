@@ -1,4 +1,4 @@
-# Configuration (`.irag.yml`, v1.2.0)
+# Configuration (`.irag.yml`, v1.6.0)
 
 INTERNAL_RAG has sensible defaults — the `.irag.yml` file is optional.
 

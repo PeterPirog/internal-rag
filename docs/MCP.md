@@ -33,8 +33,9 @@ python3 .agents/skills/internal-rag/irag.py mcp
 Minimal JSON-RPC 2.0 subset over stdin/stdout:
 
 - `initialize` — handshake, returns `protocolVersion`, `serverInfo`.
-  Negotiated versions: `2025-11-25`, `2025-06-18`, `2025-03-26`, `2024-11-05`
-  (client's version when supported, else the latest).
+  Negotiated versions: `2026-07-28` (modern), `2025-11-25`, `2025-06-18`,
+  `2025-03-26`, `2024-11-05` (client's version when supported, else the
+  latest legacy version).
 - `notifications/initialized` — acknowledged (no response).
 - `ping` — echoed.
 - `shutdown` — exit cleanly.

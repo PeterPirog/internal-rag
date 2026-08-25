@@ -17,7 +17,7 @@ All commands are invoked as `irag.py <command> [options]`. Use `python` on Windo
 Initialize the `INTERNAL_RAG/` skeleton. Idempotent.
 
 ### `context --task "<task>" [--limit N] [--json] [--type T1 T2 ...] [--status S1 S2 ...]`
-Start or resume a task. Compares the project fingerprint with the last checkpoint. Returns a context packet with memories **grouped by type**: Verified facts (decisions/knowledge/constraints), Lessons & pitfalls (gotchas/failures), Unverified hypotheses. `--type` and `--status` filter candidates. Query is auto-expanded with synonyms. `--json` for structured output.
+Start or resume a task. Compares the project fingerprint with the last checkpoint. Returns a context packet with memories **grouped by type**: Verified facts (decisions/knowledge/constraints), Lessons & pitfalls (gotchas/failures), Unverified hypotheses. `--type` and `--status` filter candidates. Query is auto-expanded with synonyms. `--json` for structured output (carries `trust: "untrusted"` and per-memory `security_flags`). The text packet prints a `SECURITY NOTICE` header and delimits each memory with `=== BEGIN/END INTERNAL_RAG MEMORY ===`.
 
 ### `checkpoint [--reason R] [--task T] [--objective O] [--phase P] [--completed C] [--in-progress I] [--blockers B] [--decisions D] [--next N] [--memory M] [--json]`
 Persist the current operational state. Saves a fingerprint. Auto-archives a session snapshot when `checkpoints.auto_archive_sessions` is true.
@@ -26,19 +26,20 @@ Persist the current operational state. Saves a fingerprint. Auto-archives a sess
 Verify no project-code changes are missing from the last checkpoint. Exit code 0 = `GUARD OK`, 2 = `GUARD STALE`.
 
 ### `search --query "<q>" [--limit N] [--json] [--explain] [--meta] [--embeddings on|off|auto] [--type T1 T2 ...] [--status S1 S2 ...] [--at YYYY-MM-DD]`
-Search durable memories via hybrid retrieval (BM25 + optional dense → RRF → MMR). `--json` returns `path`, `score`, `type`, `status`, `snippet`, `matched_tokens` and, when a result is superseded/invalid/archived, a read-only `history` block (`superseded_by`, `valid_from`, `valid_to`, `why`, `recommendation`, optional `conflict_with`). `--explain` adds per-channel breakdown: `sparse_score`, `sparse_rank`, `dense_score`, `dense_rank`, `rrf_score`, `policy_boost`, `final_score`, `retrieval_mode`. `--type` filters by memory type(s). `--status` filters by status(es). Query is auto-expanded with synonyms.
+Search durable memories via hybrid retrieval (BM25 + optional dense → RRF → MMR). `--json` returns `path`, `score`, `type`, `status`, `snippet`, `matched_tokens`, `trust` (always `"untrusted"`), `security_flags` (optional), `evidence_state` (`present`/`missing`/`unverifiable`) and, when a result is superseded/invalid/archived, a read-only `history` block (`superseded_by`, `valid_from`, `valid_to`, `why`, `recommendation`, optional `conflict_with`). `--explain` adds per-channel breakdown: `sparse_score`, `sparse_rank`, `dense_score`, `dense_rank`, `rrf_score`, `policy_boost`, `final_score`, `retrieval_mode`. `--type` filters by memory type(s). `--status` filters by status(es). Query is auto-expanded with synonyms.
 
-`--meta` (new in 1.5.0) wraps `--json` output with abstention metadata. The bare list output of plain `--json` is unchanged (backward compatible):
+`--meta` (new in 1.5.0) wraps `--json` output with abstention metadata and the `trust` label. The bare list output of plain `--json` is unchanged (backward compatible):
 
 ```json
 {
+  "trust": "untrusted",
   "abstained": false,
   "retrieval_confidence": 0.4,
   "reason": "3 candidate(s) passed the relevance gate (1 rejected)",
   "admitted": 3,
   "rejected": 1,
   "rejected_detail": [{"memory_id": "mem-x", "reason": "sparse_no_token_match"}],
-  "results": [ /* same items as plain --json */ ]
+  "results": [ /* same items as plain --json; omitted for brevity */ ]
 }
 ```
 

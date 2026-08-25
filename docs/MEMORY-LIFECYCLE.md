@@ -1,4 +1,4 @@
-# Memory lifecycle (v1.0.1)
+# Memory lifecycle (v1.6.0)
 
 `WORKING_STATE.md` is short, frequently updated working memory (write-ahead checkpoint).
 

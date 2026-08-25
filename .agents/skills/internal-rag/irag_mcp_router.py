@@ -27,7 +27,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-ROUTER_VERSION = "1.6.0"
+ROUTER_VERSION = "1.6.1"
 SUPPORTED_VERSIONS = ["2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]
 
 MUTATING_TOOLS = {"remember", "checkpoint", "resume"}
