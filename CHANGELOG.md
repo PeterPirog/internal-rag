@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.7.2 — 2026-08-25
+
+Hotfix for JetBrains/PyCharm installation (feedback from real deployment).
+
+### Fixes
+- **JetBrains cwd warning**: the JetBrains MCP config file does not reliably support a `working_directory`/`cwd` field in the JSON — the IDE reads it from `Settings → Tools → AI Assistant → MCP` in the UI. `install.py --client jetbrains` now:
+  - writes `working_directory` into the config as a hint (some IDE versions may read it),
+  - prints a prominent `WARNING` with the exact path to set in the IDE UI,
+  - so the memory store does not land in the IDE's default cwd.
+- **Client-specific restart messages**: the final "Restart Warp/OpenCode..." line is now per-client (`Restart PyCharm/JetBrains IDE` for jetbrains, `Restart Warp` for warp, `Restart OpenCode` for opencode). No more confusion when reading the install log.
+- **Memory store path in install output**: the install log now prints `Memory store: <abs_path>/INTERNAL_RAG` so the user can immediately verify the memory landed in the right project root.
+
 ## 1.7.1 — 2026-08-25
 
 Hotfix for Windows installation issues found in real Warp deployment.
