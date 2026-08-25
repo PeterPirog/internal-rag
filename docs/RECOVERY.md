@@ -1,4 +1,4 @@
-# Recovery (v1.0.1)
+# Recovery (v1.7.0)
 
 If you see `RECOVERY REQUIRED`, do not make new edits.
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""irag_mcp_router.py — multi-project INTERNAL_RAG MCP router (v1.5.0).
+"""irag_mcp_router.py — multi-project MCP Light Memory router.
 
 A single MCP stdio server (newline-delimited JSON-RPC 2.0) in front of many
-INTERNAL_RAG projects.
+MCP Light Memory (formerly INTERNAL_RAG) projects.
 
 Design:
 - registry: JSON file {"projects": {id: {"root": <path>, "write": bool}}}
@@ -27,7 +27,9 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-ROUTER_VERSION = "1.6.1"
+ROUTER_VERSION = "1.7.0"
+ROUTER_NAME = "mcp-light-memory-router"
+ROUTER_LEGACY_NAME = "internal-rag-router"  # deprecated alias
 SUPPORTED_VERSIONS = ["2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]
 
 MUTATING_TOOLS = {"remember", "checkpoint", "resume"}
@@ -36,7 +38,7 @@ READ_TOOLS = ("context", "search", "guard", "status", "tasks")
 
 def _log(msg: str) -> None:
     try:
-        sys.stderr.write(f"[irag-router] {msg}\n")
+        sys.stderr.write(f"[mcp-light-memory-router] {msg}\n")
         sys.stderr.flush()
     except Exception:
         pass
@@ -291,14 +293,14 @@ def serve(registry: Dict[str, Dict[str, Any]], irag_path: str, timeout: float) -
             if _proto:
                 negotiated = _proto.negotiate_version(client_v)
                 result = _proto.discover_result(
-                    "internal-rag-router", ROUTER_VERSION,
+                    "mcp-light-memory-router", ROUTER_VERSION,
                     "Multi-project INTERNAL_RAG router. Pass the `project` parameter "
                     "(see the `projects` tool) on every project-scoped call.",
                     {"tools": {}})
             else:
                 negotiated = client_v if client_v in SUPPORTED_VERSIONS else SUPPORTED_VERSIONS[1]
                 result = {"supportedVersions": SUPPORTED_VERSIONS, "capabilities": {"tools": {}},
-                          "serverInfo": {"name": "internal-rag-router", "version": ROUTER_VERSION},
+                          "serverInfo": {"name": "mcp-light-memory-router", "version": ROUTER_VERSION},
                           "instructions": "Multi-project INTERNAL_RAG router."}
             conn_version = negotiated
             _send({"jsonrpc": "2.0", "id": rid, "result": result})
@@ -312,7 +314,7 @@ def serve(registry: Dict[str, Dict[str, Any]], irag_path: str, timeout: float) -
             conn_version = negotiated
             _send({"jsonrpc": "2.0", "id": rid, "result": {
                 "protocolVersion": negotiated,
-                "serverInfo": {"name": "internal-rag-router", "version": ROUTER_VERSION},
+                "serverInfo": {"name": "mcp-light-memory-router", "version": ROUTER_VERSION},
                 "capabilities": {"tools": {}},
                 "instructions": "Multi-project INTERNAL_RAG router. Pass the `project` "
                                "parameter (see the `projects` tool) on every project-scoped call.",
@@ -373,8 +375,8 @@ def serve(registry: Dict[str, Dict[str, Any]], irag_path: str, timeout: float) -
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(prog="irag_mcp_router.py",
-                                 description="Multi-project INTERNAL_RAG MCP router (stdio).")
+    ap = argparse.ArgumentParser(prog="mlm-router",
+                                 description="Multi-project MCP Light Memory router (stdio).  (formerly internal-rag-router)")
     ap.add_argument("--registry", required=True,
                     help="Path to the registry JSON (see examples/projects.example.json).")
     ap.add_argument("--irag", default=None,

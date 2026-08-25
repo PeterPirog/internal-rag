@@ -1,6 +1,8 @@
-# CLI reference (v1.0.1)
+# CLI reference (v1.7.0)
 
-All commands are invoked as `irag.py <command> [options]`. Use `python` on Windows and `python3` on Linux/macOS.
+All commands are invoked as `mlm.py <command> [options]` (primary alias) or `irag.py <command> [options]` (legacy alias, still supported). Use `python` on Windows and `python3` on Linux/macOS.
+
+> **Rebrand note:** The primary CLI is now `mlm` (`mlm.py`). The legacy `irag.py` module filename is kept for backward compatibility with existing installs, scripts, and stored data — both entrypoints run the same core.
 
 ## Global flags
 

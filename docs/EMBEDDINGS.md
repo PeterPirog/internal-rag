@@ -4,7 +4,7 @@ Since v1.1.0, INTERNAL_RAG uses **hybrid retrieval**: BM25 + optional dense embe
 
 Since v1.3.0, corpus embeddings are **persistently cached** in SQLite (`.index.sqlite3`), so repeated searches do not re-encode documents.
 
-## Retrieval profiles (v1.4.0)
+## Retrieval profiles (v1.7.0)
 
 | Profile | Model | Query/passage encoding |
 |---------|-------|------------------------|

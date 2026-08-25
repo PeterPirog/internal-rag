@@ -274,7 +274,7 @@ class TestRouterBehavior(RouterBase):
         objs = _stdout_objects(p.stdout)
         self.assertTrue(all(json.loads(json.dumps(o)) == o for o in objs), "stdout must be pure JSON-RPC")
         init = next(o for o in objs if o.get("id") == 1)
-        self.assertEqual(init["result"]["serverInfo"]["name"], "internal-rag-router")
+        self.assertEqual(init["result"]["serverInfo"]["name"], "mcp-light-memory-router")
         self.assertIn("2025-06-18", init["result"]["protocolVersion"])
         tools = next(o for o in objs if o.get("id") == 2)
         names = [t["name"] for t in tools["result"]["tools"]]

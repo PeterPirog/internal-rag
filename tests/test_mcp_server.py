@@ -90,7 +90,7 @@ class TestProtocol(McpServerBase):
         init = _find(objs, 1)
         self.assertIn(init["result"]["protocolVersion"], SUPPORTED)
         self.assertEqual(init["result"]["protocolVersion"], "2025-06-18")
-        self.assertEqual(init["result"]["serverInfo"]["name"], "internal-rag")
+        self.assertEqual(init["result"]["serverInfo"]["name"], "mcp-light-memory")
         tools = _find(objs, 2)
         names = [t["name"] for t in tools["result"]["tools"]]
         self.assertIn("search", names)

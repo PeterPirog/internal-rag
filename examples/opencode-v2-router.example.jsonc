@@ -1,0 +1,17 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "servers": {
+      "mcp-light-memory-router": {
+        "type": "local",
+        "command": [
+          "python",
+          ".agents/skills/internal-rag/irag_mcp_router.py",
+          "--registry",
+          "examples/projects.example.json"
+        ],
+        "cwd": "/abs/path/to/mcp-light-memory"
+      }
+    }
+  }
+}

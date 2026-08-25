@@ -1,4 +1,4 @@
-# File map (v1.6.0)
+# File map (v1.7.0)
 
 ## In the package (internal-rag repo)
 

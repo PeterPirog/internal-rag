@@ -26,7 +26,7 @@ from pathlib import Path
 HOOKS = {
     "post-commit": '''#!/bin/sh
 # INTERNAL_RAG auto-checkpoint (post-commit). Local-only, never blocks.
-IRAG="$(git rev-parse --show-toplevel 2>/dev/null)/.agents/skills/internal-rag/irag.py"
+IRAG="$(git rev-parse --show-toplevel 2>/dev/null)/.agents/skills/internal-rag/mlm.py"
 if [ -z "$IRAG" ] || [ ! -f "$IRAG" ]; then exit 0; fi
 PY=python3; command -v python3 >/dev/null 2>&1 || PY=python
 "$PY" "$IRAG" checkpoint --reason "git-post-commit" --json >/dev/null 2>&1
@@ -34,7 +34,7 @@ exit 0
 ''',
     "post-checkout": '''#!/bin/sh
 # INTERNAL_RAG: invalidate checkpoint fingerprint after checkout/branch switch.
-IRAG="$(git rev-parse --show-toplevel 2>/dev/null)/.agents/skills/internal-rag/irag.py"
+IRAG="$(git rev-parse --show-toplevel 2>/dev/null)/.agents/skills/internal-rag/mlm.py"
 if [ -z "$IRAG" ] || [ ! -f "$IRAG" ]; then exit 0; fi
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"
 FP="$ROOT/INTERNAL_RAG/.fpcache.json"
@@ -43,10 +43,10 @@ exit 0
 ''',
     "pre-push": '''#!/bin/sh
 # INTERNAL_RAG: warn (never block) if checkpoint is stale before push.
-IRAG="$(git rev-parse --show-toplevel 2>/dev/null)/.agents/skills/internal-rag/irag.py"
+IRAG="$(git rev-parse --show-toplevel 2>/dev/null)/.agents/skills/internal-rag/mlm.py"
 if [ -z "$IRAG" ] || [ ! -f "$IRAG" ]; then exit 0; fi
 PY=python3; command -v python3 >/dev/null 2>&1 || PY=python
-"$PY" "$IRAG" guard >/dev/null 2>&1 || echo "[INTERNAL_RAG] checkpoint stale before push; run 'irag.py checkpoint'." 2>&1
+"$PY" "$IRAG" guard >/dev/null 2>&1 || echo "[MCP_LIGHT_MEMORY] checkpoint stale before push; run 'mlm.py checkpoint'." 2>&1
 exit 0
 ''',
 }

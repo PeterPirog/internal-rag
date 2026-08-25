@@ -1,6 +1,6 @@
 import { tool } from "@opencode-ai/plugin"
 const py = process.platform === "win32" ? "python" : "python3"
-const script = (worktree: string) => `${worktree}/.agents/skills/internal-rag/irag.py`
+const script = (worktree: string) => `${worktree}/.agents/skills/internal-rag/mlm.py`
 export default tool({
   description: "Start/resume a task using INTERNAL_RAG and detect missed checkpoints. Returns a context packet with WORKING_STATE, candidate memories, token estimates, and recovery guidance.",
   args: {

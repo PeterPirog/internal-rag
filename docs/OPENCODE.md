@@ -1,4 +1,4 @@
-# OpenCode (v1.0.1)
+# OpenCode (v1.7.0)
 
 OpenCode uses:
 - `.agents/skills/internal-rag/SKILL.md`,

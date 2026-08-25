@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="MCP Light Memory logo">
+  <defs>
+    <linearGradient id="mlm-grad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0f1620"/>
+      <stop offset="100%" stop-color="#1b2a3a"/>
+    </linearGradient>
+    <linearGradient id="mlm-accent" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#22d3ee"/>
+      <stop offset="100%" stop-color="#0ea5b7"/>
+    </linearGradient>
+  </defs>
+  <!-- rounded square background -->
+  <rect x="6" y="6" width="116" height="116" rx="26" ry="26" fill="url(#mlm-grad)" stroke="#22d3ee" stroke-width="2"/>
+  <!-- memory stack layers -->
+  <g>
+    <rect x="34" y="74" width="60" height="12" rx="3" fill="#22d3ee" opacity="0.55"/>
+    <rect x="34" y="58" width="60" height="12" rx="3" fill="#22d3ee" opacity="0.75"/>
+    <rect x="34" y="42" width="60" height="12" rx="3" fill="url(#mlm-accent)"/>
+  </g>
+  <!-- spark / light motif above the stack -->
+  <g stroke="#22d3ee" stroke-width="3" stroke-linecap="round" fill="none">
+    <line x1="64" y1="20" x2="64" y2="32"/>
+    <line x1="48" y1="24" x2="52" y2="32"/>
+    <line x1="80" y1="24" x2="76" y2="32"/>
+  </g>
+  <!-- connection nodes (MCP protocol) -->
+  <g fill="#22d3ee">
+    <circle cx="34" cy="48" r="3.5"/>
+    <circle cx="94" cy="48" r="3.5"/>
+    <circle cx="34" cy="80" r="3.5"/>
+    <circle cx="94" cy="80" r="3.5"/>
+  </g>
+  <!-- M mark integrated with the stack -->
+  <path d="M44 96 L52 84 L60 96 L60 86 M68 96 L76 84 L84 96" stroke="#e2e8f0" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round" opacity="0.9"/>
+</svg>

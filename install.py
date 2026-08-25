@@ -11,24 +11,30 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-VERSION = "1.6.0"
-AGENTS_START = "<!-- INTERNAL_RAG_START -->"
-AGENTS_END = "<!-- INTERNAL_RAG_END -->"
-EXCLUDE_START = "# >>> INTERNAL_RAG LOCAL-ONLY >>>"
-EXCLUDE_END = "# <<< INTERNAL_RAG LOCAL-ONLY <<<"
+VERSION = "1.7.0"
+PRODUCT_NAME = "MCP Light Memory"
+PRODUCT_SLUG = "mcp-light-memory"
+LEGACY_NAME = "internal-rag"  # deprecated; kept for compatibility
+AGENTS_START = "<!-- MCP_LIGHT_MEMORY_START -->"
+AGENTS_END = "<!-- MCP_LIGHT_MEMORY_END -->"
+EXCLUDE_START = "# >>> MCP_LIGHT_MEMORY LOCAL-ONLY >>>"
+EXCLUDE_END = "# <<< MCP_LIGHT_MEMORY LOCAL-ONLY <<<"
 
-AGENTS_SECTION = r'''## Persistent agent memory: INTERNAL_RAG
+AGENTS_SECTION = r'''## Persistent agent memory: MCP Light Memory (INTERNAL_RAG)
 
 This repository uses `INTERNAL_RAG/` as mandatory persistent operational memory.
+The product is branded **MCP Light Memory**; the on-disk folder `INTERNAL_RAG/`
+is kept for backward compatibility (no data migration required).
 
 ### Mandatory task-start protocol
 
 For every substantial task, before the first code modification:
 
-1. Load the `internal-rag` skill.
+1. Load the `internal-rag` skill (legacy name; still the skill directory).
 2. Run the context command for the current task:
-   - Windows: `python .agents\skills\internal-rag\irag.py context --task "<current task>"`
-   - Linux/macOS: `python3 .agents/skills/internal-rag/irag.py context --task "<current task>"`
+   - Windows: `python .agents\skills\internal-rag\mlm.py context --task "<current task>"`
+   - Linux/macOS: `python3 .agents/skills/internal-rag/mlm.py context --task "<current task>"`
+   - Legacy alias still works: `mlm.py context ...`
 3. If the context packet says `RECOVERY REQUIRED`, STOP before making new edits:
    - inspect `git status` and `git diff`;
    - reconstruct what changed since the last checkpoint;
@@ -48,12 +54,12 @@ Checkpoint state:
 - after a significant change of plan;
 - after discovering a blocker or failed test/command, if the session is still usable;
 - before dependency installation, large builds, migrations, broad refactors, large test suites, or other failure-prone/long-running operations;
-- before context compaction (run `irag.py compact` first);
+- before context compaction (run `mlm.py compact` first);
 - before the final response to the user.
 
 ### Mandatory final guard
 
-Before giving the user a final answer on a substantial task, run `irag.py guard`.
+Before giving the user a final answer on a substantial task, run `mlm.py guard`.
 If guard reports stale/uncheckpointed changes, checkpoint and repeat guard. Do not finish until `GUARD OK`.
 
 ### Durable memory
@@ -65,14 +71,14 @@ Use `remember` to create, `show`/`timeline` to read, `update`/`supersede` to rev
 ### Multi-task interrupts
 
 When interrupted mid-task, push the current state and resume later:
-- `irag.py push --task "<interrupted work>" --reason "user-priority"`
-- `irag.py tasks`
-- `irag.py resume`
+- `mlm.py push --task "<interrupted work>" --reason "user-priority"`
+- `mlm.py tasks`
+- `mlm.py resume`
 
 ### Context discipline
 
 Do not preload the entire `INTERNAL_RAG/` directory. Retrieve first and read only relevant entries.
-Use `irag.py search --query "..." --limit 8` (BM25+MMR, optional embeddings).
+Use `mlm.py search --query "..." --limit 8` (BM25+MMR, optional embeddings).
 
 ### Authority order
 
@@ -313,16 +319,16 @@ def install_git_excludes(target: Path, backup_root: Path, mode: str, agents_crea
 
 
 def make_executable(target: Path):
-    script = target / '.agents/skills/internal-rag/irag.py'
+    script = target / '.agents/skills/internal-rag/mlm.py'
     if script.exists() and sys.platform != 'win32':
         script.chmod(script.stat().st_mode | 0o111)
 
 
 def run_irag(target: Path, *args: str):
-    script = target / '.agents/skills/internal-rag/irag.py'
+    script = target / '.agents/skills/internal-rag/mlm.py'
     proc = subprocess.run([sys.executable, str(script), *args], cwd=target)
     if proc.returncode != 0:
-        die(f"Command failed: irag.py {' '.join(args)}")
+        die(f"Command failed: mlm.py {' '.join(args)}")
 
 
 def write_manifest(target: Path, backup_root: Path, agent_info: dict, mode: str, exclude_path: Path, patterns: list[str]):

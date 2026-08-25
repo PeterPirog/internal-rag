@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "internal-rag": {
+    "mcp-light-memory": {
       "command": "python",
       "args": [".agents/skills/internal-rag/irag.py", "mcp"],
       "working_directory": "/abs/path/to/project"

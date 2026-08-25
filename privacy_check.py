@@ -2,7 +2,7 @@
 from __future__ import annotations
 import argparse,re,subprocess
 from pathlib import Path
-EXCLUDE_START='# >>> INTERNAL_RAG LOCAL-ONLY >>>'; EXCLUDE_END='# <<< INTERNAL_RAG LOCAL-ONLY <<<'
+EXCLUDE_START='# >>> MCP_LIGHT_MEMORY LOCAL-ONLY >>>'; EXCLUDE_END='# <<< MCP_LIGHT_MEMORY LOCAL-ONLY <<<'
 PATTERNS=[
  ('private-key',re.compile(r'-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----')),
  ('github-token',re.compile(r'\bgh[pousr]_[A-Za-z0-9_]{20,}\b')),

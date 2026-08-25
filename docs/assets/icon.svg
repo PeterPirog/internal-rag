@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="MCP Light Memory icon">
+  <defs>
+    <linearGradient id="mlm-icon-grad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0f1620"/>
+      <stop offset="100%" stop-color="#1b2a3a"/>
+    </linearGradient>
+  </defs>
+  <rect x="4" y="4" width="56" height="56" rx="13" ry="13" fill="url(#mlm-icon-grad)" stroke="#22d3ee" stroke-width="2"/>
+  <rect x="18" y="38" width="28" height="6" rx="2" fill="#22d3ee" opacity="0.55"/>
+  <rect x="18" y="30" width="28" height="6" rx="2" fill="#22d3ee" opacity="0.75"/>
+  <rect x="18" y="22" width="28" height="6" rx="2" fill="#22d3ee"/>
+  <g stroke="#22d3ee" stroke-width="2" stroke-linecap="round" fill="none">
+    <line x1="32" y1="10" x2="32" y2="16"/>
+    <line x1="24" y1="12" x2="26" y2="16"/>
+    <line x1="40" y1="12" x2="38" y2="16"/>
+  </g>
+  <g fill="#22d3ee">
+    <circle cx="18" cy="25" r="1.8"/>
+    <circle cx="46" cy="25" r="1.8"/>
+    <circle cx="18" cy="41" r="1.8"/>
+    <circle cx="46" cy="41" r="1.8"/>
+  </g>
+</svg>

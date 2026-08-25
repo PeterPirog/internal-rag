@@ -96,7 +96,7 @@ class TestServerDiscover(ModernMcpBase):
         d = _find(objs, 1)
         res = d["result"]
         self.assertIn("2026-07-28", res["supportedVersions"])
-        self.assertEqual(res["serverInfo"]["name"], "internal-rag")
+        self.assertEqual(res["serverInfo"]["name"], "mcp-light-memory")
         self.assertIn("ttlMs", res.get("_meta", {}))
 
     def test_discover_then_tools_list_modern(self):
@@ -282,7 +282,7 @@ class TestRouterModern(unittest.TestCase):
                                lines, self.tmp)
         objs = _objs(stdout)
         d = _find(objs, 1)
-        self.assertEqual(d["result"]["serverInfo"]["name"], "internal-rag-router")
+        self.assertEqual(d["result"]["serverInfo"]["name"], "mcp-light-memory-router")
         self.assertIn("2026-07-28", d["result"]["supportedVersions"])
 
     def test_router_projects_structured(self):

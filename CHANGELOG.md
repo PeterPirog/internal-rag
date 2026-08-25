@@ -1,5 +1,39 @@
 # Changelog
 
+## 1.7.0 — 2026-08-25
+
+Total rebrand from `internal-rag` to **MCP Light Memory** (`mcp-light-memory`). Backward-compatible; no data migration required.
+
+### Rebrand
+- **New product name:** MCP Light Memory. New repo/product slug: `mcp-light-memory`.
+- **New CLI alias:** `mlm` (`mlm.py` shim) — primary entrypoint that forwards to the canonical `irag.py` core. `irag.py` remains a supported legacy alias.
+- **New MCP server display name:** `mcp-light-memory` (was `internal-rag`). Router: `mcp-light-memory-router` (was `internal-rag-router`).
+- **New branding assets:** `docs/assets/logo.svg`, `docs/assets/icon.svg` (hand-written SVG, no binary blobs). Branding note: `docs/BRANDING.md`.
+- **New docs:** `docs/MIGRATION-TO-MCP-LIGHT-MEMORY.md` (migration guide), `docs/GITHUB-REBRAND-CHECKLIST.md` (manual rename prep).
+- **README rewritten** with centered logo, new pitch, "formerly internal-rag" note, updated badges (incl. `dependencies-0` and `MCP 2026-07-28 dual-era`).
+- **Examples updated** to use `mcp-light-memory` / `mcp-light-memory-router` server keys. New router examples: `warp-router.example.json`, `opencode-v2-router.example.jsonc`, `jetbrains-router.example.json`.
+- **Docs titles** bumped to v1.7.0; product-name references updated throughout.
+- **AGENTS.md markers** updated to `MCP_LIGHT_MEMORY_START`/`END`; `install.py` writes the new markers and migrates old ones.
+- **`.opencode/` tools + plugin + command** updated to call `mlm.py`.
+- **`irag_hooks.py`** shell shims updated to call `mlm.py`.
+- **CI workflow** compiles `mlm.py` and runs the mutation/scale smoke benchmarks.
+
+### Backward compatibility (preserved)
+- `irag.py` module filename kept — same canonical core, same imports.
+- `INTERNAL_RAG/` storage folder kept — no data migration.
+- `.irag.yml` config unchanged. `.index.sqlite3` unchanged. Stored memories unchanged.
+- Old MCP server names in client configs keep working (the client-side key is user-chosen; the server's `serverInfo.name` is now `mcp-light-memory`).
+- Legacy `irag` CLI command still works (same core, same exit codes, same stdout/stderr).
+
+### Tests
+- New `tests/test_rebrand.py` (rebrand consistency): version/PRODUCT_NAME constants, `mlm.py` shim forwards + help shows new brand, MCP `serverInfo.name` is `mcp-light-memory` / `mcp-light-memory-router`, examples use new server keys, router examples exist, README/docs reference new brand, logo assets exist, legacy `irag.py` alias still works.
+
+### Acceptance
+- 0 required runtime dependencies (unchanged).
+- Markdown remains source of truth; SQLite remains disposable (unchanged).
+- No retrieval-quality regression (unchanged).
+- MCP dual-era compatibility preserved (unchanged).
+
 ## 1.6.1 — 2026-08-25
 
 Post-v1.6 hardening: trust boundary, mutation benchmark, evidence freshness, scale benchmark, router security regressions, docs consistency.

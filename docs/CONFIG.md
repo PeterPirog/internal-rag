@@ -22,16 +22,16 @@ retrieval:
    embeddings_model: null     # explicit model path/name overrides the profile (no prefix)
    query_expansion: true      # English synonym expansion (compat layer; set false to disable)
    pl_stopwords: true         # small PL function-word list on the sparse channel (benchmark-justified)
-    chunking:                  # section-aware chunking (v1.4.0)
+    chunking:                  # section-aware chunking (v1.7.0)
       enabled: true
       threshold_chars: 2000    # memories shorter than this become a single chunk
       target_chars: 1200       # target chunk size for overlong sections
       overlap_chars: 120       # overlap between split pieces
-    abstention:                # relevance/admission gate (v1.5.0)
+    abstention:                # relevance/admission gate (v1.7.0)
       enabled: true
       require_sparse_match: true   # sparse results must evidence a token match
       min_dense_score: null        # per-profile calibrated threshold (null = accept dense as-is)
-    fts_prefilter:             # FTS5 candidate prefilter (v1.5.0)
+    fts_prefilter:             # FTS5 candidate prefilter (v1.7.0)
       enabled: true
       min_corpus_size: 50      # skip prefilter overhead on tiny corpora
 tokens:

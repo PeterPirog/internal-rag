@@ -1,4 +1,4 @@
-# Duplicate detection algorithm (v1.4.0)
+# Duplicate detection algorithm (v1.7.0)
 
 Cheap, deterministic duplicate detection for `remember`, `remember-batch`, and
 `import`. No LLM, no third-party dependencies (pure stdlib: `hashlib`, `re`,

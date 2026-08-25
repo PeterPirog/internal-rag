@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""irag_mcp_protocol.py — shared MCP protocol helpers (v1.6.0).
+"""irag_mcp_protocol.py — shared MCP protocol helpers (MCP Light Memory).
 
 Stdlib-only (Python 3.8+). No `mcp` SDK required at runtime. Used by both
 `irag.py mcp` and `irag_mcp_router.py` to avoid logic duplication for the

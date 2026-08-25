@@ -1,4 +1,4 @@
-# Troubleshooting (v1.0.1)
+# Troubleshooting (v1.7.0)
 
 `RECOVERY REQUIRED` is not an error — see `RECOVERY.md`. `irag.py diff` shows what changed.
 

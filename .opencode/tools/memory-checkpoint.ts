@@ -1,6 +1,6 @@
 import { tool } from "@opencode-ai/plugin"
 const py = process.platform === "win32" ? "python" : "python3"
-const script = (worktree: string) => `${worktree}/.agents/skills/internal-rag/irag.py`
+const script = (worktree: string) => `${worktree}/.agents/skills/internal-rag/mlm.py`
 export default tool({
   description: "Persist current operational state. Use before edits, after milestones/failures, before risky operations/compaction/final response.",
   args: {
