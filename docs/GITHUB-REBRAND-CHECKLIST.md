@@ -28,7 +28,7 @@ require owner permissions and are intentionally left as a manual step.
 
 ## Rename steps (manual, in GitHub UI)
 
-1. Go to **Settings → General** for `PeterPirog/internal-rag`.
+1. Go to **Settings → General** for `PeterPirog/mcp-light-memory`.
 2. Change **Repository name** to `mcp-light-memory`. Click **Rename**.
 3. GitHub automatically creates a redirect from the old URL to the new one.
    Existing clones continue to work via the redirect, but update remotes
@@ -49,7 +49,7 @@ require owner permissions and are intentionally left as a manual step.
 - [ ] Update badge URLs in `README.md` if they reference the old slug
   (the version/license/python badges are static shields and do not reference
   the repo slug, so no change is needed for those).
-- [ ] Update any hardcoded `PeterPirog/internal-rag` URLs in docs/scripts
+- [ ] Update any hardcoded `PeterPirog/mcp-light-memory` URLs in docs/scripts
   (search the repo for `internal-rag` after the rename and update the
   remaining user-facing references).
 - [ ] Re-run CI on the new default branch to confirm green.
@@ -60,7 +60,7 @@ require owner permissions and are intentionally left as a manual step.
 ## Redirect expectations
 
 After the GitHub rename:
-- `https://github.com/PeterPirog/internal-rag` → redirects to
+- `https://github.com/PeterPirog/mcp-light-memory` → redirects to
   `https://github.com/PeterPirog/mcp-light-memory`.
 - Old `git clone` URLs continue to work via redirect.
 - Old issue/PR URLs continue to work via redirect.

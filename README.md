@@ -1,5 +1,9 @@
 <p align="center">
-  <img src="docs/assets/logo.svg" alt="MCP Light Memory" width="120" height="120">
+  <img src="docs/assets/bar-mcp-light-memory.png" alt="MCP Light Memory" width="640">
+</p>
+
+<p align="center">
+  <img src="docs/assets/icon%20mcp-light-memory.png" alt="MCP Light Memory icon" width="96" height="96">
 </p>
 
 <h1 align="center">MCP Light Memory</h1>
@@ -27,6 +31,7 @@
 - **Multi-project router** — one MCP server in front of many projects with registry allowlist, `write:false` hard boundary, and per-call subprocess isolation.
 - **Retrieved memory is untrusted evidence** — explicit trust boundary + prompt-injection warning heuristic (ADR-015).
 - **Works with** Warp, OpenCode, Claude Code, Cursor, JetBrains AI Assistant / PyCharm.
+- **Zero-shot setup** — paste one prompt from [`docs/ZERO-SHOT-SETUP-PROMPTS.md`](docs/ZERO-SHOT-SETUP-PROMPTS.md) into your agent and it installs + configures everything automatically.
 
 **Version:** 1.7.0  
 **Verified:** 2026-08-25  
