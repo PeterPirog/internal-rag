@@ -139,6 +139,43 @@ class TestRegistry(unittest.TestCase):
                 router.load_registry(reg)
             self.assertRaises(router.RegistryError, router.load_registry, Path(td) / "missing.json")
 
+    def test_write_must_be_real_boolean(self):
+        """CEL E: 'write' must be a JSON bool. Strings/ints are rejected."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "proj"; root.mkdir()
+            reg = Path(td) / "reg.json"
+            for bad in ("false", "true", 0, 1, "yes", "no"):
+                reg.write_text(json.dumps({"projects": {"p1": {"root": str(root), "write": bad}}}),
+                               encoding="utf-8")
+                with self.assertRaises(router.RegistryError) as cm:
+                    router.load_registry(reg)
+                self.assertIn("must be a JSON boolean", str(cm.exception))
+            # valid booleans
+            for ok in (True, False):
+                reg.write_text(json.dumps({"projects": {"p1": {"root": str(root), "write": ok}}}),
+                               encoding="utf-8")
+                data = router.load_registry(reg)
+                self.assertEqual(data["p1"]["write"], ok)
+            # absent -> default False
+            reg.write_text(json.dumps({"projects": {"p1": {"root": str(root)}}}), encoding="utf-8")
+            data = router.load_registry(reg)
+            self.assertFalse(data["p1"]["write"])
+
+    def test_root_must_be_string(self):
+        with tempfile.TemporaryDirectory() as td:
+            reg = Path(td) / "reg.json"
+            reg.write_text(json.dumps({"projects": {"p1": {"root": 123}}}), encoding="utf-8")
+            with self.assertRaises(router.RegistryError):
+                router.load_registry(reg)
+
+    def test_empty_project_id_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "proj"; root.mkdir()
+            reg = Path(td) / "reg.json"
+            reg.write_text(json.dumps({"projects": {"": {"root": str(root)}}}), encoding="utf-8")
+            with self.assertRaises(router.RegistryError):
+                router.load_registry(reg)
+
 
 class TestRouterBehavior(RouterBase):
     def test_unknown_project_rejected(self):

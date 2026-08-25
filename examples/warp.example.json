@@ -1,13 +1,9 @@
 {
   "mcpServers": {
-    "internal-rag-router": {
+    "internal-rag": {
       "command": "python",
-      "args": [
-        "C:/path/to/internal-rag/.agents/skills/internal-rag/irag_mcp_router.py",
-        "--registry",
-        "C:/path/to/internal-rag/examples/projects.example.json"
-      ]
+      "args": [".agents/skills/internal-rag/irag.py", "mcp"],
+      "working_directory": "/abs/path/to/project"
     }
-  },
-  "notes": "Warp uses the MCP agent platform. Point command/args at an ABSOLUTE irag_mcp_router.py path and registry. For a single project, run irag.py mcp instead (no registry)."
+  }
 }

@@ -53,6 +53,7 @@ jobs:
         run: |
           python tests/retrieval_benchmark.py
           python tests/multilingual_benchmark.py
+          python tests/memory_quality_benchmark.py --smoke
 
   mcp-compat:
     name: MCP SDK compatibility (official client, py3.12)
@@ -76,4 +77,4 @@ jobs:
         run: .venv-mcp/bin/python -m unittest tests.test_mcp_sdk_compat -v
 
       - name: MCP stdio server protocol suite
-        run: .venv-mcp/bin/python -m unittest tests.test_mcp_server tests.test_mcp_router -v
+        run: .venv-mcp/bin/python -m unittest tests.test_mcp_server tests.test_mcp_router tests.test_mcp_modern -v

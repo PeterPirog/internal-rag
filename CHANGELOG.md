@@ -1,5 +1,58 @@
 # Changelog
 
+## 1.6.0 — 2026-08-25
+
+Memory-quality benchmark, dual-era MCP 2026-07-28, tool schemas, adaptive retrieval, link-aware context, `consolidate --prepare`, router latency benchmark, client docs.
+
+### Memory-quality benchmark (CEL A)
+- `tests/memory_quality_benchmark.py` + `tests/fixtures/memory_corpus/` (33 memories): deterministic, zero-dependency benchmark exercising the REAL `_search_with_cfg` / `search_with_meta` pipeline (not bare bm25_search).
+- Cases: exact identifiers, file paths, method/class names, paraphrase, PL, EN, mixed, superseded decisions, valid_from/valid_to, `search --at`, contradictions, failure→fix, gotchas, archived isolation, distractors, multi-memory, abstention.
+- Metrics: Recall@1/3/5, MRR, abstention precision/recall/F1, temporal accuracy, superseded/archived leakage rate, p50/p95 latency, approximate context tokens. `--smoke` canary for CI.
+- `confidence_kind: "heuristic"` added to abstention metadata (honest labeling — not a calibrated probability).
+
+### MCP 2026-07-28 dual-era (CEL B)
+- `server/discover` (no `initialize` required), per-request `_meta`, `resultType: "complete"`, modern response envelopes, `ttlMs`/`cacheScope`.
+- Legacy (`2024-11-05`…`2025-11-25`) `initialize`/`notifications/initialized`/`tools/list`/`tools/call`/`ping`/`shutdown` unchanged.
+- Shared `irag_mcp_protocol.py` (stdlib-only) centralizes version negotiation + envelopes for both `irag.py mcp` and `irag_mcp_router.py`.
+
+### Better MCP schema (CEL C)
+- Precise `inputSchema`: types, enums, `required`, `minimum` for `limit`, `additionalProperties: false` where safe.
+- Tool `annotations`: `openWorldHint: false` (local memory), `readOnlyHint`/`destructiveHint`/`idempotentHint` per tool. `search`/`context` NOT idempotent (usage metadata side-effect).
+- `outputSchema` + `structuredContent` for `search`, `status`, `tasks`, `projects`, `guard`.
+
+### MCP search at + explain (CEL D)
+- MCP `search` accepts `at` (temporal) and `explain`. Abstention metadata in `structuredContent`.
+
+### Registry strict write (CEL E)
+- `write` must be a JSON boolean (`true`/`false`); `"false"`, `0`, `1` → `RegistryError`. `root` must be a string; project id non-empty; default `write: false`.
+
+### Sources in chunk prefix (CEL F)
+- `sources`/`evidence` rendered into the lightweight chunk prefix (bounded: max 6 entries, 160 chars each) so file paths and symbol names are searchable via the sparse channel without aggressive stemming. Deterministic chunk IDs preserved; content hash invalidates the correct cache entry.
+
+### Adaptive retrieval (CEL G)
+- `retrieval.mode: adaptive` runs sparse first; invokes dense only if sparse evidence is weak/ambiguous (explicit heuristics: `min_top_score`, `margin`, `min_matched`). Opt-in, NOT default. Graceful sparse fallback when embeddings unavailable. Benchmark-gated: stays opt-in until a benchmark proves a quality gain or latency reduction.
+
+### Bounded link-aware context (CEL H)
+- `context` expands base results by 1 hop over `links`/`supersedes`/`derived_from`/`superseded_by` with a hard budget (`max_hops=1`, `max_neighbors_per_memory=2`, `max_linked_results=3`). Linked results carry provenance (`retrieval_reason: linked_from`), cannot resurrect archived/invalid, respect temporal validity, cycle-guarded. `search` unchanged by default.
+
+### `consolidate --prepare` (CEL I)
+- Deterministic JSON segment packet (objective, completed, decisions, failures/gotchas, changed files, checkpoint metadata). No LLM, no auto-write, no history deletion.
+
+### Router latency benchmark (CEL J)
+- `tests/router_latency_benchmark.py`: direct vs router, sparse. ~64ms mean overhead (subprocess startup) — below 100ms threshold → persistent child pool NOT warranted (ADR-014).
+
+### Client docs (CEL K)
+- `docs/MCP.md` rewritten: dual-era protocol, annotations, structured content, client config table, Windows/Linux examples, troubleshooting (server not found, cwd, Python executable, registry, write:false), JetBrains built-in MCP direction note.
+- `examples/`: `projects.example.json`, `warp.example.json` (with `working_directory`), `jetbrains.example.json`, `opencode-v2.example.jsonc`, `opencode-legacy.example.json`. No non-standard top-level `notes` fields.
+
+### MCP tests (CEL L)
+- `tests/test_mcp_modern.py` (16 tests): `server/discover` (no-init), modern `tools/list` (resultType, deterministic order, annotations), modern `tools/call` (structuredContent, outputSchema), invalid version → error, legacy `initialize` regression, stdout purity, router modern + `structuredContent` passthrough, protocol helpers.
+- CI `mcp-compat` job runs `test_mcp_modern` alongside `test_mcp_server`/`test_mcp_router` in the `mcp>=2,<3` venv.
+
+### Docs & ADRs
+- ADR-010 (dual-era MCP), ADR-011 (adaptive opt-in), ADR-012 (bounded links, no graph DB), ADR-013 (`consolidate --prepare` read-only), ADR-014 (router no pool yet).
+- `docs/COMPATIBILITY.md` updated for 2026-07-28.
+
 ## 1.5.0 — 2026-08-25
 
 Retrieval correctness, abstention, FTS5 acceleration, multi-project MCP, and CI.

@@ -87,8 +87,30 @@ def _tags_to_text(fm: Dict[str, Any]) -> str:
     return ""
 
 
+def _sources_to_text(fm: Dict[str, Any], max_sources: int = 6, max_len: int = 160) -> str:
+    """Bounded textual rendering of the `sources`/`evidence` field for the chunk prefix.
+
+    Coding memory relies heavily on file paths and symbol names that often live
+    ONLY in `sources` (the body may describe behavior without repeating the
+    exact identifier). Including them in the lightweight chunk prefix makes
+    those handles searchable via the sparse channel without aggressive stemming,
+    while keeping the prefix small (max_sources entries, each truncated to
+    max_len chars).
+    """
+    srcs = fm.get("sources", [])
+    if isinstance(srcs, str):
+        items = [srcs] if srcs else []
+    elif isinstance(srcs, list):
+        items = [str(s) for s in srcs if s]
+    else:
+        items = []
+    items = items[:max_sources]
+    items = [s[:max_len] for s in items]
+    return " ".join(items)
+
+
 def _build_chunk_prefix(fm: Dict[str, Any], title: str) -> str:
-    """Build a lightweight prefix for each chunk: title, type, tags, scope."""
+    """Build a lightweight prefix for each chunk: title, type, tags, scope, sources."""
     parts = []
     if title:
         parts.append(title)
@@ -103,6 +125,9 @@ def _build_chunk_prefix(fm: Dict[str, Any], title: str) -> str:
         parts.append(f"scope: {' '.join(str(s) for s in scope)}")
     elif isinstance(scope, str) and scope:
         parts.append(f"scope: {scope}")
+    sources_text = _sources_to_text(fm)
+    if sources_text:
+        parts.append(f"sources: {sources_text}")
     return "\n".join(parts) + "\n\n" if parts else ""
 
 

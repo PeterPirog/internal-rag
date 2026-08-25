@@ -27,8 +27,8 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-ROUTER_VERSION = "1.5.0"
-SUPPORTED_VERSIONS = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]
+ROUTER_VERSION = "1.6.0"
+SUPPORTED_VERSIONS = ["2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]
 
 MUTATING_TOOLS = {"remember", "checkpoint", "resume"}
 READ_TOOLS = ("context", "search", "guard", "status", "tasks")
@@ -56,7 +56,12 @@ def _resolve_root(raw: str, registry_dir: Path) -> Path:
 
 
 def load_registry(path: Path) -> Dict[str, Dict[str, Any]]:
-    """Load and validate the project registry. Returns {id: {root, write}}."""
+    """Load and strictly validate the project registry. Returns {id: {root, write}}.
+
+    CEL E: `write` must be a real JSON boolean. "write": "false", 0, 1, or any
+    non-bool type is a hard RegistryError (no truthy coercion). Default when
+    the key is absent is False.
+    """
     if not path.exists():
         raise RegistryError(f"registry file not found: {path}")
     try:
@@ -67,11 +72,25 @@ def load_registry(path: Path) -> Dict[str, Dict[str, Any]]:
         raise RegistryError('registry must be an object with a "projects" mapping')
     out: Dict[str, Dict[str, Any]] = {}
     for pid, entry in data["projects"].items():
+        if not isinstance(pid, str) or not pid.strip():
+            raise RegistryError("project id must be a non-empty string")
+        pid = pid.strip()
         if not isinstance(entry, dict) or "root" not in entry:
             raise RegistryError(f"project {pid!r}: entry must be an object with a 'root'")
+        if not isinstance(entry["root"], str) or not entry["root"].strip():
+            raise RegistryError(f"project {pid!r}: 'root' must be a non-empty string")
         root = _resolve_root(entry["root"], path.parent)
-        write = bool(entry.get("write", False))
-        out[str(pid)] = {"root": str(root), "write": write, "raw": entry}
+        # CEL E: strict boolean validation for `write`.
+        if "write" in entry:
+            w = entry["write"]
+            if not isinstance(w, bool):
+                raise RegistryError(
+                    f"project {pid!r}: 'write' must be a JSON boolean (true/false), "
+                    f"got {type(w).__name__}: {w!r}")
+            write = w
+        else:
+            write = False  # safe default
+        out[pid] = {"root": str(root), "write": write, "raw": entry}
     if not out:
         raise RegistryError("registry lists no projects")
     return out
@@ -232,12 +251,23 @@ def serve(registry: Dict[str, Dict[str, Any]], irag_path: str, timeout: float) -
     real_stdout = sys.stdout
     sys.stdout = sys.stderr  # any leakage from imports goes to stderr
 
+    # Load shared protocol helpers (CEL B)
+    try:
+        import importlib.util as _ilu
+        _pp = Path(__file__).resolve().parent / "irag_mcp_protocol.py"
+        _spec = _ilu.spec_from_file_location("irag_mcp_proto_r", str(_pp))
+        _proto = _ilu.module_from_spec(_spec); _spec.loader.exec_module(_proto)
+    except Exception:
+        _proto = None
+
     def _send(obj: Dict[str, Any]) -> None:
         real_stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
         real_stdout.flush()
 
     def _err(rid, code: int, message: str) -> None:
         _send({"jsonrpc": "2.0", "id": rid, "error": {"code": code, "message": message}})
+
+    conn_version = ""
 
     for line in sys.stdin:
         line = line.strip()
@@ -251,10 +281,35 @@ def serve(registry: Dict[str, Dict[str, Any]], irag_path: str, timeout: float) -
         method = req.get("method", "")
         rid = req.get("id")
         is_notification = "id" not in req
+        params = req.get("params", {}) or {}
 
+        if method == "server/discover":
+            client_v = str(params.get("protocolVersion", ""))
+            if client_v and client_v not in SUPPORTED_VERSIONS:
+                _err(rid, -32602, f"Unsupported protocol version: {client_v}")
+                continue
+            if _proto:
+                negotiated = _proto.negotiate_version(client_v)
+                result = _proto.discover_result(
+                    "internal-rag-router", ROUTER_VERSION,
+                    "Multi-project INTERNAL_RAG router. Pass the `project` parameter "
+                    "(see the `projects` tool) on every project-scoped call.",
+                    {"tools": {}})
+            else:
+                negotiated = client_v if client_v in SUPPORTED_VERSIONS else SUPPORTED_VERSIONS[1]
+                result = {"supportedVersions": SUPPORTED_VERSIONS, "capabilities": {"tools": {}},
+                          "serverInfo": {"name": "internal-rag-router", "version": ROUTER_VERSION},
+                          "instructions": "Multi-project INTERNAL_RAG router."}
+            conn_version = negotiated
+            _send({"jsonrpc": "2.0", "id": rid, "result": result})
+            continue
         if method == "initialize":
-            client_v = str(req.get("params", {}).get("protocolVersion", ""))
-            negotiated = client_v if client_v in SUPPORTED_VERSIONS else SUPPORTED_VERSIONS[0]
+            client_v = str(params.get("protocolVersion", ""))
+            if _proto:
+                negotiated = _proto.negotiate_version(client_v)
+            else:
+                negotiated = client_v if client_v in SUPPORTED_VERSIONS else SUPPORTED_VERSIONS[1]
+            conn_version = negotiated
             _send({"jsonrpc": "2.0", "id": rid, "result": {
                 "protocolVersion": negotiated,
                 "serverInfo": {"name": "internal-rag-router", "version": ROUTER_VERSION},
@@ -270,20 +325,39 @@ def serve(registry: Dict[str, Dict[str, Any]], irag_path: str, timeout: float) -
                 _send({"jsonrpc": "2.0", "id": rid, "result": {}})
             continue
         if method == "tools/list":
-            _send({"jsonrpc": "2.0", "id": rid, "result": {"tools": build_tools()}})
+            if _proto:
+                result = _proto.tools_list_result(build_tools())
+            else:
+                result = {"tools": sorted(build_tools(), key=lambda t: t.get("name", ""))}
+            _send({"jsonrpc": "2.0", "id": rid, "result": result})
             continue
         if method == "tools/call":
-            params = req.get("params", {}) or {}
             name = str(params.get("name", ""))
             args_d = params.get("arguments", {}) or {}
             if not isinstance(args_d, dict):
                 _err(rid, -32602, "invalid arguments")
                 continue
             text, is_error = _dispatch(registry, irag_path, timeout, name, args_d)
-            _send({"jsonrpc": "2.0", "id": rid, "result": {
-                "content": [{"type": "text", "text": text}],
-                "isError": bool(is_error),
-            }})
+            # Router does NOT strip structuredContent from child servers — it passes
+            # through whatever the child returned (CEL C). For router-level tools
+            # (projects), we build structuredContent directly.
+            structured = None
+            schema = None
+            if name == "projects":
+                try:
+                    structured = json.loads(text)
+                    schema = {"type": "object", "properties": {"projects": {"type": "array"}},
+                              "required": ["projects"]}
+                except Exception:
+                    pass
+            if _proto:
+                result = _proto.tool_call_result(text, is_error, structured, schema)
+            else:
+                result = {"content": [{"type": "text", "text": text}], "isError": bool(is_error),
+                          "resultType": "complete"}
+                if structured is not None:
+                    result["structuredContent"] = structured
+            _send({"jsonrpc": "2.0", "id": rid, "result": result})
             continue
         if method == "shutdown":
             if rid is not None:

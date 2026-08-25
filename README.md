@@ -1,12 +1,12 @@
 # INTERNAL_RAG
 
-![version](https://img.shields.io/badge/version-1.5.0-blue)
+![version](https://img.shields.io/badge/version-1.6.0-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![python](https://img.shields.io/badge/python-3.8%2B-blue)
 
 Local, persistent project memory for terminal coding agents (Warp, OpenCode, Claude Code, Cursor).
 
-**Version:** 1.5.0  
+**Version:** 1.6.0  
 **Verified:** 2026-08-25  
 **Integrations:** Warp, OpenCode, MCP (Claude Code / Cursor)  
 **Requirements:** Python 3.8+, Git  
@@ -14,6 +14,21 @@ Local, persistent project memory for terminal coding agents (Warp, OpenCode, Cla
 **Offline:** Fully functional without internet (BM25 core, optional pre-packaged embeddings)
 
 INTERNAL_RAG stores the minimum state needed to resume complex work without keeping the full session history in the model's context window. It works as a checkpoint + RAG for the agent.
+
+## What's new in 1.6.0
+
+- **Memory-quality benchmark**: `tests/memory_quality_benchmark.py` — deterministic, zero-dependency, 37 cases over a realistic coding-memory fixture corpus (identifiers, paths, paraphrase, PL/EN/mixed, superseded, temporal, contradictions, failures, abstention). Reports Recall@1/3/5, MRR, abstention P/R/F1, temporal accuracy, leakage, latency, tokens. `--smoke` canary for CI.
+- **MCP 2026-07-28 (dual-era)**: `server/discover` (no `initialize` required), per-request `_meta`, `resultType`, `structuredContent`, `outputSchema`, `ttlMs`/`cacheScope`. Legacy lifecycle unchanged. Shared `irag_mcp_protocol.py`.
+- **Better MCP schema**: precise `inputSchema` (types, enums, `required`, `minimum`, `additionalProperties: false`), tool `annotations` (`openWorldHint: false`), `outputSchema`+`structuredContent` for search/status/tasks/projects/guard. MCP `search` accepts `at` + `explain`.
+- **Registry strict `write`**: must be a JSON boolean — `"false"`/`0`/`1` rejected.
+- **Sources in chunk prefix**: file paths and symbol names in `sources`/`evidence` are searchable via the sparse channel (bounded, deterministic chunk IDs).
+- **Adaptive retrieval** (`mode: adaptive`, opt-in): sparse first, dense only if weak — benchmark-gated, not default.
+- **Bounded link-aware context**: `context` expands 1-hop over `links`/`supersedes`/`derived_from`/`superseded_by` (budget-capped, provenance, archived isolation, cycle guard).
+- **`consolidate --prepare`**: deterministic JSON segment packet (no LLM, no auto-write).
+- **Router latency benchmark**: ~64ms overhead → no persistent child pool (ADR-014).
+- **Client docs**: `docs/MCP.md` rewritten + `examples/` for Warp, OpenCode V2/legacy, JetBrains, router.
+- **ADR-010…014** for the architectural decisions.
+- `confidence_kind: "heuristic"` labels abstention confidence honestly.
 
 ## What's new in 1.5.0
 

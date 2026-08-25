@@ -26,7 +26,7 @@ import unicodedata
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-VERSION = "1.5.0"
+VERSION = "1.6.0"
 
 ALLOWED_TYPES = {"decision", "knowledge", "constraint", "gotcha", "failure", "hypothesis", "session"}
 ALLOWED_STATUS = {"active", "tentative", "superseded", "invalid", "archived"}
@@ -68,11 +68,17 @@ DEFAULT_CONFIG = {
             "enabled": True,
             "min_corpus_size": 50,
         },
+        "adaptive": {
+            "min_top_score": 2.0,
+            "margin": 0.8,
+            "min_matched": 2,
+        },
     },
     "tokens": {"context_budget": 4000, "warn_ratio": 0.8},
     "checkpoints": {"auto_archive_sessions": True, "max_task_stack": 16, "max_age_minutes": 0},
     "privacy": {"scan_on_checkpoint": False},
     "usage": {"stale_days": 30},
+    "links": {"max_hops": 1, "max_neighbors_per_memory": 2, "max_linked_results": 3},
 }
 
 
@@ -740,7 +746,100 @@ def context(args) -> int:
     print("\n## NEXT")
     print("RECOVER -> CHECKPOINT -> GUARD OK -> continue." if recovery
           else "Checkpoint before first code edit, then continue.")
+    # CEL H: bounded link-aware context expansion (1-hop, budget-capped).
+    linked = _bounded_link_expansion(kept, cfg, at_date=None)
+    if linked:
+        print("\n## LINKED MEMORIES (1-hop, provenance=linked_from — not direct hits)")
+        for lnk in linked:
+            print(f"- {lnk['path']} [{lnk['type']}/{lnk['status']}] "
+                  f"relation={lnk['relation']} from={lnk['linked_from']} "
+                  f"reason={lnk['retrieval_reason']}")
     return 0
+
+
+def _bounded_link_expansion(base_results: List[Tuple[float, Path, Dict[str, Any], str]],
+                             cfg: Dict[str, Any],
+                             at_date: Optional[str] = None,
+                             max_hops: int = 1,
+                             max_neighbors_per_memory: int = 2,
+                             max_linked_results: int = 3
+                             ) -> List[Dict[str, Any]]:
+    """CEL H: bounded 1-hop link-aware expansion.
+
+    Uses EXISTING frontmatter fields: links, supersedes, derived_from,
+    superseded_by. No graph DB. Hard budget:
+      - max_hops = 1 (never递归 beyond one hop)
+      - max_neighbors_per_memory (per base result)
+      - max_linked_results (total cap)
+
+    Provenance: every linked result carries retrieval_reason='linked_from',
+    linked_from (the source memory id), and relation (the field name).
+
+    Safety:
+      - A linked result never 'pretends' to be a direct lexical/dense hit.
+      - Active search never resurrects archived/invalid records via links.
+      - Temporal search respects validity windows on linked results too.
+      - Cycle guard: a memory already in the base set is not re-added as linked.
+    """
+    link_cfg = cfg.get("links", {}) if isinstance(cfg, dict) else {}
+    max_hops = int(link_cfg.get("max_hops", max_hops))
+    max_neighbors_per_memory = int(link_cfg.get("max_neighbors_per_memory", max_neighbors_per_memory))
+    max_linked_results = int(link_cfg.get("max_linked_results", max_linked_results))
+    if max_hops < 1 or max_linked_results < 1:
+        return []
+    base_ids = {str(fm.get("id", str(p))) for _s, p, fm, _sn in base_results}
+    seen = set(base_ids)
+    linked: List[Dict[str, Any]] = []
+    # Build an id->(path,fm) index of ALL memories (cheap; no embeddings).
+    all_by_id: Dict[str, Tuple[Path, Dict[str, Any]]] = {}
+    for p in all_memory_files():
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+            fm = parse_fm(text)
+            mid = str(fm.get("id", str(p)))
+            all_by_id[mid] = (p, fm)
+        except Exception:
+            continue
+    for _s, _p, fm, _sn in base_results:
+        if len(linked) >= max_linked_results:
+            break
+        mid = str(fm.get("id", str(_p)))
+        neighbors: List[Tuple[str, str]] = []  # (other_id, relation)
+        for field in ("links", "supersedes", "derived_from", "superseded_by"):
+            val = fm.get(field, [])
+            if isinstance(val, str):
+                val = [val] if val else []
+            if not isinstance(val, list):
+                continue
+            for other in val:
+                if isinstance(other, str) and other.strip():
+                    neighbors.append((other.strip(), field))
+        for other_id, relation in neighbors[:max_neighbors_per_memory]:
+            if len(linked) >= max_linked_results:
+                break
+            if other_id in seen:
+                continue  # cycle guard / duplicate
+            entry = all_by_id.get(other_id)
+            if entry is None:
+                continue
+            lp, lfm = entry
+            lstatus = str(lfm.get("status", "active")).lower()
+            # Active search never resurrects archived/invalid via links.
+            if lstatus in ("archived", "invalid"):
+                continue
+            # Temporal search respects validity windows on linked results.
+            if at_date and not _valid_at_date(lfm, at_date):
+                continue
+            seen.add(other_id)
+            linked.append({
+                "path": str(lp.relative_to(ROOT)),
+                "type": lfm.get("type", "?"),
+                "status": lfm.get("status", "?"),
+                "linked_from": mid,
+                "relation": relation,
+                "retrieval_reason": "linked_from",
+            })
+    return linked
 
 
 # ----------------------------- guard ----------------------------------------
@@ -1408,6 +1507,7 @@ def search_with_meta(query: str, limit: int = 8, types: Optional[List[str]] = No
                                explain=explain, at_date=at_date)
     meta = cfg.get("_abstention_meta") or {
         "abstained": not results, "retrieval_confidence": 0.0,
+        "confidence_kind": "heuristic",
         "reason": "no results" if not results else "ok",
         "admitted": len(results), "rejected": 0,
     }
@@ -1499,6 +1599,7 @@ def _merge_chunks_by_memory(
     """
     if not chunk_results:
         meta = {"abstained": True, "retrieval_confidence": 0.0,
+                "confidence_kind": "heuristic",
                 "reason": "no retrieval evidence for this query",
                 "admitted": 0, "rejected": 0}
         return [], meta
@@ -1542,6 +1643,7 @@ def _merge_chunks_by_memory(
             admitted.append((final_score, cand_idx, expl, chunk_text))
     admitted.sort(key=lambda x: -x[0])
     meta: Dict[str, Any] = {"abstained": not admitted, "retrieval_confidence": 0.0,
+                            "confidence_kind": "heuristic",
                             "reason": "", "admitted": len(admitted),
                             "rejected": len(rejected),
                             "rejected_detail": rejected[:20]}
@@ -1716,6 +1818,12 @@ def _search_with_cfg(query: str, limit: int, cfg: Dict[str, Any],
     r_cfg = cfg.get("retrieval", {})
     mode = str(r_cfg.get("mode", "hybrid")).lower()
     emb_setting = str(r_cfg.get("embeddings", "auto")).lower()
+    # CEL G: adaptive mode — run sparse first; only invoke dense if sparse
+    # evidence is weak/ambiguous AND embeddings are available. Heuristics are
+    # explicit and benchmark-gated; adaptive is opt-in (NOT the default).
+    adaptive_cfg = r_cfg.get("adaptive") or {}
+    if mode == "adaptive":
+        mode = "sparse"  # start sparse; may upgrade to hybrid below
     cand_mult = int(r_cfg.get("candidate_multiplier", 4))
     cand_limit = limit * cand_mult
     chunking_cfg = r_cfg.get("chunking", {})
@@ -1807,6 +1915,24 @@ def _search_with_cfg(query: str, limit: int, cfg: Dict[str, Any],
     dense_ranked: Optional[List[Tuple[float, int]]] = None  # (score, chunk_idx)
     retrieval_mode = "sparse"
     dense_primary = (mode == "dense")  # A4: dense mode = dense-only, sparse is fallback
+    # CEL G: adaptive decision — after sparse scoring, decide whether to
+    # invoke dense. Heuristics (explicit, benchmark-gated):
+    #   - min_top_score: if the best sparse score is strong, trust sparse.
+    #   - margin: if top-1 clearly dominates top-2, sparse is unambiguous.
+    #   - min_matched: require a minimum matched-token count for "strong".
+    # If sparse is weak/ambiguous AND embeddings are available, upgrade to hybrid.
+    if r_cfg.get("adaptive") and mode == "sparse":
+        top_scores = [s for s, _ci, _m in sparse_scored[:3]]
+        best = top_scores[0] if top_scores else 0.0
+        second = top_scores[1] if len(top_scores) > 1 else 0.0
+        min_top = float(adaptive_cfg.get("min_top_score", 2.0))
+        margin = float(adaptive_cfg.get("margin", 0.8))
+        min_matched = int(adaptive_cfg.get("min_matched", 2))
+        top_matched = len(sparse_scored[0][2]) if sparse_scored else 0
+        sparse_strong = (best >= min_top and (best - second) >= margin and top_matched >= min_matched)
+        if not sparse_strong and emb_setting not in ("off", "no", "false", "0"):
+            mode = "hybrid"  # upgrade: invoke dense
+        cfg["_adaptive_upgraded"] = (mode == "hybrid")
     if mode != "sparse" and emb_setting not in ("off", "no", "false", "0"):
         # C: dense candidates restricted to the prefilter union set (keeps
         # sparse-only chunk indices valid for fusion). In pure dense mode the
@@ -1915,6 +2041,63 @@ def _filter_by_date(results: List[Tuple[float, Path, Dict[str, Any], str]],
             continue
         filtered.append((score, p, fm, sn))
     return filtered
+
+
+def consolidate_prepare(args) -> int:
+    """CEL I: consolidate --prepare — deterministic JSON segment packet.
+
+    Emits a small JSON bundle describing the current work segment for an
+    already-running agent (Warp/OpenCode) to decide whether to call `remember`.
+    NO LLM, NO API, NO auto-write, NO history deletion.
+    """
+    cp = load_checkpoint()
+    ws = ""
+    if WORKING.exists():
+        ws = WORKING.read_text(encoding="utf-8", errors="replace")
+    objective = get_section(ws, "Objective")
+    completed = get_section(ws, "Completed")
+    in_progress = get_section(ws, "In progress")
+    blockers = get_section(ws, "Blockers")
+    decisions = get_section(ws, "Important active decisions")
+    changed = changed_entries()
+    # Recent failures/gotchas from memory (read-only retrieval)
+    recent_lessons: List[Dict[str, Any]] = []
+    for p in all_memory_files():
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+            fm = parse_fm(text)
+            if str(fm.get("type", "")).lower() in ("failure", "gotcha") and \
+               str(fm.get("status", "active")).lower() == "active":
+                recent_lessons.append({
+                    "id": str(fm.get("id", str(p))),
+                    "type": fm.get("type"),
+                    "title": _extract_title_from_text(text),
+                    "path": str(p.relative_to(ROOT)).replace("\\", "/"),
+                })
+        except Exception:
+            continue
+    packet = {
+        "irag_version": VERSION,
+        "generated_at": now(),
+        "objective": objective,
+        "completed": completed,
+        "in_progress": in_progress,
+        "blockers": blockers,
+        "important_decisions": decisions,
+        "recent_failures_and_gotchas": recent_lessons[:10],
+        "relevant_changed_files": [p for _s, p in changed[:50]],
+        "checkpoint": {
+            "fingerprint": str(cp.get("fingerprint", ""))[:16],
+            "at": str(cp.get("at", "")),
+            "reason": str(cp.get("reason", "")),
+        },
+        "instructions_for_agent": (
+            "This is a deterministic, read-only segment packet. "
+            "Decide whether to call `remember` for durable facts. "
+            "Do NOT auto-write memories from this packet. No LLM is involved."),
+    }
+    print(json.dumps(packet, ensure_ascii=False, indent=2))
+    return 0
 
 
 def consolidate_cmd(args) -> int:
@@ -3654,7 +3837,7 @@ usage:
 def _validate_config(cfg: Dict[str, Any]) -> List[str]:
     """Validate config values, return list of issues (empty = valid)."""
     issues: List[str] = []
-    known_sections = {"retrieval", "tokens", "checkpoints", "privacy", "usage"}
+    known_sections = {"retrieval", "tokens", "checkpoints", "privacy", "usage", "links"}
     for key in cfg:
         if key not in known_sections:
             issues.append(f"unknown section: {key}")
@@ -3674,8 +3857,8 @@ def _validate_config(cfg: Dict[str, Any]) -> List[str]:
                 issues.append("retrieval.min_score: must be >= 0")
         if "embeddings" in r and str(r["embeddings"]).lower() not in ("auto", "on", "off"):
             issues.append("retrieval.embeddings: must be auto|on|off")
-        if "mode" in r and str(r["mode"]).lower() not in ("sparse", "dense", "hybrid"):
-            issues.append("retrieval.mode: must be sparse|dense|hybrid")
+        if "mode" in r and str(r["mode"]).lower() not in ("sparse", "dense", "hybrid", "adaptive"):
+            issues.append("retrieval.mode: must be sparse|dense|hybrid|adaptive")
         if "profile" in r and str(r["profile"]).lower() not in ("english-fast", "multilingual"):
             issues.append("retrieval.profile: must be english-fast|multilingual")
         for wkey in ("sparse_weight", "dense_weight"):
@@ -3788,36 +3971,94 @@ def config_cmd(args) -> int:
 # All human-facing output from handlers is redirected to stderr.
 
 MCP_TOOLS = [
-    {"name": "context", "description": "Start/resume a task with INTERNAL_RAG context packet.",
-     "inputSchema": {"type": "object", "properties": {"task": {"type": "string"}, "limit": {"type": "integer"}},
-                     "required": ["task"]}},
-    {"name": "search", "description": "Search durable memories (BM25 + MMR, optional embeddings). Returns structured JSON.",
-     "inputSchema": {"type": "object", "properties": {
-                        "query": {"type": "string"}, "limit": {"type": "integer"},
-                        "types": {"type": "array", "items": {"type": "string"}},
-                        "statuses": {"type": "array", "items": {"type": "string"}}},
-                     "required": ["query"]}},
-    {"name": "checkpoint", "description": "Persist current operational state.",
-     "inputSchema": {"type": "object", "properties": {
-                        "reason": {"type": "string"}, "phase": {"type": "string"},
-                        "completed": {"type": "string"}, "in_progress": {"type": "string"},
-                        "blockers": {"type": "string"}, "next": {"type": "string"}},
-                     "required": ["reason"]}},
-    {"name": "guard", "description": "Verify no uncheckpointed changes. Returns GUARD OK / GUARD STALE.",
-     "inputSchema": {"type": "object", "properties": {}}},
-    {"name": "remember", "description": "Store durable memory.",
-     "inputSchema": {"type": "object", "properties": {
-                        "type": {"type": "string"}, "title": {"type": "string"}, "body": {"type": "string"},
-                        "tags": {"type": "string"}, "evidence": {"type": "string"},
-                        "scope": {"type": "string"}, "consequence": {"type": "string"},
-                        "status": {"type": "string"}},
-                     "required": ["type", "title", "body"]}},
-    {"name": "status", "description": "Memory and checkpoint status (JSON).",
-     "inputSchema": {"type": "object", "properties": {}}},
-    {"name": "tasks", "description": "Show task stack (JSON).",
-     "inputSchema": {"type": "object", "properties": {}}},
-    {"name": "resume", "description": "Pop and resume the top task (JSON).",
-     "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "context",
+     "description": "Start/resume a task with INTERNAL_RAG context packet.",
+     "annotations": {"readOnlyHint": False, "destructiveHint": False,
+                     "idempotentHint": False, "openWorldHint": False},
+     "inputSchema": {"type": "object",
+                     "properties": {"task": {"type": "string", "description": "Current task description"},
+                                    "limit": {"type": "integer", "minimum": 1, "default": 6}},
+                     "required": ["task"], "additionalProperties": False}},
+    {"name": "search",
+     "description": "Search durable memories (BM25 + MMR, optional embeddings). Returns structured JSON with abstention metadata.",
+     "annotations": {"readOnlyHint": True, "destructiveHint": False,
+                     "idempotentHint": False, "openWorldHint": False},
+     "inputSchema": {"type": "object",
+                     "properties": {
+                         "query": {"type": "string", "description": "Search query"},
+                         "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 8},
+                         "types": {"type": "array", "items": {"type": "string",
+                                                               "enum": ["decision", "knowledge", "constraint",
+                                                                        "gotcha", "failure", "hypothesis", "session"]}},
+                         "statuses": {"type": "array", "items": {"type": "string",
+                                                                  "enum": ["active", "tentative", "superseded"]}},
+                         "at": {"type": "string", "description": "Temporal filter: YYYY-MM-DD (memories valid at this date)"},
+                         "explain": {"type": "boolean", "default": False,
+                                     "description": "Include per-channel scoring breakdown"}},
+                     "required": ["query"], "additionalProperties": False},
+     "outputSchema": {"type": "object",
+                      "properties": {"abstained": {"type": "boolean"},
+                                     "retrieval_confidence": {"type": "number"},
+                                     "confidence_kind": {"type": "string", "enum": ["heuristic", "calibrated"]},
+                                     "reason": {"type": "string"},
+                                     "admitted": {"type": "integer"},
+                                     "rejected": {"type": "integer"},
+                                     "results": {"type": "array", "items": {"type": "object"}}},
+                      "required": ["abstained", "results"]}},
+    {"name": "checkpoint",
+     "description": "Persist current operational state.",
+     "annotations": {"readOnlyHint": False, "destructiveHint": False,
+                     "idempotentHint": False, "openWorldHint": False},
+     "inputSchema": {"type": "object",
+                     "properties": {"reason": {"type": "string"}, "phase": {"type": "string"},
+                                    "completed": {"type": "string"}, "in_progress": {"type": "string"},
+                                    "blockers": {"type": "string"}, "next": {"type": "string"}},
+                     "required": ["reason"], "additionalProperties": False}},
+    {"name": "guard",
+     "description": "Verify no uncheckpointed changes. Returns GUARD OK / GUARD STALE.",
+     "annotations": {"readOnlyHint": True, "destructiveHint": False,
+                     "idempotentHint": True, "openWorldHint": False},
+     "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+     "outputSchema": {"type": "object",
+                      "properties": {"ok": {"type": "boolean"},
+                                     "fingerprint": {"type": "string"},
+                                     "changed_files": {"type": "array", "items": {"type": "string"}}},
+                      "required": ["ok"]}},
+    {"name": "remember",
+     "description": "Store durable memory.",
+     "annotations": {"readOnlyHint": False, "destructiveHint": False,
+                     "idempotentHint": False, "openWorldHint": False},
+     "inputSchema": {"type": "object",
+                     "properties": {"type": {"type": "string",
+                                             "enum": ["decision", "knowledge", "constraint", "gotcha",
+                                                      "failure", "hypothesis", "session"]},
+                                    "title": {"type": "string"}, "body": {"type": "string"},
+                                    "tags": {"type": "string"}, "evidence": {"type": "string"},
+                                    "scope": {"type": "string"}, "consequence": {"type": "string"},
+                                    "status": {"type": "string", "enum": ["active", "tentative"]}},
+                     "required": ["type", "title", "body"], "additionalProperties": False}},
+    {"name": "status",
+     "description": "Memory and checkpoint status (JSON).",
+     "annotations": {"readOnlyHint": True, "destructiveHint": False,
+                     "idempotentHint": True, "openWorldHint": False},
+     "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+     "outputSchema": {"type": "object",
+                      "properties": {"memories": {"type": "integer"},
+                                     "checkpoints": {"type": "integer"},
+                                     "last_checkpoint": {"type": "string"},
+                                     "index_status": {"type": "string"}}}},
+    {"name": "tasks",
+     "description": "Show task stack (JSON).",
+     "annotations": {"readOnlyHint": True, "destructiveHint": False,
+                     "idempotentHint": True, "openWorldHint": False},
+     "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+     "outputSchema": {"type": "object",
+                      "properties": {"tasks": {"type": "array", "items": {"type": "object"}}}}},
+    {"name": "resume",
+     "description": "Pop and resume the top task (JSON).",
+     "annotations": {"readOnlyHint": False, "destructiveHint": False,
+                     "idempotentHint": False, "openWorldHint": False},
+     "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
 ]
 
 
@@ -3852,9 +4093,14 @@ class _Capture:
             _mcp_log("handler output:\n" + captured.strip())
 
 
-def _mcp_dispatch(name: str, args_d: Dict[str, Any]) -> Tuple[str, bool]:
-    """Dispatch a tool call. Returns (text_result, is_error)."""
-    import io as _io
+def _mcp_dispatch(name: str, args_d: Dict[str, Any]
+                  ) -> Tuple[str, bool, Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """Dispatch a tool call. Returns (text_result, is_error, structured_content, output_schema).
+
+    structured_content is the machine-readable payload for modern MCP clients
+    (CEL C/D). output_schema describes its shape. Legacy clients read only
+    text_result + is_error via the TextContent `content` array.
+    """
     with _Capture() as cap:
         if name == "context":
             try:
@@ -3863,8 +4109,8 @@ def _mcp_dispatch(name: str, args_d: Dict[str, Any]) -> Tuple[str, bool]:
             except SystemExit:
                 pass
             except Exception as e:
-                return f"error: {e}", True
-            return cap.buf.getvalue().strip() or "ok", False
+                return f"error: {e}", True, None, None
+            return cap.buf.getvalue().strip() or "ok", False, None, None
         if name == "search":
             q = args_d.get("query", "")
             limit = int(args_d.get("limit", 8))
@@ -3874,14 +4120,44 @@ def _mcp_dispatch(name: str, args_d: Dict[str, Any]) -> Tuple[str, bool]:
                 types_f = [types_f]
             if isinstance(statuses_f, str):
                 statuses_f = [statuses_f]
+            at_date = args_d.get("at")
+            want_explain = bool(args_d.get("explain", False))
             try:
-                results = search(q, limit, types=types_f, statuses=statuses_f)
+                r, meta = search_with_meta(q, limit, types=types_f, statuses=statuses_f,
+                                           explain=want_explain, at_date=at_date)
             except Exception as e:
-                return f"error: {e}", True
-            payload = [{"path": str(p.relative_to(ROOT)), "score": round(s, 2),
-                        "type": fm.get("type"), "status": fm.get("status"), "snippet": sn}
-                       for s, p, fm, sn in results]
-            return json.dumps(payload, ensure_ascii=False, indent=2), False
+                return f"error: {e}", True, None, None
+            if at_date:
+                r = _filter_by_date(r, at_date)
+                if not r:
+                    meta = dict(meta); meta["abstained"] = True
+            items = [{"path": str(p.relative_to(ROOT)), "score": round(s, 2),
+                      "type": fm.get("type"), "status": fm.get("status"), "snippet": sn,
+                      "matched_tokens": _matched_for(fm, q)}
+                     for s, p, fm, sn in r]
+            if want_explain:
+                for it, (_s, _p, fm, _sn) in zip(items, r):
+                    if "_explain" in fm:
+                        it["explain"] = fm.pop("_explain")
+            structured = {
+                "abstained": bool(meta.get("abstained", not items)),
+                "retrieval_confidence": meta.get("retrieval_confidence", 0.0),
+                "confidence_kind": meta.get("confidence_kind", "heuristic"),
+                "reason": meta.get("reason", ""),
+                "admitted": meta.get("admitted"),
+                "rejected": meta.get("rejected"),
+                "results": items,
+            }
+            schema = {"type": "object",
+                      "properties": {"abstained": {"type": "boolean"},
+                                     "retrieval_confidence": {"type": "number"},
+                                     "confidence_kind": {"type": "string", "enum": ["heuristic", "calibrated"]},
+                                     "reason": {"type": "string"},
+                                     "admitted": {"type": "integer"},
+                                     "rejected": {"type": "integer"},
+                                     "results": {"type": "array", "items": {"type": "object"}}},
+                      "required": ["abstained", "results"]}
+            return json.dumps(items, ensure_ascii=False, indent=2), False, structured, schema
         if name == "checkpoint":
             try:
                 checkpoint(_Args(
@@ -3893,15 +4169,21 @@ def _mcp_dispatch(name: str, args_d: Dict[str, Any]) -> Tuple[str, bool]:
             except SystemExit:
                 pass
             except Exception as e:
-                return f"error: {e}", True
-            return cap.buf.getvalue().strip() or "checkpoint saved", False
+                return f"error: {e}", True, None, None
+            return cap.buf.getvalue().strip() or "checkpoint saved", False, None, None
         if name == "guard":
             try:
                 rc = guard()
             except Exception as e:
-                return f"error: {e}", True
+                return f"error: {e}", True, None, None
             txt = cap.buf.getvalue().strip()
-            return (txt or f"exit={rc}"), rc != 0
+            structured = {"ok": rc == 0, "fingerprint": txt.split("fingerprint:")[-1].strip() if "fingerprint:" in txt else "",
+                          "changed_files": []}
+            schema = {"type": "object", "properties": {"ok": {"type": "boolean"},
+                                                      "fingerprint": {"type": "string"},
+                                                      "changed_files": {"type": "array", "items": {"type": "string"}}},
+                      "required": ["ok"]}
+            return (txt or f"exit={rc}"), rc != 0, structured, schema
         if name == "remember":
             res = remember(_Args(
                 type=args_d.get("type", "knowledge"), status=args_d.get("status", "active"),
@@ -3911,57 +4193,88 @@ def _mcp_dispatch(name: str, args_d: Dict[str, Any]) -> Tuple[str, bool]:
                 links="", force=False, allow_secret=False, json=False,
                 confidence=None, valid_from=None, valid_to=None,
                 supersedes="", derived_from=""))
-            return (res or "created"), res in ("blocked", "refused")
+            return (res or "created"), res in ("blocked", "refused"), None, None
         if name == "status":
             try:
                 memory_status(_Args(json=True))
             except SystemExit:
                 pass
             except Exception as e:
-                return f"error: {e}", True
-            return cap.buf.getvalue().strip() or "ok", False
+                return f"error: {e}", True, None, None
+            txt = cap.buf.getvalue().strip()
+            structured = None
+            try:
+                structured = json.loads(txt)
+            except Exception:
+                pass
+            schema = {"type": "object", "properties": {"memories": {"type": "integer"},
+                                                       "checkpoints": {"type": "integer"},
+                                                       "last_checkpoint": {"type": "string"},
+                                                       "index_status": {"type": "string"}}}
+            return txt or "ok", False, structured, schema
         if name == "tasks":
             try:
                 tasks_cmd(_Args(json=True))
             except Exception as e:
-                return f"error: {e}", True
-            return cap.buf.getvalue().strip() or "[]", False
+                return f"error: {e}", True, None, None
+            txt = cap.buf.getvalue().strip() or "[]"
+            structured = None
+            try:
+                structured = json.loads(txt)
+            except Exception:
+                pass
+            schema = {"type": "object", "properties": {"tasks": {"type": "array", "items": {"type": "object"}}}}
+            return txt, False, structured, schema
         if name == "resume":
             try:
                 resume_cmd(_Args(json=True, discard_state=False))
             except SystemExit:
                 pass
             except Exception as e:
-                return f"error: {e}", True
-            return cap.buf.getvalue().strip() or "ok", False
-        return f"unknown tool: {name}", True
+                return f"error: {e}", True, None, None
+            return cap.buf.getvalue().strip() or "ok", False, None, None
+        return f"unknown tool: {name}", True, None, None
 
 
 def mcp_server() -> int:
     """MCP stdio server (newline-delimited JSON-RPC 2.0).
 
+    Dual-era (CEL B):
+    - Legacy (2024-11-05 … 2025-11-25): initialize / notifications/initialized /
+      tools/list / tools/call / ping / shutdown. Backward compatible.
+    - Modern (2026-07-28): server/discover (no initialize required), per-request
+      `_meta`, resultType envelopes, structuredContent, outputSchema, ttlMs/cacheScope.
+
     - stdout: ONLY protocol messages (guarantee).
     - stderr: logs and handler output.
-    - Modern semantics: initialize (version negotiation), tools/list,
-      tools/call, ping; notifications are acked silently.
-    - Legacy: `notifications/initialized`, `shutdown` still handled.
     """
     import io as _io
+    # Load shared protocol helpers
+    try:
+        import importlib.util as _ilu
+        _pp = Path(__file__).resolve().parent / "irag_mcp_protocol.py"
+        _spec = _ilu.spec_from_file_location("irag_mcp_protocol", str(_pp))
+        _proto = _ilu.module_from_spec(_spec); _spec.loader.exec_module(_proto)
+    except Exception:
+        _proto = None
+    SUPPORTED = (getattr(_proto, "SUPPORTED_VERSIONS", None) or
+                 ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"])
+    MODERN = getattr(_proto, "MODERN_VERSION", "2026-07-28")
     # Redirect any module-level print() leakage to stderr for the server lifetime
     real_stdout = sys.stdout
     sys.stdout = sys.stderr
 
     def _send(obj: Dict[str, Any]) -> None:
-        # Write protocol messages to the REAL stdout only.
         real_stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
         real_stdout.flush()
 
     def _err(rid, code: int, message: str) -> None:
         _send({"jsonrpc": "2.0", "id": rid, "error": {"code": code, "message": message}})
 
-    supported_versions = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]
-    server_version = supported_versions[0]
+    server_version_legacy = "2025-11-25"
     initialized = False
+    # Track the negotiated protocol version for this connection.
+    conn_version = ""  # set by initialize or discover
 
     for line in sys.stdin:
         line = line.strip()
@@ -3975,11 +4288,40 @@ def mcp_server() -> int:
         method = req.get("method", "")
         rid = req.get("id")
         is_notification = rid is None and "id" not in req
+        params = req.get("params", {}) or {}
+        is_modern_req = (conn_version == MODERN) or (method in ("server/discover",))
+
+        # ---- Modern: server/discover (no initialize required) ----
+        if method == "server/discover":
+            client_v = str(params.get("protocolVersion", ""))
+            if _proto:
+                negotiated = _proto.negotiate_version(client_v)
+                result = _proto.discover_result(
+                    "internal-rag", VERSION,
+                    "INTERNAL_RAG persistent project memory. "
+                    "Use context before edits; checkpoint at milestones; guard before finishing.",
+                    {"tools": {}})
+            else:
+                negotiated = client_v if client_v in SUPPORTED else server_version_legacy
+                result = {"supportedVersions": SUPPORTED, "capabilities": {"tools": {}},
+                          "serverInfo": {"name": "internal-rag", "version": VERSION},
+                          "instructions": "INTERNAL_RAG persistent project memory."}
+            # Validate requested version: if client asks for a version we don't support, error.
+            if client_v and client_v not in SUPPORTED:
+                _err(rid, -32602, f"Unsupported protocol version: {client_v}. "
+                                  f"Supported: {', '.join(SUPPORTED)}")
+                continue
+            conn_version = negotiated
+            _send({"jsonrpc": "2.0", "id": rid, "result": result})
+            continue
 
         if method == "initialize":
-            # Version negotiation: accept client's version if supported, else latest.
-            client_v = str(req.get("params", {}).get("protocolVersion", ""))
-            negotiated = client_v if client_v in supported_versions else server_version
+            client_v = str(params.get("protocolVersion", ""))
+            if _proto:
+                negotiated = _proto.negotiate_version(client_v)
+            else:
+                negotiated = client_v if client_v in SUPPORTED else server_version_legacy
+            conn_version = negotiated
             _send({"jsonrpc": "2.0", "id": rid, "result": {
                 "protocolVersion": negotiated,
                 "serverInfo": {"name": "internal-rag", "version": VERSION},
@@ -3997,20 +4339,29 @@ def mcp_server() -> int:
                 _send({"jsonrpc": "2.0", "id": rid, "result": {}})
             continue
         if method == "tools/list":
-            _send({"jsonrpc": "2.0", "id": rid, "result": {"tools": MCP_TOOLS}})
+            if _proto:
+                result = _proto.tools_list_result(MCP_TOOLS)
+            else:
+                result = {"tools": sorted(MCP_TOOLS, key=lambda t: t.get("name", ""))}
+            _send({"jsonrpc": "2.0", "id": rid, "result": result})
             continue
         if method == "tools/call":
-            params = req.get("params", {}) or {}
             name = params.get("name")
             args_d = params.get("arguments", {}) or {}
             if not isinstance(args_d, dict):
                 _err(rid, -32602, "invalid arguments")
                 continue
-            text, is_error = _mcp_dispatch(str(name), args_d)
-            _send({"jsonrpc": "2.0", "id": rid, "result": {
-                "content": [{"type": "text", "text": text}],
-                "isError": bool(is_error),
-            }})
+            text, is_error, structured, schema = _mcp_dispatch(str(name), args_d)
+            if _proto:
+                result = _proto.tool_call_result(text, is_error, structured, schema)
+            else:
+                result = {"content": [{"type": "text", "text": text}], "isError": bool(is_error)}
+                if structured is not None:
+                    result["structuredContent"] = structured
+                if schema is not None:
+                    result["outputSchema"] = schema
+                result["resultType"] = "complete"
+            _send({"jsonrpc": "2.0", "id": rid, "result": result})
             continue
         if method == "shutdown":
             if rid is not None:
@@ -4102,6 +4453,8 @@ def main() -> None:
                    help="Age threshold for 'never accessed old entries' (default 90).")
     p.add_argument("--snapshot-age-days", type=int, default=30,
                    help="Age threshold for 'old session snapshots' (default 30).")
+    p.add_argument("--prepare", action="store_true",
+                   help="Emit a deterministic JSON segment packet (no LLM, no auto-write).")
 
     p = sub.add_parser("remember")
     p.add_argument("--type", required=True, choices=sorted(TYPE_DIR.keys()))
@@ -4233,6 +4586,7 @@ def main() -> None:
             r = _search_with_cfg(a.query, a.limit, cfg, types=types_f, statuses=statuses_f,
                                  explain=want_explain, at_date=at_date)
             meta = cfg.get("_abstention_meta") or {"abstained": not r, "retrieval_confidence": 0.0,
+                                                   "confidence_kind": "heuristic",
                                                    "reason": "no results" if not r else "ok"}
         else:
             r, meta = search_with_meta(a.query, a.limit, types=types_f, statuses=statuses_f,
@@ -4267,6 +4621,7 @@ def main() -> None:
                 print(json.dumps({
                     "abstained": bool(meta.get("abstained", not items)),
                     "retrieval_confidence": meta.get("retrieval_confidence", 0.0),
+                    "confidence_kind": meta.get("confidence_kind", "heuristic"),
                     "reason": meta.get("reason", ""),
                     "admitted": meta.get("admitted"),
                     "rejected": meta.get("rejected"),
@@ -4285,6 +4640,8 @@ def main() -> None:
                 f"{i}. {p.relative_to(ROOT)} score={s:.1f}\n   {sn}"
                 for i, (s, p, fm, sn) in enumerate(r, 1)))
     elif a.cmd == "consolidate":
+        if getattr(a, "prepare", False):
+            raise SystemExit(consolidate_prepare(a))
         raise SystemExit(consolidate_cmd(a))
     elif a.cmd == "remember":
         remember(a)

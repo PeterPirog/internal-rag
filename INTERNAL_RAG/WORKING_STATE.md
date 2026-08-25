@@ -1,8 +1,8 @@
 # Current Working State
 
-updated: 2026-08-25T09:03:19+02:00
+updated: 2026-08-25T13:59:26+02:00
 branch: main
-base_commit: efb9ac8
+base_commit: 579b0dd
 
 ## Objective
 
@@ -10,18 +10,30 @@ v1.5.0: abstention gate + FTS5 prefilter + multi-project MCP router + CI/docs
 
 ## Current request
 
-v1.5.0: FTS5 prefilter done (C); E router, G CI, H docs remaining
+v1.6.0: CEL A-L memory quality benchmark, MCP 2026-07-28, schema, MCP search at/explain, registry strict, sources index key, adaptive retrieval, link-aware context, consolidate --prepare, router latency bench, MCP client docs, MCP tests
 
 ## Current phase
 
-v1.5.0 complete
+v1.6.0 complete
 
 ## Completed
 
-- A1-A5,B,C,D,E,G,H all done
-- 168 tests OK (mcp+no-mcp)
+- A: memory_quality_benchmark (37 cases, R@1 63.6%, R@5 96.9%, leak 0%)
+- B: MCP 2026-07-28 dual-era
+- C: schema+annotations+structuredContent
+- D: search at+explain
+- E: strict write bool
+- F: sources in chunk prefix
+- G: adaptive mode (opt-in, benchmark-gated)
+- H: bounded link-aware context
+- I: consolidate --prepare
+- J: router latency bench (64ms overhead, no pool)
+- K: MCP client docs+examples
+- L: 16 modern MCP tests
+- 187 tests OK
 - self_test PASS
-- venv sim CI green
+- all benchmarks green
+- ADR-010..014
 
 ## In progress
 
@@ -38,39 +50,60 @@ v1.5.0 complete
 ## Relevant files
 
 - ` M` agents/skills/internal-rag/irag.py
-- ` D` github/workflows/self-test.yml
+- ` M` agents/skills/internal-rag/irag_index.py
+- ` M` agents/skills/internal-rag/irag_mcp_router.py
+- ` M` github/workflows/ci.yml
 - ` M` CHANGELOG.md
 - ` M` README.md
 - ` M` VERSION
-- ` M` docs/CLI.md
+- ` M` docs/ADR.md
 - ` M` docs/COMPATIBILITY.md
-- ` M` docs/CONFIG.md
-- ` M` docs/FILE-MAP.md
 - ` M` docs/MCP.md
+- ` M` examples/jetbrains.example.json
+- ` D` examples/opencode.example.json
+- ` M` examples/warp.example.json
 - ` M` install.py
 - ` M` pack.py
-- ` M` tests/test_lifecycle.py
+- ` M` tests/test_mcp_router.py
 - ` M` uninstall.py
-- `??` agents/skills/internal-rag/irag_mcp_router.py
-- `??` github/workflows/ci.yml
-- `??` docs/ADR.md
-- `??` docs/MCP-MULTI-PROJECT.md
-- `??` examples/jetbrains.example.json
-- `??` examples/opencode.example.json
-- `??` examples/projects.example.json
-- `??` examples/warp.example.json
-- `??` tests/test_admission_gate.py
-- `??` tests/test_config_merge.py
-- `??` tests/test_fingerprint_cache.py
-- `??` tests/test_fts_prefilter.py
-- `??` tests/test_mcp_router.py
-- `??` tests/test_mcp_sdk_compat.py
-- `??` tests/test_mcp_server.py
+- `??` agents/skills/internal-rag/irag_mcp_protocol.py
+- `??` examples/opencode-legacy.example.json
+- `??` examples/opencode-v2.example.jsonc
+- `??` tests/fixtures/memory_corpus/archive/023-archived-legacy-migration.md
+- `??` tests/fixtures/memory_corpus/decisions/001-use-postgres.md
+- `??` tests/fixtures/memory_corpus/decisions/002-auth-jwt.md
+- `??` tests/fixtures/memory_corpus/decisions/003-redis-cache.md
+- `??` tests/fixtures/memory_corpus/decisions/013-polski-baza-danych.md
+- `??` tests/fixtures/memory_corpus/decisions/017-superseded-rest.md
+- `??` tests/fixtures/memory_corpus/decisions/024-future-feature-flag.md
+- `??` tests/fixtures/memory_corpus/decisions/025-contradicts-redis.md
+- `??` tests/fixtures/memory_corpus/decisions/029-supersede-chain-a.md
+- `??` tests/fixtures/memory_corpus/decisions/030-supersede-chain-b.md
+- `??` tests/fixtures/memory_corpus/decisions/031-supersede-chain-c.md
+- `??` tests/fixtures/memory_corpus/decisions/033-future-not-yet-valid.md
+- `??` tests/fixtures/memory_corpus/failures/015-failed-nosql.md
+- `??` tests/fixtures/memory_corpus/failures/028-failure-then-fix.md
+- `??` tests/fixtures/memory_corpus/gotchas/004-asyncpg-pool.md
+- `??` tests/fixtures/memory_corpus/gotchas/006-migration-rollback.md
+- `??` tests/fixtures/memory_corpus/gotchas/009-pytest-asyncio.md
+- `??` tests/fixtures/memory_corpus/gotchas/014-polski-cache.md
+- `??` tests/fixtures/memory_corpus/gotchas/019-nginx-timeout.md
+- `??` tests/fixtures/memory_corpus/hypotheses/016-hypothesis-graphql.md
+- `??` tests/fixtures/memory_corpus/knowledge/005-refresh-token-cache.md
+- `??` tests/fixtures/memory_corpus/knowledge/007-rate-limiter.md
+- `??` tests/fixtures/memory_corpus/knowledge/008-docker-compose.md
+- `??` tests/fixtures/memory_corpus/knowledge/010-celery-worker.md
+- `??` tests/fixtures/memory_corpus/knowledge/011-webpack-config.md
+- `??` tests/fixtures/memory_corpus/knowledge/012-polski-logowanie.md
+- `??` tests/fixtures/memory_corpus/knowledge/018-eslint-config.md
+- `??` tests/fixtures/memory_corpus/knowledge/020-polski-walidacja.md
+- `??` tests/fixtures/memory_corpus/knowledge/021-distractor-meeting.md
+- `??` tests/fixtures/memory_corpus/knowledge/022-distractor-coffee.md
+- ... 6 more
 
 ## Next actions
 
-1. commit + tag (await user)
-2. optional F(HTTP/SSE)
+1. commit + push + tag v1.6.0
 
 ## Checkpoint health
 
@@ -79,38 +112,60 @@ v1.5.0 complete
 
 ## Recovery snapshot
 
-- Checkpoint reason: H complete: docs+VERSION+CHANGELOG 1.5.0
+- Checkpoint reason: v1.6.0 complete: CEL A-L all done
 - Branch: main
-- HEAD: efb9ac8
+- HEAD: 579b0dd
 - ` M` agents/skills/internal-rag/irag.py
-- ` D` github/workflows/self-test.yml
+- ` M` agents/skills/internal-rag/irag_index.py
+- ` M` agents/skills/internal-rag/irag_mcp_router.py
+- ` M` github/workflows/ci.yml
 - ` M` CHANGELOG.md
 - ` M` README.md
 - ` M` VERSION
-- ` M` docs/CLI.md
+- ` M` docs/ADR.md
 - ` M` docs/COMPATIBILITY.md
-- ` M` docs/CONFIG.md
-- ` M` docs/FILE-MAP.md
 - ` M` docs/MCP.md
+- ` M` examples/jetbrains.example.json
+- ` D` examples/opencode.example.json
+- ` M` examples/warp.example.json
 - ` M` install.py
 - ` M` pack.py
-- ` M` tests/test_lifecycle.py
+- ` M` tests/test_mcp_router.py
 - ` M` uninstall.py
-- `??` agents/skills/internal-rag/irag_mcp_router.py
-- `??` github/workflows/ci.yml
-- `??` docs/ADR.md
-- `??` docs/MCP-MULTI-PROJECT.md
-- `??` examples/jetbrains.example.json
-- `??` examples/opencode.example.json
-- `??` examples/projects.example.json
-- `??` examples/warp.example.json
-- `??` tests/test_admission_gate.py
-- `??` tests/test_config_merge.py
-- `??` tests/test_fingerprint_cache.py
-- `??` tests/test_fts_prefilter.py
-- `??` tests/test_mcp_router.py
-- `??` tests/test_mcp_sdk_compat.py
-- `??` tests/test_mcp_server.py
+- `??` agents/skills/internal-rag/irag_mcp_protocol.py
+- `??` examples/opencode-legacy.example.json
+- `??` examples/opencode-v2.example.jsonc
+- `??` tests/fixtures/memory_corpus/archive/023-archived-legacy-migration.md
+- `??` tests/fixtures/memory_corpus/decisions/001-use-postgres.md
+- `??` tests/fixtures/memory_corpus/decisions/002-auth-jwt.md
+- `??` tests/fixtures/memory_corpus/decisions/003-redis-cache.md
+- `??` tests/fixtures/memory_corpus/decisions/013-polski-baza-danych.md
+- `??` tests/fixtures/memory_corpus/decisions/017-superseded-rest.md
+- `??` tests/fixtures/memory_corpus/decisions/024-future-feature-flag.md
+- `??` tests/fixtures/memory_corpus/decisions/025-contradicts-redis.md
+- `??` tests/fixtures/memory_corpus/decisions/029-supersede-chain-a.md
+- `??` tests/fixtures/memory_corpus/decisions/030-supersede-chain-b.md
+- `??` tests/fixtures/memory_corpus/decisions/031-supersede-chain-c.md
+- `??` tests/fixtures/memory_corpus/decisions/033-future-not-yet-valid.md
+- `??` tests/fixtures/memory_corpus/failures/015-failed-nosql.md
+- `??` tests/fixtures/memory_corpus/failures/028-failure-then-fix.md
+- `??` tests/fixtures/memory_corpus/gotchas/004-asyncpg-pool.md
+- `??` tests/fixtures/memory_corpus/gotchas/006-migration-rollback.md
+- `??` tests/fixtures/memory_corpus/gotchas/009-pytest-asyncio.md
+- `??` tests/fixtures/memory_corpus/gotchas/014-polski-cache.md
+- `??` tests/fixtures/memory_corpus/gotchas/019-nginx-timeout.md
+- `??` tests/fixtures/memory_corpus/hypotheses/016-hypothesis-graphql.md
+- `??` tests/fixtures/memory_corpus/knowledge/005-refresh-token-cache.md
+- `??` tests/fixtures/memory_corpus/knowledge/007-rate-limiter.md
+- `??` tests/fixtures/memory_corpus/knowledge/008-docker-compose.md
+- `??` tests/fixtures/memory_corpus/knowledge/010-celery-worker.md
+- `??` tests/fixtures/memory_corpus/knowledge/011-webpack-config.md
+- `??` tests/fixtures/memory_corpus/knowledge/012-polski-logowanie.md
+- `??` tests/fixtures/memory_corpus/knowledge/018-eslint-config.md
+- `??` tests/fixtures/memory_corpus/knowledge/020-polski-walidacja.md
+- `??` tests/fixtures/memory_corpus/knowledge/021-distractor-meeting.md
+- `??` tests/fixtures/memory_corpus/knowledge/022-distractor-coffee.md
+- ... 6 more
 
 ## Memory to retrieve if needed
 

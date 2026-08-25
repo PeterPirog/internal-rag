@@ -1,4 +1,4 @@
-# Architecture Decision Records (v1.5.0)
+# Architecture Decision Records (v1.6.0)
 
 This project is local, offline-first, persistent project memory for terminal
 coding agents. The following decisions are deliberate. "Memory is evidence,
@@ -120,13 +120,83 @@ optimization. The union guarantees monotonicity; the freshness guard
 **Consequences.** When in doubt (no index, stale, tiny corpus, FTS5 missing),
 the system falls back to the full scan and preserves the exact prior behavior.
 
-## ADR-009 — Consolidation and lifecycle are read-only
+## ADR-010 — Dual-era MCP: legacy + 2026-07-28, no mandatory SDK
 
-**Decision.** `consolidate` and the temporal lifecycle report and recommend;
-they never delete or rewrite memory. Superseding links A→B and preserves A.
+**Decision.** The stdio MCP server supports both legacy protocol versions
+(`2024-11-05`…`2025-11-25`) and the modern `2026-07-28` era
+(`server/discover` without `initialize`, per-request `_meta`, `resultType`,
+`structuredContent`, `outputSchema`, `ttlMs`/`cacheScope`). The `mcp` SDK
+remains test-only.
 
-**Why.** History is a first-class asset. An autonomous cleanup pass is a
-data-loss risk the project will not take.
+**Why.** Existing clients (Claude Code, Cursor) use the legacy lifecycle and
+must not break. Modern clients can skip `initialize` and use `discover`.
+Supporting both in one stdlib-only server is cheap and avoids a migration
+cliff.
 
-**Consequences.** `consolidate --json` emits a `plan` for the agent to
-evaluate; the agent decides. `forget` archives, it does not delete.
+**Consequences.** `irag_mcp_protocol.py` centralizes version negotiation,
+`discover_result`, `tools_list_result`, and `tool_call_result` envelopes so
+the server and router do not duplicate logic. Legacy `initialize` still works
+for modern clients (dual-era). `confidence_kind: "heuristic"` labels
+`retrieval_confidence` honestly until a calibration benchmark exists.
+
+## ADR-011 — Adaptive retrieval is opt-in, benchmark-gated
+
+**Decision.** `retrieval.mode: adaptive` runs sparse first and only invokes
+dense if sparse evidence is weak/ambiguous (explicit heuristics:
+`min_top_score`, `margin`, `min_matched`). It is **not** the default.
+
+**Why.** Dense retrieval costs latency and a model download. On the benchmark
+corpus, adaptive matches sparse quality with no measurable dense invocations
+(embeddings off in CI), so there is no quality regression and no latency win
+to claim yet. Recommending adaptive as default would require a benchmark on
+a real corpus where dense actually fires and shows a quality gain.
+
+**Consequences.** Adaptive stays opt-in until a benchmark proves a quality
+gain or a latency reduction in dense invocations. The heuristics are
+documented and tested in `memory_quality_benchmark.py`.
+
+## ADR-012 — Bounded link-aware context, no graph DB
+
+**Decision.** `context` may expand base results by one hop over existing
+frontmatter links (`links`, `supersedes`, `derived_from`, `superseded_by`)
+with a hard budget (`max_hops=1`, `max_neighbors_per_memory=2`,
+`max_linked_results=3`). Linked results carry provenance
+(`retrieval_reason: linked_from`) and cannot resurrect archived/invalid
+records.
+
+**Why.** Coding memory is graph-shaped (decision → derived knowledge →
+failure → fix), but a graph DB violates ADR-004. A bounded 1-hop expansion
+over frontmatter is cheap, deterministic, and safe.
+
+**Consequences.** `search` is unchanged by default (opt-in only). Cycle
+guard prevents A→B→A. Temporal search respects validity windows on linked
+results too.
+
+## ADR-013 — `consolidate --prepare` is read-only, no LLM
+
+**Decision.** `consolidate --prepare` emits a deterministic JSON segment
+packet (objective, completed, decisions, failures/gotchas, changed files,
+checkpoint metadata) for an already-running agent to decide whether to call
+`remember`. It never writes memories, calls an LLM, or deletes history.
+
+**Why.** Segment-level memory candidates are useful for session handoff, but
+auto-writing memories from a heuristic packet is a data-quality risk and an
+LLM dependency the project will not take.
+
+**Consequences.** The packet is a suggestion, not a memory. The agent is the
+authority on what is durable.
+
+## ADR-014 — Router keeps fresh-subprocess-per-call (no pool yet)
+
+**Decision.** `irag_mcp_router.py` keeps spawning a fresh `irag.py mcp`
+subprocess per `tools/call`. `tests/router_latency_benchmark.py` measures
+the overhead.
+
+**Why.** The benchmark showed ~64ms mean overhead per call (subprocess
+startup + JSON forwarding), below the 100ms threshold that would warrant a
+persistent child pool. A pool would complicate isolation and lifecycle for
+no measured gain.
+
+**Consequences.** If a future benchmark on a larger corpus or slower machine
+shows >100ms overhead, an ADR/proposal for a pool should be written first —
+not implemented inline.

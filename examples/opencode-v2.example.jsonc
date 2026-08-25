@@ -1,0 +1,10 @@
+{
+  "mcp": {
+    "servers": {
+      "internal-rag": {
+        "type": "local",
+        "command": ["python", ".agents/skills/internal-rag/irag.py", "mcp"]
+      }
+    }
+  }
+}
