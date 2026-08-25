@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-1.7.0-blue">
+  <img alt="version" src="https://img.shields.io/badge/version-1.7.1-blue">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-green">
   <img alt="python" src="https://img.shields.io/badge/python-3.8%2B-blue">
   <img alt="deps" src="https://img.shields.io/badge/dependencies-0-success">
@@ -33,7 +33,7 @@
 - **Works with** Warp, OpenCode, Claude Code, Cursor, JetBrains AI Assistant / PyCharm.
 - **Zero-shot setup** — paste one prompt from [`docs/ZERO-SHOT-SETUP-PROMPTS.md`](docs/ZERO-SHOT-SETUP-PROMPTS.md) into your agent and it installs + configures everything automatically.
 
-**Version:** 1.7.0  
+**Version:** 1.7.1  
 **Verified:** 2026-08-25  
 **Integrations:** Warp, OpenCode, MCP (Claude Code / Cursor), JetBrains  
 **Requirements:** Python 3.8+, Git  

@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.7.1 — 2026-08-25
+
+Hotfix for Windows installation issues found in real Warp deployment.
+
+### Fixes
+- **detect_python() — reject WindowsApps stub**: `shutil.which("python")` on Windows can return the Microsoft Store 0-byte stub in `WindowsApps\python*.exe`, which crashes with `ResourceUnavailable` when Warp tries to start the MCP server. The detector now:
+  1. Prefers `py -0p` (Windows py launcher) which lists all installed Pythons with real paths, bypassing PATH entirely.
+  2. Verifies each `shutil.which()` candidate by running `--version` and rejecting the WindowsApps stub via realpath check.
+  3. Falls back to `sys.executable` (the running interpreter, always real).
+- **Post-register verification**: after writing the client config, `install.py` immediately runs the registered interpreter with `--version` and reports `PASS` / `FAIL`. Catches a broken Python path in 1 second instead of a silent MCP failure in Warp.
+- **unregister cleanup**: `--unregister` now deletes the config file if it becomes empty after removing the server (and removes the empty parent dir, e.g. `.warp/`). Fixes the dead `.warp/.mcp.json` skeleton that triggered `GUARD STALE`.
+- Version bumped to **1.7.1** across `VERSION`, `irag.py`, `irag_mcp_router.py`, `install.py`, `README.md`.
+
 ## 1.7.0 — 2026-08-25
 
 Total rebrand from `internal-rag` to **MCP Light Memory** (`mcp-light-memory`). Backward-compatible; no data migration required.

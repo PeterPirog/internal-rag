@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-VERSION = "1.7.0"
+VERSION = "1.7.1"
 PRODUCT_NAME = "MCP Light Memory"
 PRODUCT_SLUG = "mcp-light-memory"
 LEGACY_NAME = "internal-rag"  # deprecated; kept for compatibility
@@ -241,18 +241,73 @@ def copy_update_files(target: Path, backup_root: Path):
             print(f'Removed legacy file: {rel}')
 
 
+def _is_windowsapps_stub(path: Path) -> bool:
+    """True if `path` points to the Microsoft Store Python stub in WindowsApps.
+
+    The stub is a 0-byte placeholder that launches the Store when executed.
+    Running it as a subprocess raises ResourceUnavailable / crashes silently.
+    """
+    try:
+        real = str(path.resolve()).lower()
+        return "windowsapps" in real and "python" in real
+    except Exception:
+        return False
+
+
+def _verify_python(cand: str) -> bool:
+    """Return True if `cand` is a real Python interpreter that prints a version.
+
+    Rejects the WindowsApps stub and any candidate that fails to run.
+    """
+    if _is_windowsapps_stub(Path(cand)):
+        return False
+    try:
+        r = subprocess.run([cand, "--version"],
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           timeout=10)
+        return r.returncode == 0 and b"Python" in r.stdout + r.stderr
+    except Exception:
+        return False
+
+
 def detect_python() -> str:
     """Detect the best available Python interpreter as an absolute path.
 
-    Order: sys.executable (current) -> python -> py -> python3.
+    Strategy:
+      1. Prefer `py -0p` (Windows py launcher) which lists all installed
+         Pythons with real paths, bypassing PATH entirely.
+      2. Try shutil.which() for python, python3, py — but VERIFY each
+         candidate by running `--version` and rejecting the WindowsApps stub.
+      3. Fall back to sys.executable (the running interpreter).
+
     Returns an absolute path string suitable for MCP client configs.
     """
-    candidates = [shutil.which("python"), shutil.which("py"),
-                 shutil.which("python3")]
-    for c in candidates:
-        if c:
+    # 1. py launcher: list installed Pythons with real paths
+    py_exe = shutil.which("py")
+    if py_exe and _verify_python(py_exe):
+        try:
+            r = subprocess.run([py_exe, "-0p"],
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               timeout=10)
+            if r.returncode == 0:
+                for line in (r.stdout + r.stderr).decode("utf-8", "replace").splitlines():
+                    line = line.strip()
+                    if not line or line.startswith("-"):
+                        continue
+                    # py -0p prints lines like: " -V:3.12 *        C:\path\python.exe"
+                    parts = line.split()
+                    for p in reversed(parts):
+                        if _verify_python(p):
+                            return str(Path(p).resolve())
+        except Exception:
+            pass
+    # 2. shutil.which with verification
+    for name in ("python", "python3", "py"):
+        c = shutil.which(name)
+        if c and _verify_python(c):
             return str(Path(c).resolve())
-    return sys.executable  # fallback to the running interpreter
+    # 3. fallback: the running interpreter (always real)
+    return sys.executable
 
 
 def client_config_path(client: str, project: Path, global_cfg: bool) -> Path:
@@ -315,12 +370,41 @@ def register_client(client: str, project: Path, global_cfg: bool,
     cfg_path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n",
                         encoding="utf-8")
     print(f"Registered MCP server '{server_name}' in {cfg_path}")
+    _verify_registered_server(server_entry, client)
     return cfg_path
+
+
+def _verify_registered_server(server_entry: dict, client: str):
+    """Run the registered command's interpreter with --version to confirm it works."""
+    if client == "opencode":
+        cmd_list = server_entry.get("command", [])
+    else:
+        cmd_list = [server_entry.get("command", "")] + server_entry.get("args", [])
+    if not cmd_list or not cmd_list[0]:
+        return
+    py = cmd_list[0]
+    try:
+        r = subprocess.run([py, "--version"],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            timeout=10)
+        if r.returncode == 0:
+            ver = (r.stdout + r.stderr).decode("utf-8", "replace").strip()
+            print(f"  Python verification: PASS ({ver} at {py})")
+        else:
+            print(f"  Python verification: FAIL (exit {r.returncode} for {py})")
+            print(f"  The MCP server may not start. Check the Python path in the config.")
+    except Exception as e:
+        print(f"  Python verification: FAIL ({e} for {py})")
+        print(f"  The MCP server may not start. Check the Python path in the config.")
 
 
 def unregister_client(client: str, project: Path, global_cfg: bool,
                       server_name: str):
-    """Remove the MCP server from the client's config file (if present)."""
+    """Remove the MCP server from the client's config file (if present).
+
+    If the config becomes empty after removal, delete the file (and its parent
+    dir if also empty) to avoid leaving dead skeletons that trigger GUARD STALE.
+    """
     cfg_path = client_config_path(client, project, global_cfg)
     if not cfg_path.exists():
         print(f"No config at {cfg_path} — nothing to unregister.")
@@ -336,9 +420,26 @@ def unregister_client(client: str, project: Path, global_cfg: bool,
         servers = data.get("mcpServers", {})
     if server_name in servers:
         del servers[server_name]
-        cfg_path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n",
-                            encoding="utf-8")
-        print(f"Unregistered MCP server '{server_name}' from {cfg_path}")
+        is_empty = False
+        if client == "opencode":
+            mcp_servers = data.get("mcp", {}).get("servers", {})
+            is_empty = len(mcp_servers) == 0 and len(data.get("mcp", {})) <= 1
+        else:
+            is_empty = len(data.get("mcpServers", {})) == 0 and len(data) <= 1
+        if is_empty:
+            cfg_path.unlink(missing_ok=True)
+            print(f"Unregistered MCP server '{server_name}' and removed empty config {cfg_path}")
+            parent = cfg_path.parent
+            try:
+                if parent != project and parent != Path.home() and not any(parent.iterdir()):
+                    parent.rmdir()
+                    print(f"Removed empty directory {parent}")
+            except OSError:
+                pass
+        else:
+            cfg_path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n",
+                                encoding="utf-8")
+            print(f"Unregistered MCP server '{server_name}' from {cfg_path}")
     else:
         print(f"Server '{server_name}' not found in {cfg_path} — nothing to unregister.")
 
