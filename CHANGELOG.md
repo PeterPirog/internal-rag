@@ -1,5 +1,49 @@
 # Changelog
 
+## 1.5.0 — 2026-08-25
+
+Retrieval correctness, abstention, FTS5 acceleration, multi-project MCP, and CI.
+
+### Relevance / abstention gate (B)
+- Retrieval now separates **raw evidence** from policy ranking. A relevance/admission gate runs before any policy boost: policy can only rank admitted candidates, never rescue an irrelevant one.
+- `search --json --meta` wraps results with `abstained`, `retrieval_confidence` (calibrated 0–1, not a probability), `reason`, `admitted`, `rejected`, `rejected_detail`. Plain `--json` is unchanged (bare list) for backward compatibility.
+- `search_with_meta()` returns `(results, meta)`; per-candidate `explain` carries `admission` / `admission_reason`.
+- Config: `retrieval.abstention.{enabled, require_sparse_match, min_dense_score}`.
+- Tests: `tests/test_admission_gate.py` (per-mode gate decisions + abstention metadata).
+
+### FTS5 candidate prefilter (C)
+- Optional accelerator: FTS5 top-n **∪** Python BM25 top-k narrows the scoring pool without changing the ranking and never drops a hit the full scan returns.
+- Automatic fallback to the full scan when the index is missing/stale (any memory newer than the index), FTS5 is unavailable, the corpus is below `min_corpus_size`, or FTS5 matches nothing.
+- Config: `retrieval.fts_prefilter.{enabled, min_corpus_size}`.
+- Tests: `tests/test_fts_prefilter.py` (parity enabled/disabled, stale-index fallback, tiny-corpus skip, no-index fallback).
+
+### Multi-project MCP router (E)
+- New `irag_mcp_router.py`: one MCP stdio server in front of many projects.
+- Registry JSON allowlist (`projects.<id>.{root, write}`); only registered ids are routable.
+- `write:false` blocks mutating tools (`remember`, `checkpoint`, `resume`) before any subprocess is spawned.
+- Isolation: every call runs in a fresh `irag.py mcp` subprocess with `cwd=<project root>` — no cross-project state.
+- `projects` tool reports id / root / write / availability. See `docs/MCP-MULTI-PROJECT.md` and `examples/projects.example.json`.
+- Tests: `tests/test_mcp_router.py` (registry, unknown-project rejection, read-only enforcement, cross-project isolation, protocol/stdout purity).
+
+### MCP protocol hardening (D)
+- Pure-stdout JSON-RPC 2.0 (protocol only on stdout; logs on stderr).
+- `initialize` version negotiation: `2025-11-25` / `2025-06-18` / `2025-03-26` / `2024-11-05` (client's version when supported, else latest); `ping`, deterministic `tools/list`; legacy `notifications/initialized` / `shutdown` still handled.
+- Verified against the official `mcp` Python SDK client (`mcp>=2,<3`) — `tests/test_mcp_sdk_compat.py` (skipped when the optional SDK is absent).
+- `tests/test_mcp_server.py`: protocol, stdout purity, unknown-tool and parse-error handling, read-only `search`.
+
+### Config correctness (A1–A2)
+- Fingerprint cache correctness: the tracked working-tree/index diff is **always** hashed fresh — a cached fingerprint never hides an uncommitted tracked change. Only the untracked-file digest is cached. Tests: `tests/test_fingerprint_cache.py`.
+- Recursive `deep_merge` (overriding one leaf never drops sibling defaults) + deeper YAML-subset parser (block lists). Tests: `tests/test_config_merge.py`.
+- `config --validate` covers `abstention` + `fts_prefilter`.
+
+### CI (G)
+- `.github/workflows/ci.yml` (replaces `self-test.yml`): tests matrix — Ubuntu py3.8 / py3.12, Windows py3.12 — compile gate, `self_test.py`, full `unittest` suite, retrieval benchmarks.
+- Separate `mcp-compat` job: official `mcp` SDK in its own venv, running the SDK-handshake and protocol suites.
+
+### Docs
+- `docs/MCP-MULTI-PROJECT.md`, `docs/ADR.md`, README "What's new in 1.5.0", `docs/CONFIG.md` (abstention + FTS5), `docs/CLI.md` (`--meta`), `docs/COMPATIBILITY.md` (MCP SDK).
+- Version bumped to **1.5.0** across `VERSION`, `irag.py`, `install.py`, `uninstall.py`, `pack.py`.
+
 ## 1.4.0 — 2026-08-24
 
 Section-aware chunking, read-only search, SimHash dedup, multilingual profiles, temporal metadata.

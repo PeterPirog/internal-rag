@@ -25,10 +25,15 @@ Sources:
 - https://opencode.ai/docs/custom-tools/
 - https://opencode.ai/docs/plugins/
 
-## MCP (Claude Code, Cursor)
+## MCP (Claude Code, Cursor, official `mcp` SDK)
 
-- `irag.py mcp` — minimal JSON-RPC stdio server.
-- Compatible with MCP spec 2024-11-05 (subset).
+- `irag.py mcp` — minimal JSON-RPC 2.0 stdio server (newline-delimited).
+- Negotiates protocol versions `2025-11-25` / `2025-06-18` / `2025-03-26` /
+  `2024-11-05` (returns the client's version when supported, else the latest).
+- `irag_mcp_router.py` — multi-project router (registry allowlist,
+  `write=false`, per-project subprocess isolation, `projects` tool).
+- Verified against the official `mcp` Python SDK client (`mcp>=2,<3`) via
+  `tests/test_mcp_sdk_compat.py` (skipped when the optional SDK is absent).
 
 Source:
 - https://modelcontextprotocol.io/

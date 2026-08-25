@@ -22,11 +22,18 @@ retrieval:
    embeddings_model: null     # explicit model path/name overrides the profile (no prefix)
    query_expansion: true      # English synonym expansion (compat layer; set false to disable)
    pl_stopwords: true         # small PL function-word list on the sparse channel (benchmark-justified)
-   chunking:                  # section-aware chunking (v1.4.0)
-     enabled: true
-     threshold_chars: 2000    # memories shorter than this become a single chunk
-     target_chars: 1200       # target chunk size for overlong sections
-     overlap_chars: 120       # overlap between split pieces
+    chunking:                  # section-aware chunking (v1.4.0)
+      enabled: true
+      threshold_chars: 2000    # memories shorter than this become a single chunk
+      target_chars: 1200       # target chunk size for overlong sections
+      overlap_chars: 120       # overlap between split pieces
+    abstention:                # relevance/admission gate (v1.5.0)
+      enabled: true
+      require_sparse_match: true   # sparse results must evidence a token match
+      min_dense_score: null        # per-profile calibrated threshold (null = accept dense as-is)
+    fts_prefilter:             # FTS5 candidate prefilter (v1.5.0)
+      enabled: true
+      min_corpus_size: 50      # skip prefilter overhead on tiny corpora
 tokens:
   context_budget: 4000       # estimated token budget in context
   warn_ratio: 0.8            # warning threshold (in JSON output)
@@ -65,6 +72,37 @@ usage:
 `retrieval.embeddings` (old config) remains compatible:
 - `embeddings: off` → behaves as `mode: sparse`.
 - `embeddings: on|auto` → behaves as `mode: hybrid` (dense attempted, fallback to sparse).
+
+## Abstention gate (new in 1.5.0)
+
+The relevance/admission gate runs on RAW retrieval evidence, before any
+policy boost. It decides whether a candidate is allowed into the ranked set —
+policy can only rank admitted candidates, never rescue an irrelevant one.
+
+- `enabled` — master switch for the gate.
+- `require_sparse_match` — in `sparse`/`hybrid` modes a candidate must
+  evidence at least one sparse-matched token actually present in the document.
+- `min_dense_score` — optional calibrated threshold for dense evidence
+  (`0.0-1.0`); `null` accepts dense evidence as-is (conservative default).
+
+When every candidate is rejected, `search --json --meta` reports
+`"abstained": true` with a human-readable `reason` (see "Abstention JSON" in
+`docs/CLI.md`).
+
+## FTS5 candidate prefilter (new in 1.5.0)
+
+Optional accelerator for the sparse channel. When enabled and the corpus is
+large enough, FTS5 provides a top-n candidate set which is unioned with the
+Python BM25 top-k before scoring. It narrows the scoring pool — it never
+changes the ranking and never drops a hit the full scan would return.
+
+- `enabled` — master switch.
+- `min_corpus_size` — prefilter is skipped below this corpus size
+  (avoiding overhead on tiny corpora).
+
+Automatic fallback to the full Python scan happens when: the index is
+missing or stale (any memory file newer than the index), FTS5 is unavailable,
+or the query yields no FTS5 matches.
 
 ## RRF parameters
 

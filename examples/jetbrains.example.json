@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "internal-rag-router": {
+      "command": "python",
+      "args": [
+        "C:/path/to/internal-rag/.agents/skills/internal-rag/irag_mcp_router.py",
+        "--registry",
+        "C:/path/to/internal-rag/examples/projects.example.json"
+      ]
+    }
+  },
+  "notes": "JetBrains IDEs with an MCP-capable plugin (e.g. the MCP plugin for JetBrains IDEs) use the standard mcpServers shape. Provide ABSOLUTE paths. For a single project use irag.py mcp instead."
+}

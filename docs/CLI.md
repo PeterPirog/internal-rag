@@ -25,8 +25,24 @@ Persist the current operational state. Saves a fingerprint. Auto-archives a sess
 ### `guard`
 Verify no project-code changes are missing from the last checkpoint. Exit code 0 = `GUARD OK`, 2 = `GUARD STALE`.
 
-### `search --query "<q>" [--limit N] [--json] [--explain] [--embeddings on|off|auto] [--type T1 T2 ...] [--status S1 S2 ...] [--at YYYY-MM-DD]`
+### `search --query "<q>" [--limit N] [--json] [--explain] [--meta] [--embeddings on|off|auto] [--type T1 T2 ...] [--status S1 S2 ...] [--at YYYY-MM-DD]`
 Search durable memories via hybrid retrieval (BM25 + optional dense → RRF → MMR). `--json` returns `path`, `score`, `type`, `status`, `snippet`, `matched_tokens` and, when a result is superseded/invalid/archived, a read-only `history` block (`superseded_by`, `valid_from`, `valid_to`, `why`, `recommendation`, optional `conflict_with`). `--explain` adds per-channel breakdown: `sparse_score`, `sparse_rank`, `dense_score`, `dense_rank`, `rrf_score`, `policy_boost`, `final_score`, `retrieval_mode`. `--type` filters by memory type(s). `--status` filters by status(es). Query is auto-expanded with synonyms.
+
+`--meta` (new in 1.5.0) wraps `--json` output with abstention metadata. The bare list output of plain `--json` is unchanged (backward compatible):
+
+```json
+{
+  "abstained": false,
+  "retrieval_confidence": 0.4,
+  "reason": "3 candidate(s) passed the relevance gate (1 rejected)",
+  "admitted": 3,
+  "rejected": 1,
+  "rejected_detail": [{"memory_id": "mem-x", "reason": "sparse_no_token_match"}],
+  "results": [ /* same items as plain --json */ ]
+}
+```
+
+`abstained` is `true` when no candidate passed the relevance/admission gate; `retrieval_confidence` is a calibrated `0.0-1.0` evidence strength (not a probability), and `reason` is a human-readable explanation. This lets agents detect "no usable answer" instead of trusting a low-relevance hit.
 
 `--at YYYY-MM-DD` (temporal) filters to memories whose validity window covers that date: `valid_from` (or `created`) ≤ date ≤ `valid_to` (if present). Superseded memories whose window covered that date remain retrievable for historical queries; active memories whose window has not started yet are excluded. Unknown/malformed dates are ignored (no error).
 

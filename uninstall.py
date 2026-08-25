@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse, datetime as dt, shutil, subprocess
 from pathlib import Path
 
-VERSION='1.4.0'
+VERSION='1.5.0'
 AGENTS_START='<!-- INTERNAL_RAG_START -->'; AGENTS_END='<!-- INTERNAL_RAG_END -->'
 EXCLUDE_START='# >>> INTERNAL_RAG LOCAL-ONLY >>>'; EXCLUDE_END='# <<< INTERNAL_RAG LOCAL-ONLY <<<'
 MANAGED_PATHS=[

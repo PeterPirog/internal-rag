@@ -1,0 +1,79 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: tests (${{ matrix.os }} / py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python: "3.8"
+          - os: ubuntu-latest
+            python: "3.12"
+          - os: windows-latest
+            python: "3.12"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Configure Git
+        run: git config --global init.defaultBranch main
+
+      - name: Compile all sources (syntax gate)
+        shell: bash
+        run: |
+          python -m compileall -q \
+            self_test.py install.py uninstall.py privacy_check.py \
+            .agents/skills/internal-rag/irag.py \
+            .agents/skills/internal-rag/irag_index.py \
+            .agents/skills/internal-rag/irag_mcp_router.py \
+            .agents/skills/internal-rag/irag_embeddings.py \
+            tests
+
+      - name: Self test (install/guard/retrieval/SQLite/privacy)
+        run: python self_test.py
+
+      - name: Unit + regression suite
+        run: python -m unittest discover -s tests -v
+
+      - name: Retrieval benchmarks (regression canaries)
+        run: |
+          python tests/retrieval_benchmark.py
+          python tests/multilingual_benchmark.py
+
+  mcp-compat:
+    name: MCP SDK compatibility (official client, py3.12)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Configure Git
+        run: git config --global init.defaultBranch main
+
+      - name: Create venv with official mcp SDK
+        run: |
+          python -m venv .venv-mcp
+          .venv-mcp/bin/pip install --quiet --disable-pip-version-check "mcp>=2,<3"
+
+      - name: MCP SDK handshake (single-project + router)
+        run: .venv-mcp/bin/python -m unittest tests.test_mcp_sdk_compat -v
+
+      - name: MCP stdio server protocol suite
+        run: .venv-mcp/bin/python -m unittest tests.test_mcp_server tests.test_mcp_router -v

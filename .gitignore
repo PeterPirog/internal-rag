@@ -13,6 +13,7 @@ Thumbs.db
 INTERNAL_RAG/.checkpoint.json
 INTERNAL_RAG/.tasks.json
 INTERNAL_RAG/.fpcache.json
+INTERNAL_RAG/.history.jsonl
 INTERNAL_RAG/.index.sqlite3
 INTERNAL_RAG/.index.sqlite3-wal
 INTERNAL_RAG/.index.sqlite3-shm

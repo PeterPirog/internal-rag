@@ -13,6 +13,7 @@ Subcommands:
 from __future__ import annotations
 import argparse
 import datetime as dt
+import io
 import hashlib
 import json
 import math
@@ -25,7 +26,7 @@ import unicodedata
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-VERSION = "1.4.0"
+VERSION = "1.5.0"
 
 ALLOWED_TYPES = {"decision", "knowledge", "constraint", "gotcha", "failure", "hypothesis", "session"}
 ALLOWED_STATUS = {"active", "tentative", "superseded", "invalid", "archived"}
@@ -57,6 +58,15 @@ DEFAULT_CONFIG = {
             "threshold_chars": 2000,
             "target_chars": 1200,
             "overlap_chars": 120,
+        },
+        "abstention": {
+            "enabled": True,
+            "require_sparse_match": True,
+            "min_dense_score": None,
+        },
+        "fts_prefilter": {
+            "enabled": True,
+            "min_corpus_size": 50,
         },
     },
     "tokens": {"context_budget": 4000, "warn_ratio": 0.8},
@@ -133,48 +143,90 @@ def load_config() -> Dict[str, Any]:
             cfg = parse_yaml_simple(CONFIG_PATH.read_text(encoding="utf-8", errors="replace"))
         except Exception:
             cfg = {}
-    merged = json.loads(json.dumps(DEFAULT_CONFIG))
-    for k, v in cfg.items():
-        if isinstance(v, dict) and isinstance(merged.get(k), dict):
-            merged[k].update(v)
+    return deep_merge(json.loads(json.dumps(DEFAULT_CONFIG)), cfg)
+
+
+def deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    """Recursive merge: override wins per leaf; nested dicts merge;
+    a user override of one leaf never removes sibling defaults."""
+    for k, v in override.items():
+        if isinstance(v, dict) and isinstance(base.get(k), dict):
+            deep_merge(base[k], v)
         else:
-            merged[k] = v
-    return merged
+            base[k] = v
+    return base
 
 
 def parse_yaml_simple(text: str) -> Dict[str, Any]:
-    """Tiny YAML subset: top-level key: value and nested key: value under 2-space indent.
-    Lists not supported in config (keep simple). Falls back to JSON if YAML parse empty."""
-    out: Dict[str, Any] = {}
-    cur: Optional[str] = None
-    for line in text.splitlines():
-        s = line.rstrip()
-        if not s or s.lstrip().startswith("#"):
+    """Tiny YAML subset parser (no PyYAML dependency).
+
+    Supports:
+    - nested mappings to arbitrary depth via 2-space indentation
+    - scalars: int, float, bool, null, quoted/unquoted strings
+    - inline lists:  key: [a, b]   and   key: a, b
+    - block lists:   key:\n  - a\n  - b
+    - comments (#) and blank lines
+
+    Not supported (by design, to stay simple): multi-line strings, anchors,
+    flow mappings, tags. Falls back to JSON if the result is empty.
+    """
+    root: Dict[str, Any] = {}
+    # stack of (indent, container) — root is indent -1
+    stack: List[Tuple[int, Any]] = [(-1, root)]
+    pending_key: Optional[Tuple[int, Dict[str, Any], str]] = None  # (indent, dict, key) awaiting list items
+
+    for raw in text.splitlines():
+        if not raw.strip() or raw.strip().startswith("#"):
             continue
-        indent = len(line) - len(line.lstrip())
-        m = re.match(r"^([A-Za-z0-9_\-]+):\s*(.*)$", s.strip())
+        indent = len(raw) - len(raw.lstrip(" "))
+        s = raw.strip()
+
+        # Block list item
+        if s.startswith("- "):
+            item = s[2:].strip()
+            if pending_key is not None:
+                p_indent, p_dict, p_key = pending_key
+                if indent > p_indent and isinstance(p_dict, dict):
+                    val = coerce_scalar(item)
+                    cur = p_dict[p_key]
+                    if not isinstance(cur, list):
+                        cur = [cur] if cur else []
+                        p_dict[p_key] = cur
+                    cur.append(val)
+                    continue
+            # list item without a pending key: ignore (unsupported structure)
+            continue
+
+        m = re.match(r"^([A-Za-z0-9_\-]+):\s*(.*)$", s)
         if not m:
             continue
         k, v = m.group(1), m.group(2).strip()
-        if indent == 0:
-            if v == "":
-                out[k] = {}
-                cur = k
-            else:
-                out[k] = coerce_scalar(v)
-                cur = None
+
+        # find parent container: nearest stack entry with indent < current
+        while len(stack) > 1 and stack[-1][0] >= indent:
+            stack.pop()
+        parent = stack[-1][1] if isinstance(stack[-1][1], dict) else root
+        pending_key = None
+
+        if v == "":
+            # empty value: could be a nested dict or a block list
+            child: Dict[str, Any] = {}
+            parent[k] = child
+            stack.append((indent, child))
+            pending_key = (indent, parent, k)
         else:
-            if cur is None:
-                continue
-            if not isinstance(out.get(cur), dict):
-                out[cur] = {}
-            out[cur][k] = coerce_scalar(v)
-    if not out:
+            if v.startswith("[") and v.endswith("]"):
+                inner = v[1:-1].strip()
+                items = [x.strip() for x in inner.split(",")] if inner else []
+                parent[k] = [coerce_scalar(x) for x in items if x]
+            else:
+                parent[k] = coerce_scalar(v)
+    if not root:
         try:
             return json.loads(text)
         except Exception:
             return {}
-    return out
+    return root
 
 
 def coerce_scalar(v: str) -> Any:
@@ -226,45 +278,68 @@ def untracked_files() -> List[str]:
 
 
 def project_fingerprint(use_cache: bool = True) -> str:
+    """Project state fingerprint.
+
+    Correctness model (guard and context share it):
+    - tracked working-tree diff (worktree + index) is ALWAYS hashed fresh;
+      a cached fingerprint must never hide an uncommitted tracked change.
+    - The expensive part — hashing untracked file CONTENTS — may be cached,
+      keyed by (HEAD, per-file rel+size+mtime), so unchanged untracked
+      corpora avoid re-reading.
+
+    The fingerprint is `sha256(HEAD + tracked_diff + untracked_digest)`
+    where untracked_digest is itself a sha256 over untracked rel paths +
+    contents (or a cached equivalent digest).
+    """
     head = git_text("rev-parse", "HEAD")
-    key = f"head={head}"
+    h = hashlib.sha256()
+    h.update(head.encode("utf-8"))
+    tracked_diff_hash(h, False)
+    tracked_diff_hash(h, True)
+    untracked = sorted(untracked_files())
+    # Cache key for the untracked digest: identity + size + mtime of every
+    # untracked file. Content of tracked files is intentionally NOT cached.
+    ukey = json.dumps([[rel, _safe_size(ROOT / rel), _safe_mtime(ROOT / rel)] for rel in untracked])
+    uhash: Optional[str] = None
     if use_cache and FP_CACHE.exists():
         try:
             cache = json.loads(FP_CACHE.read_text(encoding="utf-8"))
-            if cache.get("key") == key:
-                cur_mtime = max((_safe_mtime(ROOT / f) for f in untracked_files()), default=0)
-                if cache.get("untracked_mtime", 0) >= cur_mtime:
-                    return cache["fingerprint"]
+            if cache.get("ukey") == ukey:
+                uhash = cache.get("untracked_hash")
         except Exception:
-            pass
-    h = hashlib.sha256()
-    h.update(head.encode())
-    tracked_diff_hash(h, False)
-    tracked_diff_hash(h, True)
-    untracked = untracked_files()
-    for rel in sorted(untracked):
-        h.update(rel.encode())
-        p = ROOT / rel
-        try:
-            if p.is_file():
-                with p.open("rb") as f:
-                    while True:
-                        c = f.read(1024 * 1024)
-                        if not c:
-                            break
-                        h.update(c)
-        except Exception:
-            h.update(b"ERR")
-    fp = h.hexdigest()
+            uhash = None
+    if uhash is None:
+        uh = hashlib.sha256()
+        for rel in untracked:
+            uh.update(rel.encode())
+            p = ROOT / rel
+            try:
+                if p.is_file():
+                    with p.open("rb") as f:
+                        while True:
+                            c = f.read(1024 * 1024)
+                            if not c:
+                                break
+                            uh.update(c)
+            except Exception:
+                uh.update(b"ERR")
+        uhash = uh.hexdigest()
+        if use_cache:
+            try:
+                FP_CACHE.write_text(json.dumps({
+                    "ukey": ukey, "untracked_hash": uhash, "at": now(),
+                }, indent=2), encoding="utf-8")
+            except Exception:
+                pass
+    h.update(uhash.encode())
+    return h.hexdigest()
+
+
+def _safe_size(p: Path) -> int:
     try:
-        FP_CACHE.write_text(json.dumps({
-            "key": key, "fingerprint": fp,
-            "untracked_mtime": max((_safe_mtime(ROOT / f) for f in untracked), default=0),
-            "at": now(),
-        }, indent=2), encoding="utf-8")
+        return p.stat().st_size
     except Exception:
-        pass
-    return fp
+        return -1
 
 
 def _safe_mtime(p: Path) -> float:
@@ -1117,24 +1192,10 @@ def _dense_search_raw(query: str, candidates: List[Tuple[Path, str, Dict[str, An
 
 
 def _dense_similarity_matrix(candidate_indices: List[int],
-                              candidates: List[Tuple[Path, str, Dict[str, Any]]],
-                              cfg: Dict[str, Any]) -> Optional[Any]:
+                               candidates: List[Tuple[Path, str, Dict[str, Any]]],
+                               cfg: Dict[str, Any]) -> Optional[Any]:
     """Compute pairwise cosine similarity matrix for MMR diversity.
     Returns numpy matrix [n x n] or None if embeddings unavailable."""
-    try:
-        mod = _load_embeddings_module()
-        if mod is None:
-            return None
-        return mod.dense_similarity_matrix(candidate_indices, candidates, cfg, ROOT)
-    except Exception:
-        return None
-
-
-def _dense_similarity_matrix(candidate_indices: List[int],
-                              candidates: List[Tuple[Path, str, Dict[str, Any]]],
-                              cfg: Dict[str, Any]) -> Optional[Any]:
-    """Compute pairwise cosine similarity matrix for MMR diversity.
-    Returns numpy matrix or None."""
     try:
         mod = _load_embeddings_module()
         if mod is None:
@@ -1158,9 +1219,9 @@ def rrf_fusion(sparse_ranked: List[Tuple[float, int, List[str]]],
 
     Returns list of (fused_score, candidate_idx, explain_dict) sorted by fused_score desc.
     """
-    sparse_map: Dict[int, Tuple[int, float]] = {}  # idx -> (rank, score)
+    sparse_map: Dict[int, Tuple[int, float, List[str]]] = {}  # idx -> (rank, score, matched)
     for rank, (score, idx, matched) in enumerate(sparse_ranked):
-        sparse_map[idx] = (rank, score)
+        sparse_map[idx] = (rank, score, matched)
 
     dense_map: Dict[int, Tuple[int, float]] = {}
     if dense_ranked:
@@ -1175,10 +1236,12 @@ def rrf_fusion(sparse_ranked: List[Tuple[float, int, List[str]]],
         sparse_score = None
         dense_rank = None
         dense_score = None
+        sparse_matched: Optional[List[str]] = None
         if idx in sparse_map:
-            sr, ss = sparse_map[idx]
+            sr, ss, sm = sparse_map[idx]
             sparse_rank = sr
             sparse_score = ss
+            sparse_matched = [str(x) for x in (sm or [])][:24]
             rrf_score += sparse_weight / (rrf_k + sr)
         if idx in dense_map:
             dr, ds = dense_map[idx]
@@ -1188,6 +1251,7 @@ def rrf_fusion(sparse_ranked: List[Tuple[float, int, List[str]]],
         explain = {
             "sparse_score": round(sparse_score, 4) if sparse_score is not None else None,
             "sparse_rank": sparse_rank,
+            "sparse_matched": sparse_matched,
             "dense_score": round(dense_score, 4) if dense_score is not None else None,
             "dense_rank": dense_rank,
             "rrf_score": round(rrf_score, 6),
@@ -1244,13 +1308,18 @@ def _policy_boost(fm: Dict[str, Any], at_date: Optional[str] = None) -> float:
 
 
 def _mmr_post_fusion(fused: List[Tuple[float, int, Dict[str, Any]]],
-                     candidates: List[Tuple[Path, str, Dict[str, Any]]],
-                     docs_tok: List[List[str]],
-                     cfg: Dict[str, Any],
-                     limit: int
-                     ) -> List[Tuple[float, int, Dict[str, Any]]]:
-    """MMR reranking after fusion. Uses dense cosine similarity for diversity
-    if embeddings available, otherwise token-Jaccard fallback."""
+                      candidates: List[Tuple[Path, str, Dict[str, Any]]],
+                      docs_tok: List[List[str]],
+                      cfg: Dict[str, Any],
+                      limit: int
+                      ) -> List[Tuple[float, int, Dict[str, Any]]]:
+    """[LEGACY] MMR reranking after fusion (memory-level, pre-chunking pipeline).
+
+    The live pipeline is chunk-level and uses the MMR inside
+    `_merge_chunks_by_memory` (parent-level, dense-cosine or Jaccard diversity).
+    Kept only for backward compatibility with external callers; do not rely on
+    this in new code.
+    """
     if not fused:
         return []
     if len(fused) <= limit:
@@ -1328,13 +1397,33 @@ def _mark_accessed(paths: List[Path]) -> None:
             pass
 
 
+def search_with_meta(query: str, limit: int = 8, types: Optional[List[str]] = None,
+            statuses: Optional[List[str]] = None,
+            explain: bool = False,
+            at_date: Optional[str] = None
+            ) -> Tuple[List[Tuple[float, Path, Dict[str, Any], str]], Dict[str, Any]]:
+    """Search + abstention metadata (B). New API: returns (results, meta)."""
+    cfg = load_config()
+    results = _search_with_cfg(query, limit, cfg, types, statuses,
+                               explain=explain, at_date=at_date)
+    meta = cfg.get("_abstention_meta") or {
+        "abstained": not results, "retrieval_confidence": 0.0,
+        "reason": "no results" if not results else "ok",
+        "admitted": len(results), "rejected": 0,
+    }
+    return results, meta
+
+
 def search(query: str, limit: int = 8, types: Optional[List[str]] = None,
             statuses: Optional[List[str]] = None,
             explain: bool = False,
             at_date: Optional[str] = None
             ) -> List[Tuple[float, Path, Dict[str, Any], str]]:
-    return _search_with_cfg(query, limit, load_config(), types, statuses,
-                            explain=explain, at_date=at_date)
+    """Backward-compatible search (results only). Use search_with_meta for
+    the abstention/confidence metadata."""
+    results, _meta = search_with_meta(query, limit, types=types, statuses=statuses,
+                                      explain=explain, at_date=at_date)
+    return results
 
 
 def _load_chunks_for_candidates(
@@ -1395,30 +1484,52 @@ def _merge_chunks_by_memory(
     cfg: Dict[str, Any],
     docs_tok: List[List[str]],
     explain: bool,
-) -> List[Tuple[float, Path, Dict[str, Any], str]]:
+) -> Tuple[List[Tuple[float, Path, Dict[str, Any], str]], Dict[str, Any]]:
     """Merge chunk-level results to parent-memory level.
     - Group by memory_id (cand_idx)
-    - Parent score = best chunk score (max)
-    - Snippet from best chunk
+    - Parent evidence = best chunk evidence (max)
+    - B: relevance/admission gate BEFORE policy boost (policy can only rank
+      admitted candidates, never rescue an irrelevant one)
+    - Policy boost ranks admitted candidates
     - Dedup: each memory appears at most once in top-k
-    - MMR on parent memories
+    - MMR on parent memories (dense cosine if available, else token-Jaccard)
 
     chunk_results: (fused_score, chunk_id, cand_idx, section_slug, chunk_text, explain_dict)
+    Returns (results, abstention_meta).
     """
     if not chunk_results:
-        return []
+        meta = {"abstained": True, "retrieval_confidence": 0.0,
+                "reason": "no retrieval evidence for this query",
+                "admitted": 0, "rejected": 0}
+        return [], meta
     # Group by cand_idx, keeping best chunk
     by_memory: Dict[int, Tuple[float, str, str, str, Dict[str, Any]]] = {}
     for fused_score, chunk_id, cand_idx, section_slug, chunk_text, expl in chunk_results:
         if cand_idx not in by_memory or fused_score > by_memory[cand_idx][0]:
             by_memory[cand_idx] = (fused_score, chunk_id, section_slug, chunk_text, expl)
 
-    # Apply policy boost
     r_cfg = cfg.get("retrieval", {})
     min_score = float(r_cfg.get("min_score", 0.5))
     at_date = str(cfg.get("_at_date") or "") or None
-    boosted: List[Tuple[float, int, Dict[str, Any]]] = []
+    ab_cfg = dict(r_cfg.get("abstention", {}) or {})
+    ab_cfg.setdefault("enabled", True)
+    ab_cfg.setdefault("require_sparse_match", True)
+    ab_cfg.setdefault("min_dense_score", None)
+    ab_cfg["mode"] = retrieval_mode
+    ab_cfg.setdefault("min_dense_score", r_cfg.get("abstention", {}).get("min_dense_score"))
+    query_tokens = [t for t in tokenize(expand_query(query, cfg)) if len(t) >= 2]
+    admitted: List[Tuple[float, int, Dict[str, Any], str]] = []
+    rejected: List[Dict[str, Any]] = []
     for cand_idx, (best_score, chunk_id, section_slug, chunk_text, expl) in by_memory.items():
+        matched = expl.get("sparse_matched") or []
+        passed, reason = _admission_gate(expl, matched, chunk_text, ab_cfg, query_tokens)
+        expl["admission"] = "pass" if passed else "reject"
+        expl["admission_reason"] = reason
+        if not passed:
+            rejected.append({"parent_memory_id": str(cands[cand_idx][2].get("id", str(cands[cand_idx][0]))),
+                              "reason": reason})
+            continue
+        # Policy boost ranks ONLY admitted candidates
         fm = cands[cand_idx][2]
         pb = _policy_boost(fm, at_date=at_date)
         final_score = best_score + pb
@@ -1428,8 +1539,29 @@ def _merge_chunks_by_memory(
             expl["chunk_id"] = chunk_id
             expl["section"] = section_slug
             expl["parent_memory_id"] = str(fm.get("id", str(cands[cand_idx][0])))
-            boosted.append((final_score, cand_idx, expl))
-    boosted.sort(key=lambda x: -x[0])
+            admitted.append((final_score, cand_idx, expl, chunk_text))
+    admitted.sort(key=lambda x: -x[0])
+    meta: Dict[str, Any] = {"abstained": not admitted, "retrieval_confidence": 0.0,
+                            "reason": "", "admitted": len(admitted),
+                            "rejected": len(rejected),
+                            "rejected_detail": rejected[:20]}
+    if admitted:
+        best_expl = admitted[0][2]
+        n_matched = len(best_expl.get("sparse_matched") or [])
+        d = best_expl.get("dense_score")
+        if d is not None:
+            conf = min(1.0, 0.4 + 0.6 * max(0.0, min(1.0, float(d))))
+        else:
+            conf = min(1.0, 0.2 + 0.2 * min(n_matched, 4))
+        meta["retrieval_confidence"] = round(conf, 4)
+        meta["reason"] = f"{len(admitted)} candidate(s) passed the relevance gate " \
+                         f"({len(rejected)} rejected)"
+    else:
+        reasons = sorted({x["reason"] for x in rejected}) if rejected else ["no candidates scored"]
+        meta["reason"] = "no candidate passed the relevance gate: " + "; ".join(reasons[:4])
+    if not admitted:
+        return [], meta
+    boosted = [(s, ci, expl) for s, ci, expl, _t in admitted]
 
     # MMR on parent memories
     lam = float(r_cfg.get("mmr_lambda", 0.5))
@@ -1475,7 +1607,98 @@ def _merge_chunks_by_memory(
         out.append((final_score, p, fm, snip))
         if explain:
             fm["_explain"] = expl
-    return out
+    return out, meta
+
+
+def _admission_gate(expl: Dict[str, Any], matched_tokens: List[str],
+                    chunk_text: str, gate_cfg: Dict[str, Any],
+                    query_tokens: List[str]) -> Tuple[bool, str]:
+    """B: relevance/admission gate — evaluated on RAW evidence, BEFORE policy boost.
+
+    - sparse: passes when at least one sparse-matched token actually occurs in the
+      document text (a score alone proves nothing; RRF scores are tiny).
+    - dense: passes when a calibrated per-profile min_dense_score is set and the
+      best dense score meets it; when unset (null) dense evidence is accepted as-is
+      (conservative, no arbitrary global threshold).
+    - mode decides which channel is authoritative:
+        sparse  -> sparse evidence only
+        dense   -> dense evidence only (fallback if no dense)
+        hybrid  -> either channel
+    Gate is explainable: it returns (passed, reason).
+    """
+    mode = str(gate_cfg.get("mode", "hybrid")).lower()
+    sp_matched = matched_tokens or ([t for t in query_tokens
+                                    if t and t.lower() in chunk_text.lower()]
+                                   if expl.get("sparse_rank") is not None else [])
+    dense_score = expl.get("dense_score")
+    min_dense = gate_cfg.get("min_dense_score")
+
+    if mode == "sparse":
+        if sp_matched:
+            return True, "sparse_token_match"
+        if expl.get("sparse_rank") is not None:
+            return False, "sparse_no_token_match"
+        return False, "no_sparse_evidence"
+    if mode == "dense":
+        if dense_score is not None:
+            if min_dense is not None and dense_score < float(min_dense):
+                return False, f"dense_below_min_score({dense_score:.4f}<{min_dense})"
+            return True, "dense_evidence"
+        return False, "no_dense_evidence"
+    # hybrid: either channel provides evidence
+    if sp_matched:
+        return True, "sparse_token_match"
+    if dense_score is not None:
+        if min_dense is not None and dense_score < float(min_dense):
+            return False, "dense_below_min_score"
+        return True, "dense_evidence"
+    if expl.get("sparse_rank") is not None:
+        return False, "sparse_no_token_match"
+    return False, "no_retrieval_evidence"
+
+
+def _index_fresh(idx: Any, cands: List[Tuple[Path, str, Dict[str, Any]]]) -> bool:
+    """Cheap staleness guard: usable only if the index file is not older than
+    every memory file (avoids serving stale candidates after unindexed edits)."""
+    try:
+        idx_mtime = idx.db_path.stat().st_mtime
+        for p, _t, _fm in cands:
+            if p.stat().st_mtime > idx_mtime:
+                return False
+        return True
+    except Exception:
+        return False
+
+
+def _fts_prefilter_paths(query: str, cfg: Dict[str, Any],
+                         cands: List[Tuple[Path, str, Dict[str, Any]]],
+                         n: int) -> Optional[set]:
+    """C: FTS5 candidate prefilter.
+
+    Returns the set of relative paths of candidate memories to keep for
+    scoring, or None to fall back to the full Python scan (index unavailable,
+    stale, FTS5 missing, config disabled, or query too short).
+
+    The prefilter is a UNION accelerator (FTS5 top-n ∪ Python BM25 top-k), so
+    it can never drop a hit the full scan would have returned.
+    """
+    fp = cfg.get("retrieval", {}).get("fts_prefilter") or {}
+    if not fp.get("enabled", False):
+        return None
+    if len(cands) < int(fp.get("min_corpus_size", 50)):
+        return None
+    idx = _open_sqlite_index()
+    if idx is None or not getattr(idx, "fts5_available", lambda: False)():
+        return None
+    if not _index_fresh(idx, cands):
+        return None
+    try:
+        rows = idx.fts5_search(query, n)
+        if rows is None:
+            return None
+        return {str(r[2]) for r in rows}
+    except Exception:
+        return None
 
 
 def _search_with_cfg(query: str, limit: int, cfg: Dict[str, Any],
@@ -1534,6 +1757,22 @@ def _search_with_cfg(query: str, limit: int, cfg: Dict[str, Any],
         combined = f"{rel}\n{header}\n{body}"
         docs_tok.append(tokenize(combined))
 
+    # C: FTS5 candidate prefilter — narrows scoring to a superset of the
+    # top candidates (FTS5 top-n ∪ Python BM25 top-k) without changing ranks.
+    def _cand_rel(i: int) -> str:
+        try:
+            return str(cands[i][0].relative_to(ROOT)).replace("\\", "/")
+        except Exception:
+            return str(cands[i][0]).replace("\\", "/")
+    fts_keep: Optional[set] = _fts_prefilter_paths(query, cfg, cands, max(cand_limit, 100))
+    if fts_keep is not None:
+        keep_ci: Optional[set] = {ci for ci, c in enumerate(chunks) if _cand_rel(c[1]) in fts_keep}
+        if not keep_ci:
+            keep_ci = None  # FTS5 matched nothing — full scan
+    else:
+        keep_ci = None
+    cfg["_fts_prefilter"] = "used" if fts_keep is not None else "skipped"
+
     # 1. Sparse BM25 on chunks
     expanded_query = expand_query(query, cfg)
     q_tokens = tokenize(expanded_query)
@@ -1555,16 +1794,32 @@ def _search_with_cfg(query: str, limit: int, cfg: Dict[str, Any],
         score, matched = bm25_doc_score(q_tokens, d, df, N, avgdl, k1, b)
         if score > 0:
             sparse_scored.append((score, ci, matched))
+    if keep_ci is not None:
+        # C union half: FTS5 keep-set ∪ Python BM25 top-k — the prefilter can
+        # only narrow, never drop a hit the full scan would have returned.
+        sparse_scored.sort(key=lambda x: -x[0])
+        keep_set = set(keep_ci) | {ci for _s, ci, _m in sparse_scored[:cand_limit]}
+        sparse_scored = [x for x in sparse_scored if x[1] in keep_set]
     sparse_scored.sort(key=lambda x: -x[0])
     sparse_scored = sparse_scored[:cand_limit]
 
     # 2. Dense retrieval on chunks (if available)
     dense_ranked: Optional[List[Tuple[float, int]]] = None  # (score, chunk_idx)
     retrieval_mode = "sparse"
+    dense_primary = (mode == "dense")  # A4: dense mode = dense-only, sparse is fallback
     if mode != "sparse" and emb_setting not in ("off", "no", "false", "0"):
+        # C: dense candidates restricted to the prefilter union set (keeps
+        # sparse-only chunk indices valid for fusion). In pure dense mode the
+        # lexical union is not a safe proxy for semantic recall, so the dense
+        # channel always scans the full corpus there.
+        union_ci: Optional[set] = None
+        if keep_ci is not None and not dense_primary:
+            union_ci = set(keep_ci) | {ci for _s, ci, _m in sparse_scored}
         # Build chunk candidates for dense search
         chunk_cands: List[Tuple[Path, str, Dict[str, Any]]] = []
-        for chunk_id, cand_idx, section_slug, chunk_text, chash in chunks:
+        for ci, (chunk_id, cand_idx, section_slug, chunk_text, chash) in enumerate(chunks):
+            if union_ci is not None and ci not in union_ci:
+                continue
             # Create a pseudo-candidate for each chunk
             chunk_fm = dict(cands[cand_idx][2])
             chunk_fm["_chunk_id"] = chunk_id
@@ -1574,14 +1829,34 @@ def _search_with_cfg(query: str, limit: int, cfg: Dict[str, Any],
             chunk_cands.append((chunk_path, chunk_text, chunk_fm))
         dense_raw = _dense_search_raw(query, chunk_cands, cfg)
         if dense_raw is not None:
-            retrieval_mode = "hybrid"
+            retrieval_mode = "dense" if dense_primary else "hybrid"
             dense_ranked = dense_raw[:cand_limit]
 
-    # 3. RRF fusion on chunks
+    # 3. Fusion on chunks
+    #    - hybrid: RRF(sparse, dense)
+    #    - dense (A4): dense-only ranking; sparse is used ONLY if dense produced nothing
+    #    - sparse: sparse-only
     rrf_k = float(r_cfg.get("rrf_k", 60))
     sp_w = float(r_cfg.get("sparse_weight", 1.0))
     dn_w = float(r_cfg.get("dense_weight", 1.0))
-    if retrieval_mode == "hybrid" and dense_ranked is not None:
+    if retrieval_mode == "dense" and dense_ranked:
+        sparse_matched_by_chunk: Dict[int, List[str]] = {}
+        for _sc, _ci, _mt in sparse_scored:
+            if _mt and _ci not in sparse_matched_by_chunk:
+                sparse_matched_by_chunk[_ci] = [str(x) for x in _mt][:24]
+        fused = []
+        for rank, (score, chunk_idx) in enumerate(dense_ranked):
+            explain_dict = {
+                "sparse_score": None,
+                "sparse_rank": None,
+                "sparse_matched": sparse_matched_by_chunk.get(chunk_idx),
+                "dense_score": round(float(score), 4),
+                "dense_rank": rank,
+                "rrf_score": round(float(score), 6),
+                "dense_primary": True,
+            }
+            fused.append((float(score), chunk_idx, explain_dict))
+    elif (retrieval_mode == "hybrid") and dense_ranked is not None:
         fused = rrf_fusion(sparse_scored, dense_ranked, rrf_k, sp_w, dn_w)
     else:
         fused = []
@@ -1589,6 +1864,7 @@ def _search_with_cfg(query: str, limit: int, cfg: Dict[str, Any],
             explain_dict = {
                 "sparse_score": round(score, 4),
                 "sparse_rank": rank,
+                "sparse_matched": [str(x) for x in (matched or [])][:24],
                 "dense_score": None,
                 "dense_rank": None,
                 "rrf_score": round(sp_w / (rrf_k + rank), 6),
@@ -1602,7 +1878,11 @@ def _search_with_cfg(query: str, limit: int, cfg: Dict[str, Any],
         chunk_results.append((rrf_sc, chunk_id, cand_idx, section_slug, chunk_text, expl))
 
     # 5. Merge by memory_id + MMR on parents + build output
-    out = _merge_chunks_by_memory(chunk_results, cands, retrieval_mode, query, limit, cfg, docs_tok, explain)
+    out, meta = _merge_chunks_by_memory(chunk_results, cands, retrieval_mode, query, limit, cfg, docs_tok, explain)
+    # Expose abstention metadata on the cfg channel so search_with_meta() can
+    # surface it without changing the legacy results-list contract.
+    cfg["_abstention_meta"] = meta
+    cfg["_retrieval_mode"] = retrieval_mode
     _mark_accessed_db([str(fm.get("id", str(p))) for _, p, fm, _ in out])
     return out
 
@@ -1693,17 +1973,37 @@ def consolidate_cmd(args) -> int:
     if archived:
         report["issues"].append({"category": "archived", "count": len(archived),
                                  "items": [{"path": m["path"]} for m in archived]})
-    # 4. Never-accessed old entries (> threshold days old, never accessed)
+    # 4. Never-accessed old entries (> threshold days old, never accessed).
+    # Since v1.4 usage lives in the SQLite usage store (not frontmatter), we
+    # must consult it the same way doctor does. Conservative fallbacks:
+    #   - usage store unavailable  -> report "usage_unavailable", mark NOTHING
+    #   - usage store present but no row for a memory -> never-accessed
     threshold_days = int(getattr(args, "never_accessed_days", 90) or 90)
     cutoff = (dt.date.today() - dt.timedelta(days=threshold_days)).isoformat()
-    never_accessed = []
-    for m in memories:
-        created = m["created"][:10] if m["created"] else ""
-        if created and created < cutoff and not m["fm"].get("last_accessed"):
-            never_accessed.append({"path": m["path"], "created": created})
-    if never_accessed:
-        report["issues"].append({"category": "never_accessed_old", "count": len(never_accessed),
-                                 "items": never_accessed})
+    idx = _open_sqlite_index()
+    if idx is None:
+        report["issues"].append({"category": "usage_unavailable", "count": 0,
+                                  "note": "usage store not available; never-accessed "
+                                          "cannot be determined safely — skipped (conservative)"})
+    else:
+        never_accessed = []
+        for m in memories:
+            created = m["created"][:10] if m["created"] else ""
+            if not created or not (created < cutoff):
+                continue
+            mid = str(m["fm"].get("id") or m["id"])
+            try:
+                row = idx.conn.execute(
+                    "SELECT access_count, last_accessed FROM usage WHERE memory_id=?",
+                    (mid,)).fetchone()
+            except Exception:
+                row = None
+            if row is None or (not row["access_count"] and not row["last_accessed"]):
+                never_accessed.append({"path": m["path"], "created": created, "id": mid})
+        if never_accessed:
+            report["issues"].append({"category": "never_accessed_old", "count": len(never_accessed),
+                                      "items": never_accessed})
+        idx.close()
     # 5. Session snapshots older than threshold
     snap_threshold_days = int(getattr(args, "snapshot_age_days", 30) or 30)
     snap_dir = RAG / "sessions" / ".snapshots"
@@ -3301,31 +3601,60 @@ def embeddings_info(args) -> int:
 
 # ----------------------------- config ---------------------------------------
 
-CONFIG_TEMPLATE = """# INTERNAL_RAG configuration (v1.0.2)
+CONFIG_TEMPLATE = """# INTERNAL_RAG configuration (v1.5.0)
 # Optional — remove this file to use built-in defaults.
+# Nested mappings merge deeply: overriding one leaf keeps sibling defaults.
 
 retrieval:
-  limit: 10
+  limit: 8
   mmr_lambda: 0.5
   min_score: 0.5
-  embeddings: auto        # auto | on | off
-  embeddings_model: all-MiniLM-L6-v2
+  embeddings: auto            # auto | on | off
+  embeddings_model: null      # e.g. all-MiniLM-L6-v2; null = profile default
+  profile: english-fast       # english-fast | multilingual (v1.4.0)
+  query_expansion: true       # English synonym expansion (compat layer)
+  pl_stopwords: true          # conservative Polish stopword list
+  mode: hybrid                # sparse | dense | hybrid (v1.5.0: dense = dense-only)
+  rrf_k: 60
+  sparse_weight: 1.0
+  dense_weight: 1.0
+  candidate_multiplier: 4
+  bm25_k1: 1.5
+  bm25_b: 0.75
+  chunking:
+    enabled: true
+    threshold_chars: 2000
+    target_chars: 1200
+    overlap_chars: 120
+  abstention:
+    enabled: true
+    require_sparse_match: true
+    min_dense_score: null     # per-profile calibration; null = conservative
+  fts_prefilter:
+    enabled: true
+    min_corpus_size: 50       # skip prefilter overhead on tiny corpora
+
 tokens:
   context_budget: 4000
   warn_ratio: 0.8
+
 checkpoints:
   auto_archive_sessions: true
   max_task_stack: 16
-  max_age_minutes: 0       # 0=disabled; e.g. 60 = warn if checkpoint older than 1h
+  max_age_minutes: 0          # 0=disabled; e.g. 60 = warn if checkpoint older than 1h
+
 privacy:
   scan_on_checkpoint: false
+
+usage:
+  stale_days: 30
 """
 
 
 def _validate_config(cfg: Dict[str, Any]) -> List[str]:
-    """H6: Validate config values, return list of issues."""
+    """Validate config values, return list of issues (empty = valid)."""
     issues: List[str] = []
-    known_sections = {"retrieval", "tokens", "checkpoints", "privacy"}
+    known_sections = {"retrieval", "tokens", "checkpoints", "privacy", "usage"}
     for key in cfg:
         if key not in known_sections:
             issues.append(f"unknown section: {key}")
@@ -3333,34 +3662,96 @@ def _validate_config(cfg: Dict[str, Any]) -> List[str]:
     if not isinstance(r, dict):
         issues.append("retrieval: must be a mapping")
     else:
-        if "limit" in r and not isinstance(r["limit"], int):
-            issues.append("retrieval.limit: must be integer")
+        if "limit" in r and (not isinstance(r["limit"], int) or r["limit"] < 1):
+            issues.append("retrieval.limit: must be a positive integer")
         if "mmr_lambda" in r:
             v = r["mmr_lambda"]
-            if not isinstance(v, (int, float)) or v < 0 or v > 1:
+            if not isinstance(v, (int, float)) or isinstance(v, bool) or v < 0 or v > 1:
                 issues.append("retrieval.mmr_lambda: must be 0.0-1.0")
         if "min_score" in r:
             v = r["min_score"]
-            if not isinstance(v, (int, float)) or v < 0:
+            if not isinstance(v, (int, float)) or isinstance(v, bool) or v < 0:
                 issues.append("retrieval.min_score: must be >= 0")
         if "embeddings" in r and str(r["embeddings"]).lower() not in ("auto", "on", "off"):
             issues.append("retrieval.embeddings: must be auto|on|off")
+        if "mode" in r and str(r["mode"]).lower() not in ("sparse", "dense", "hybrid"):
+            issues.append("retrieval.mode: must be sparse|dense|hybrid")
+        if "profile" in r and str(r["profile"]).lower() not in ("english-fast", "multilingual"):
+            issues.append("retrieval.profile: must be english-fast|multilingual")
+        for wkey in ("sparse_weight", "dense_weight"):
+            if wkey in r:
+                v = r[wkey]
+                if not isinstance(v, (int, float)) or isinstance(v, bool) or v < 0:
+                    issues.append(f"retrieval.{wkey}: must be >= 0")
+        if "rrf_k" in r:
+            v = r["rrf_k"]
+            if not isinstance(v, (int, float)) or isinstance(v, bool) or v < 1:
+                issues.append("retrieval.rrf_k: must be >= 1")
+        if "candidate_multiplier" in r:
+            v = r["candidate_multiplier"]
+            if not isinstance(v, int) or isinstance(v, bool) or v < 1:
+                issues.append("retrieval.candidate_multiplier: must be a positive integer")
+        for fkey in ("bm25_k1", "bm25_b"):
+            if fkey in r:
+                v = r[fkey]
+                if not isinstance(v, (int, float)) or isinstance(v, bool) or v < 0:
+                    issues.append(f"retrieval.{fkey}: must be >= 0")
+        ck = r.get("chunking")
+        if ck is not None:
+            if not isinstance(ck, dict):
+                issues.append("retrieval.chunking: must be a mapping")
+            else:
+                if "enabled" in ck and not isinstance(ck["enabled"], bool):
+                    issues.append("retrieval.chunking.enabled: must be boolean")
+                for ikey in ("threshold_chars", "target_chars", "overlap_chars"):
+                    if ikey in ck:
+                        v = ck[ikey]
+                        if not isinstance(v, int) or isinstance(v, bool) or v < 0:
+                            issues.append(f"retrieval.chunking.{ikey}: must be a non-negative integer")
+        ab = r.get("abstention")
+        if ab is not None:
+            if not isinstance(ab, dict):
+                issues.append("retrieval.abstention: must be a mapping")
+            else:
+                if "enabled" in ab and not isinstance(ab["enabled"], bool):
+                    issues.append("retrieval.abstention.enabled: must be boolean")
+                if "min_dense_score" in ab:
+                    v = ab["min_dense_score"]
+                    if v is not None and (not isinstance(v, (int, float)) or isinstance(v, bool) or v < 0 or v > 1):
+                        issues.append("retrieval.abstention.min_dense_score: must be null or 0.0-1.0")
+        fp = r.get("fts_prefilter")
+        if fp is not None:
+            if not isinstance(fp, dict):
+                issues.append("retrieval.fts_prefilter: must be a mapping")
+            else:
+                if "enabled" in fp and not isinstance(fp["enabled"], bool):
+                    issues.append("retrieval.fts_prefilter.enabled: must be boolean")
+                if "min_corpus_size" in fp:
+                    v = fp["min_corpus_size"]
+                    if not isinstance(v, int) or isinstance(v, bool) or v < 0:
+                        issues.append("retrieval.fts_prefilter.min_corpus_size: must be a non-negative integer")
     t = cfg.get("tokens", {})
     if not isinstance(t, dict):
         issues.append("tokens: must be a mapping")
     else:
-        if "context_budget" in t and not isinstance(t["context_budget"], int):
-            issues.append("tokens.context_budget: must be integer")
+        if "context_budget" in t and (not isinstance(t["context_budget"], int) or t["context_budget"] < 1):
+            issues.append("tokens.context_budget: must be a positive integer")
     c = cfg.get("checkpoints", {})
     if not isinstance(c, dict):
         issues.append("checkpoints: must be a mapping")
     else:
-        if "max_task_stack" in c and not isinstance(c["max_task_stack"], int):
-            issues.append("checkpoints.max_task_stack: must be integer")
+        if "max_task_stack" in c and (not isinstance(c["max_task_stack"], int) or c["max_task_stack"] < 1):
+            issues.append("checkpoints.max_task_stack: must be a positive integer")
         if "max_age_minutes" in c:
             v = c["max_age_minutes"]
-            if not isinstance(v, (int, float)) or v < 0:
+            if not isinstance(v, (int, float)) or isinstance(v, bool) or v < 0:
                 issues.append("checkpoints.max_age_minutes: must be >= 0")
+    u = cfg.get("usage", {})
+    if not isinstance(u, dict):
+        issues.append("usage: must be a mapping")
+    else:
+        if "stale_days" in u and (not isinstance(u["stale_days"], int) or u["stale_days"] < 0):
+            issues.append("usage.stale_days: must be a non-negative integer")
     return issues
 
 
@@ -3391,38 +3782,187 @@ def config_cmd(args) -> int:
     return 0
 
 
-# ----------------------------- MCP server (minimal stdio) -------------------
+# ----------------------------- MCP server (stdio) ---------------------------
+# Protocol: MCP over stdio (JSON-RPC 2.0, newline-delimited).
+# STDOUT PURITY: in `mcp` mode stdout carries ONLY protocol messages.
+# All human-facing output from handlers is redirected to stderr.
+
+MCP_TOOLS = [
+    {"name": "context", "description": "Start/resume a task with INTERNAL_RAG context packet.",
+     "inputSchema": {"type": "object", "properties": {"task": {"type": "string"}, "limit": {"type": "integer"}},
+                     "required": ["task"]}},
+    {"name": "search", "description": "Search durable memories (BM25 + MMR, optional embeddings). Returns structured JSON.",
+     "inputSchema": {"type": "object", "properties": {
+                        "query": {"type": "string"}, "limit": {"type": "integer"},
+                        "types": {"type": "array", "items": {"type": "string"}},
+                        "statuses": {"type": "array", "items": {"type": "string"}}},
+                     "required": ["query"]}},
+    {"name": "checkpoint", "description": "Persist current operational state.",
+     "inputSchema": {"type": "object", "properties": {
+                        "reason": {"type": "string"}, "phase": {"type": "string"},
+                        "completed": {"type": "string"}, "in_progress": {"type": "string"},
+                        "blockers": {"type": "string"}, "next": {"type": "string"}},
+                     "required": ["reason"]}},
+    {"name": "guard", "description": "Verify no uncheckpointed changes. Returns GUARD OK / GUARD STALE.",
+     "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "remember", "description": "Store durable memory.",
+     "inputSchema": {"type": "object", "properties": {
+                        "type": {"type": "string"}, "title": {"type": "string"}, "body": {"type": "string"},
+                        "tags": {"type": "string"}, "evidence": {"type": "string"},
+                        "scope": {"type": "string"}, "consequence": {"type": "string"},
+                        "status": {"type": "string"}},
+                     "required": ["type", "title", "body"]}},
+    {"name": "status", "description": "Memory and checkpoint status (JSON).",
+     "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "tasks", "description": "Show task stack (JSON).",
+     "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "resume", "description": "Pop and resume the top task (JSON).",
+     "inputSchema": {"type": "object", "properties": {}}},
+]
+
+
+def _mcp_log(msg: str) -> None:
+    """Log to stderr ONLY (stdout is reserved for protocol messages)."""
+    try:
+        sys.stderr.write(f"[internal-rag] {msg}\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
+
+
+class _Capture:
+    """Redirect stdout/stderr of a handler call into a buffer (for result text).
+    The real stderr receives the captured content as a log, preserving the
+    information for debugging while keeping protocol stdout pure."""
+    def __init__(self) -> None:
+        self.buf = io.StringIO()
+
+    def __enter__(self):
+        self._out = sys.stdout
+        self._err = sys.stderr
+        sys.stdout = self.buf
+        sys.stderr = self.buf
+        return self
+
+    def __exit__(self, *a):
+        sys.stdout = self._out
+        sys.stderr = self._err
+        captured = self.buf.getvalue()
+        if captured.strip():
+            _mcp_log("handler output:\n" + captured.strip())
+
+
+def _mcp_dispatch(name: str, args_d: Dict[str, Any]) -> Tuple[str, bool]:
+    """Dispatch a tool call. Returns (text_result, is_error)."""
+    import io as _io
+    with _Capture() as cap:
+        if name == "context":
+            try:
+                context(_Args(task=args_d.get("task", ""), limit=int(args_d.get("limit", 6)), json=True,
+                              type=None, status=None))
+            except SystemExit:
+                pass
+            except Exception as e:
+                return f"error: {e}", True
+            return cap.buf.getvalue().strip() or "ok", False
+        if name == "search":
+            q = args_d.get("query", "")
+            limit = int(args_d.get("limit", 8))
+            types_f = args_d.get("types")
+            statuses_f = args_d.get("statuses")
+            if isinstance(types_f, str):
+                types_f = [types_f]
+            if isinstance(statuses_f, str):
+                statuses_f = [statuses_f]
+            try:
+                results = search(q, limit, types=types_f, statuses=statuses_f)
+            except Exception as e:
+                return f"error: {e}", True
+            payload = [{"path": str(p.relative_to(ROOT)), "score": round(s, 2),
+                        "type": fm.get("type"), "status": fm.get("status"), "snippet": sn}
+                       for s, p, fm, sn in results]
+            return json.dumps(payload, ensure_ascii=False, indent=2), False
+        if name == "checkpoint":
+            try:
+                checkpoint(_Args(
+                    task=None, objective=None, phase=args_d.get("phase"),
+                    completed=args_d.get("completed"), in_progress=args_d.get("in_progress"),
+                    blockers=args_d.get("blockers"), decisions=None,
+                    next=args_d.get("next"), memory=None,
+                    reason=args_d.get("reason", "mcp"), json=True))
+            except SystemExit:
+                pass
+            except Exception as e:
+                return f"error: {e}", True
+            return cap.buf.getvalue().strip() or "checkpoint saved", False
+        if name == "guard":
+            try:
+                rc = guard()
+            except Exception as e:
+                return f"error: {e}", True
+            txt = cap.buf.getvalue().strip()
+            return (txt or f"exit={rc}"), rc != 0
+        if name == "remember":
+            res = remember(_Args(
+                type=args_d.get("type", "knowledge"), status=args_d.get("status", "active"),
+                title=args_d.get("title", "untitled"), scope=args_d.get("scope", ""),
+                tags=args_d.get("tags", ""), evidence=args_d.get("evidence", ""),
+                body=args_d.get("body", ""), consequence=args_d.get("consequence", ""),
+                links="", force=False, allow_secret=False, json=False,
+                confidence=None, valid_from=None, valid_to=None,
+                supersedes="", derived_from=""))
+            return (res or "created"), res in ("blocked", "refused")
+        if name == "status":
+            try:
+                memory_status(_Args(json=True))
+            except SystemExit:
+                pass
+            except Exception as e:
+                return f"error: {e}", True
+            return cap.buf.getvalue().strip() or "ok", False
+        if name == "tasks":
+            try:
+                tasks_cmd(_Args(json=True))
+            except Exception as e:
+                return f"error: {e}", True
+            return cap.buf.getvalue().strip() or "[]", False
+        if name == "resume":
+            try:
+                resume_cmd(_Args(json=True, discard_state=False))
+            except SystemExit:
+                pass
+            except Exception as e:
+                return f"error: {e}", True
+            return cap.buf.getvalue().strip() or "ok", False
+        return f"unknown tool: {name}", True
+
 
 def mcp_server() -> int:
-    """Minimal MCP-like stdio server. Speaks JSON-RPC-ish lines on stdin/stdout.
-    Tools exposed: context, search, checkpoint, guard, remember, status, tasks, resume.
-    Not a full MCP spec implementation, but a stable, agent-callable bridge."""
-    tools = [
-        {"name": "context", "description": "Start/resume a task with INTERNAL_RAG context packet.",
-         "inputSchema": {"type": "object", "properties": {"task": {"type": "string"}}, "required": ["task"]}},
-        {"name": "search", "description": "Search durable memories (BM25 + MMR, optional embeddings).",
-         "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}},
-                         "required": ["query"]}},
-        {"name": "checkpoint", "description": "Persist current operational state.",
-         "inputSchema": {"type": "object", "properties": {"reason": {"type": "string"},
-                         "phase": {"type": "string"}, "completed": {"type": "string"},
-                         "in_progress": {"type": "string"}, "blockers": {"type": "string"},
-                         "next": {"type": "string"}}, "required": ["reason"]}},
-        {"name": "guard", "description": "Verify no uncheckpointed changes.",
-         "inputSchema": {"type": "object", "properties": {}}},
-        {"name": "remember", "description": "Store durable memory.",
-         "inputSchema": {"type": "object", "properties": {"type": {"type": "string"},
-                         "title": {"type": "string"}, "body": {"type": "string"},
-                         "tags": {"type": "string"}, "evidence": {"type": "string"},
-                         "scope": {"type": "string"}, "consequence": {"type": "string"}},
-                         "required": ["type", "title", "body"]}},
-        {"name": "status", "description": "Memory and checkpoint status.",
-         "inputSchema": {"type": "object", "properties": {}}},
-        {"name": "tasks", "description": "Show task stack.",
-         "inputSchema": {"type": "object", "properties": {}}},
-        {"name": "resume", "description": "Pop and resume the top task.",
-         "inputSchema": {"type": "object", "properties": {}}},
-    ]
+    """MCP stdio server (newline-delimited JSON-RPC 2.0).
+
+    - stdout: ONLY protocol messages (guarantee).
+    - stderr: logs and handler output.
+    - Modern semantics: initialize (version negotiation), tools/list,
+      tools/call, ping; notifications are acked silently.
+    - Legacy: `notifications/initialized`, `shutdown` still handled.
+    """
+    import io as _io
+    # Redirect any module-level print() leakage to stderr for the server lifetime
+    real_stdout = sys.stdout
+    sys.stdout = sys.stderr
+
+    def _send(obj: Dict[str, Any]) -> None:
+        # Write protocol messages to the REAL stdout only.
+        real_stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
+        real_stdout.flush()
+
+    def _err(rid, code: int, message: str) -> None:
+        _send({"jsonrpc": "2.0", "id": rid, "error": {"code": code, "message": message}})
+
+    supported_versions = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]
+    server_version = supported_versions[0]
+    initialized = False
+
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -3430,41 +3970,59 @@ def mcp_server() -> int:
         try:
             req = json.loads(line)
         except Exception:
-            print(json.dumps({"jsonrpc": "2.0", "error": {"code": -32700, "message": "parse error"}}))
-            sys.stdout.flush()
+            _err(None, -32700, "Parse error")
             continue
         method = req.get("method", "")
         rid = req.get("id")
+        is_notification = rid is None and "id" not in req
+
+        if method == "initialize":
+            # Version negotiation: accept client's version if supported, else latest.
+            client_v = str(req.get("params", {}).get("protocolVersion", ""))
+            negotiated = client_v if client_v in supported_versions else server_version
+            _send({"jsonrpc": "2.0", "id": rid, "result": {
+                "protocolVersion": negotiated,
+                "serverInfo": {"name": "internal-rag", "version": VERSION},
+                "capabilities": {"tools": {}},
+                "instructions": "INTERNAL_RAG persistent project memory. "
+                               "Use context before edits; checkpoint at milestones; guard before finishing.",
+            }})
+            initialized = False
+            continue
         if method == "notifications/initialized":
+            initialized = True
+            continue
+        if method == "ping":
+            if not is_notification:
+                _send({"jsonrpc": "2.0", "id": rid, "result": {}})
+            continue
+        if method == "tools/list":
+            _send({"jsonrpc": "2.0", "id": rid, "result": {"tools": MCP_TOOLS}})
+            continue
+        if method == "tools/call":
+            params = req.get("params", {}) or {}
+            name = params.get("name")
+            args_d = params.get("arguments", {}) or {}
+            if not isinstance(args_d, dict):
+                _err(rid, -32602, "invalid arguments")
+                continue
+            text, is_error = _mcp_dispatch(str(name), args_d)
+            _send({"jsonrpc": "2.0", "id": rid, "result": {
+                "content": [{"type": "text", "text": text}],
+                "isError": bool(is_error),
+            }})
             continue
         if method == "shutdown":
             if rid is not None:
-                print(json.dumps({"jsonrpc": "2.0", "id": rid, "result": {}}))
-                sys.stdout.flush()
+                _send({"jsonrpc": "2.0", "id": rid, "result": {}})
+            sys.stdout = real_stdout
             break
-        if method == "tools/list":
-            print(json.dumps({"jsonrpc": "2.0", "id": rid, "result": {"tools": tools}}))
-            sys.stdout.flush()
+        # Unknown method
+        if is_notification:
             continue
-        if method == "tools/call":
-            name = req.get("params", {}).get("name")
-            args_d = req.get("params", {}).get("arguments", {}) or {}
-            try:
-                result = _mcp_dispatch(name, args_d)
-                print(json.dumps({"jsonrpc": "2.0", "id": rid,
-                                  "result": {"content": [{"type": "text", "text": result}]}}))
-            except Exception as e:
-                print(json.dumps({"jsonrpc": "2.0", "id": rid, "error": {"code": -32000, "message": str(e)}}))
-            sys.stdout.flush()
-            continue
-        if method == "initialize":
-            print(json.dumps({"jsonrpc": "2.0", "id": rid, "result": {
-                "protocolVersion": "2024-11-05", "serverInfo": {"name": "internal-rag", "version": VERSION},
-                "capabilities": {"tools": {}}}}))
-            sys.stdout.flush()
-            continue
-        print(json.dumps({"jsonrpc": "2.0", "id": rid, "error": {"code": -32601, "message": "method not found"}}))
-        sys.stdout.flush()
+        _err(rid, -32601, "Method not found")
+
+    sys.stdout = real_stdout
     return 0
 
 
@@ -3473,85 +4031,6 @@ class _Args:
     def __init__(self, **kwargs: Any) -> None:
         for k, v in kwargs.items():
             setattr(self, k, v)
-
-
-def _mcp_dispatch(name: str, args_d: Dict[str, Any]) -> str:
-    import io
-    if name == "context":
-        buf = io.StringIO()
-        old = sys.stdout
-        sys.stdout = buf
-        try:
-            context(_Args(task=args_d.get("task", ""), limit=int(args_d.get("limit", 6)), json=True))
-        finally:
-            sys.stdout = old
-        return buf.getvalue()
-    if name == "search":
-        q = args_d.get("query", "")
-        limit = int(args_d.get("limit", 8))
-        types_f = args_d.get("types")
-        statuses_f = args_d.get("statuses")
-        if isinstance(types_f, str):
-            types_f = [types_f]
-        if isinstance(statuses_f, str):
-            statuses_f = [statuses_f]
-        results = search(q, limit, types=types_f, statuses=statuses_f)
-        return json.dumps([{"path": str(p.relative_to(ROOT)), "score": round(s, 2),
-                            "type": fm.get("type"), "status": fm.get("status"), "snippet": sn}
-                           for s, p, fm, sn in results], ensure_ascii=False, indent=2)
-    if name == "checkpoint":
-        old = sys.stdout
-        buf = io.StringIO()
-        sys.stdout = buf
-        try:
-            checkpoint(_Args(
-                task=None, objective=None, phase=args_d.get("phase"),
-                completed=args_d.get("completed"), in_progress=args_d.get("in_progress"),
-                blockers=args_d.get("blockers"), decisions=None,
-                next=args_d.get("next"), memory=None,
-                reason=args_d.get("reason", "mcp"), json=True))
-        finally:
-            sys.stdout = old
-        return buf.getvalue()
-    if name == "guard":
-        rc = guard()
-        return f"exit={rc}"
-    if name == "remember":
-        remember(_Args(
-            type=args_d.get("type", "knowledge"), status="active",
-            title=args_d.get("title", "untitled"), scope=args_d.get("scope", ""),
-            tags=args_d.get("tags", ""), evidence=args_d.get("evidence", ""),
-            body=args_d.get("body", ""), consequence=args_d.get("consequence", ""),
-            links=""))
-        return "ok"
-    if name == "status":
-        buf = io.StringIO()
-        old = sys.stdout
-        sys.stdout = buf
-        try:
-            memory_status(_Args(json=True))
-        finally:
-            sys.stdout = old
-        return buf.getvalue()
-    if name == "tasks":
-        buf = io.StringIO()
-        old = sys.stdout
-        sys.stdout = buf
-        try:
-            tasks_cmd(_Args(json=True))
-        finally:
-            sys.stdout = old
-        return buf.getvalue()
-    if name == "resume":
-        buf = io.StringIO()
-        old = sys.stdout
-        sys.stdout = buf
-        try:
-            resume_cmd(_Args(json=True, discard_state=False))
-        finally:
-            sys.stdout = old
-        return buf.getvalue()
-    raise ValueError(f"unknown tool: {name}")
 
 
 # ----------------------------- main / arg parsing ---------------------------
@@ -3612,6 +4091,7 @@ def main() -> None:
     p.add_argument("--at", default=None, help="Filter memories valid at this date (YYYY-MM-DD).")
     p.add_argument("--json", action="store_true")
     p.add_argument("--explain", action="store_true", help="Include per-channel scoring breakdown in JSON output.")
+    p.add_argument("--meta", action="store_true", help="JSON: wrap results with abstention/confidence metadata (v1.5).")
     p.add_argument("--embeddings", choices=["on", "off", "auto"], default=None)
 
     p = sub.add_parser("consolidate")
@@ -3742,6 +4222,7 @@ def main() -> None:
         emb_override = getattr(a, "embeddings", None)
         want_explain = getattr(a, "explain", False)
         at_date = getattr(a, "at", None)
+        want_meta = getattr(a, "meta", False)
         # Temporal filter: --at YYYY-MM-DD
         if at_date:
             at_statuses = statuses_f or []
@@ -3751,12 +4232,17 @@ def main() -> None:
             cfg["retrieval"]["embeddings"] = emb_override
             r = _search_with_cfg(a.query, a.limit, cfg, types=types_f, statuses=statuses_f,
                                  explain=want_explain, at_date=at_date)
+            meta = cfg.get("_abstention_meta") or {"abstained": not r, "retrieval_confidence": 0.0,
+                                                   "reason": "no results" if not r else "ok"}
         else:
-            r = search(a.query, a.limit, types=types_f, statuses=statuses_f,
-                       explain=want_explain, at_date=at_date)
+            r, meta = search_with_meta(a.query, a.limit, types=types_f, statuses=statuses_f,
+                                       explain=want_explain, at_date=at_date)
         # Apply --at temporal filter post-retrieval
         if at_date:
             r = _filter_by_date(r, at_date)
+            if r:
+                meta = dict(meta)
+                meta["abstained"] = False
         # History/superseded explain (read-only; default on for explain, also when --at given)
         if want_explain or at_date:
             hist = _temporal_explain(a.query, r)
@@ -3775,7 +4261,20 @@ def main() -> None:
                 if rel in by_path:
                     item["history"] = by_path[rel]
                 items.append(item)
-            print(json.dumps(items, ensure_ascii=False, indent=2))
+            if want_meta:
+                # B: new top-level shape (opt-in via --meta; bare list remains the default
+                # for backward compatibility)
+                print(json.dumps({
+                    "abstained": bool(meta.get("abstained", not items)),
+                    "retrieval_confidence": meta.get("retrieval_confidence", 0.0),
+                    "reason": meta.get("reason", ""),
+                    "admitted": meta.get("admitted"),
+                    "rejected": meta.get("rejected"),
+                    "rejected_detail": meta.get("rejected_detail", []),
+                    "results": items,
+                }, ensure_ascii=False, indent=2))
+            else:
+                print(json.dumps(items, ensure_ascii=False, indent=2))
         elif getattr(a, "verbose", False) and r:
             for i, (s, p, fm, sn) in enumerate(r, 1):
                 print(f"{i}. {p.relative_to(ROOT)} score={s:.2f}")

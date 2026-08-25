@@ -1,0 +1,12 @@
+{
+  "projects": {
+    "my-app": {
+      "root": "../my-app",
+      "write": true
+    },
+    "shared-lib": {
+      "root": "C:/repos/shared-lib",
+      "write": false
+    }
+  }
+}

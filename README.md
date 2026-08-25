@@ -1,19 +1,30 @@
 # INTERNAL_RAG
 
-![version](https://img.shields.io/badge/version-1.4.0-blue)
+![version](https://img.shields.io/badge/version-1.5.0-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![python](https://img.shields.io/badge/python-3.8%2B-blue)
 
 Local, persistent project memory for terminal coding agents (Warp, OpenCode, Claude Code, Cursor).
 
-**Version:** 1.4.0  
-**Verified:** 2026-08-24  
+**Version:** 1.5.0  
+**Verified:** 2026-08-25  
 **Integrations:** Warp, OpenCode, MCP (Claude Code / Cursor)  
 **Requirements:** Python 3.8+, Git  
 **Optional:** `sentence-transformers`, `numpy` (better semantic retrieval)  
 **Offline:** Fully functional without internet (BM25 core, optional pre-packaged embeddings)
 
 INTERNAL_RAG stores the minimum state needed to resume complex work without keeping the full session history in the model's context window. It works as a checkpoint + RAG for the agent.
+
+## What's new in 1.5.0
+
+- **Relevance / abstention gate**: retrieval separates raw evidence from policy ranking. `search --json --meta` wraps results with `abstained`, `retrieval_confidence` (0–1), `reason`, `admitted`, `rejected`, `rejected_detail` — the agent can detect "no usable answer" instead of trusting a low-relevance hit. Plain `--json` stays a bare list (backward compatible).
+- **FTS5 candidate prefilter** (`retrieval.fts_prefilter.*`): optional accelerator — FTS5 top-n ∪ Python BM25 top-k narrows the scoring pool without changing the ranking and never drops a hit the full scan returns. Automatic fallback (stale/missing index, tiny corpus, FTS5 unavailable) keeps zero-dependency behavior.
+- **Multi-project MCP router** (`irag_mcp_router.py`): one MCP server in front of many projects — registry allowlist, `write:false` blocks mutating tools, per-call subprocess isolation, `projects` tool. Zero required dependencies. See [docs/MCP-MULTI-PROJECT.md](docs/MCP-MULTI-PROJECT.md).
+- **MCP protocol hardening**: pure-stdout JSON-RPC 2.0, `initialize` version negotiation (`2025-11-25` / `2025-06-18` / `2025-03-26` / `2024-11-05`), `ping`, deterministic `tools/list`; verified against the official `mcp` Python SDK client.
+- **Config correctness**: recursive `deep_merge` (overriding one leaf never drops sibling defaults), deeper YAML-subset parser (block lists), `config --validate` covers `abstention` + `fts_prefilter`.
+- **CI**: `.github/workflows/ci.yml` — tests matrix (Ubuntu py3.8 / py3.12, Windows py3.12): compile gate, `self_test.py`, full `unittest` suite, retrieval benchmarks; separate `mcp-compat` job with the official `mcp` SDK in its own venv.
+- **Regression tests** (168 total): fingerprint cache (tracked-change detection despite cache), admission gate, MCP server protocol/stdout-purity, config deep-merge, MCP SDK handshake.
+- **ADR**: [docs/ADR.md](docs/ADR.md) records the key architectural decisions (why no vector DB / background daemon / mandatory SDK).
 
 ## What's new in 1.4.0
 
@@ -163,6 +174,14 @@ python3 .agents/skills/internal-rag/irag.py mcp
 
 Minimal JSON-RPC stdio: `context`, `search`, `checkpoint`, `guard`, `remember`, `status`, `tasks`, `resume`.
 
+**Multi-project router (v1.5.0):**
+
+```bash
+python3 .agents/skills/internal-rag/irag_mcp_router.py --registry projects.json
+```
+
+One MCP connection in front of many projects — registry allowlist, `write:false` blocks mutating tools, per-call isolation. See [docs/MCP-MULTI-PROJECT.md](docs/MCP-MULTI-PROJECT.md).
+
 ## Git hooks (optional, auto-checkpoint)
 
 ```bash
@@ -224,7 +243,7 @@ INTERNAL_RAG works fully offline (BM25 core, zero dependencies). For embeddings 
 python pack.py --with-embeddings --profile english-fast
 # for a PL/EN project:
 python pack.py --with-embeddings --profile multilingual
-# -> internal-rag-offline-1.4.0.zip
+# -> internal-rag-offline-1.5.0.zip
 
 # On the air-gapped machine:
 unzip internal-rag-offline-*.zip -d internal-rag-offline
@@ -270,6 +289,8 @@ The uninstaller creates a backup outside the repository, then removes INTERNAL_R
 - [Warp](docs/WARP.md)
 - [OpenCode](docs/OPENCODE.md)
 - [MCP](docs/MCP.md)
+- [Multi-project MCP](docs/MCP-MULTI-PROJECT.md)
+- [Architecture decisions (ADR)](docs/ADR.md)
 - [Configuration](docs/CONFIG.md)
 - [Embeddings](docs/EMBEDDINGS.md)
 - [Offline / air-gapped](docs/OFFLINE.md)

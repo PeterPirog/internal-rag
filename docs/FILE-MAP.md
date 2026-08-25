@@ -1,4 +1,4 @@
-# File map (v1.0.1)
+# File map (v1.5.0)
 
 ## In the package (internal-rag repo)
 
@@ -8,7 +8,10 @@
 - `self_test.py` — regression test.
 - `pack.py` — offline packer (air-gapped support).
 - `requirements-optional.txt` — optional embeddings dependencies.
-- `README.md`, `docs/` — documentation.
+- `.github/workflows/ci.yml` — CI (tests matrix + MCP SDK compatibility job).
+- `tests/` — unit + regression suites + retrieval benchmarks.
+- `examples/projects.example.json` — multi-project MCP router registry example.
+- `README.md`, `docs/` — documentation (incl. `docs/ADR.md`, `docs/MCP-MULTI-PROJECT.md`).
 - `VERSION`, `CHANGELOG.md` — versioning.
 
 ## In a target repo (after install)

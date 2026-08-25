@@ -238,16 +238,56 @@ class ConsolidateDryRun(unittest.TestCase):
         return rc, json.loads(buf.getvalue())
 
     def test_report_shape(self):
+        # No usage store in this sandbox -> conservative behavior:
+        # `usage_unavailable` reported, `never_accessed_old` NOT asserted.
         rc, rep = self._run()
         self.assertEqual(rc, 0)
         cats = {i["category"] for i in rep["issues"]}
         self.assertIn("duplicates", cats)
         self.assertIn("superseded", cats)
         self.assertIn("archived", cats)
-        self.assertIn("never_accessed_old", cats)
         self.assertIn("old_snapshots", cats)
+        self.assertIn("usage_unavailable", cats)
+        self.assertNotIn("never_accessed_old", cats)
         self.assertIsInstance(rep.get("plan"), list)
         self.assertTrue(rep["dry_run"] is True)
+
+    def test_sqlite_usage_prevents_never_accessed(self):
+        """A3: memory older than threshold, accessed ONLY in SQLite,
+        must NOT be flagged never_accessed_old."""
+        import time as _t
+        old_p = self.env.rag / "knowledge" / "0003-old.md"
+        mid = "mem-0003-old"
+        # Simulate a working usage store with a recorded access
+        class _FakeIdx:
+            def __init__(self):
+                import sqlite3
+                self.conn = sqlite3.connect(":memory:")
+                self.conn.row_factory = sqlite3.Row
+                self.conn.execute(
+                    "CREATE TABLE usage (memory_id TEXT PRIMARY KEY, last_accessed TEXT, access_count INT)")
+                self.conn.execute(
+                    "INSERT INTO usage VALUES (?, ?, ?)",
+                    (mid, _t.strftime("%Y-%m-%d", _t.localtime()), 3))
+            def close(self):
+                self.conn.close()
+        orig = irag._open_sqlite_index
+        irag._open_sqlite_index = lambda: _FakeIdx()
+        try:
+            args = _class(json=True, dry_run=True, never_accessed_days=90, snapshot_age_days=30)
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = irag.consolidate_cmd(args)
+            rep = json.loads(buf.getvalue())
+        finally:
+            irag._open_sqlite_index = orig
+        self.assertEqual(rc, 0)
+        cats = {i["category"]: i for i in rep["issues"]}
+        self.assertNotIn("usage_unavailable", cats)
+        na = cats.get("never_accessed_old", {}).get("items", [])
+        flagged_ids = {x.get("id") for x in na}
+        self.assertNotIn(mid, flagged_ids,
+                         f"memory with SQLite access record must not be flagged: {flagged_ids}")
 
     def test_deterministic_and_readonly(self):
         before = {}

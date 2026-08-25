@@ -1,6 +1,8 @@
-# MCP server (v1.0.1)
+# MCP server (v1.5.0)
 
-INTERNAL_RAG ships a minimal MCP-over-stdio server, compatible with Claude Code, Cursor, and other MCP clients.
+INTERNAL_RAG ships a minimal MCP-over-stdio server, compatible with Claude Code, Cursor, OpenCode, JetBrains, Warp, and the official `mcp` SDK.
+
+For **multiple projects** through one connection, see [MCP-MULTI-PROJECT.md](MCP-MULTI-PROJECT.md) (`irag_mcp_router.py`).
 
 ## Start
 
@@ -13,10 +15,15 @@ python3 .agents/skills/internal-rag/irag.py mcp
 Minimal JSON-RPC 2.0 subset over stdin/stdout:
 
 - `initialize` — handshake, returns `protocolVersion`, `serverInfo`.
+  Negotiated versions: `2025-11-25`, `2025-06-18`, `2025-03-26`, `2024-11-05`
+  (client's version when supported, else the latest).
 - `notifications/initialized` — acknowledged (no response).
+- `ping` — echoed.
 - `shutdown` — exit cleanly.
 - `tools/list` — list tools.
 - `tools/call` — invoke a tool with `name` and `arguments`.
+
+Stdout carries protocol messages only; logs go to stderr.
 
 ## Tools
 
