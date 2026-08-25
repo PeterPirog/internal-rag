@@ -295,5 +295,245 @@ class TestRouterBehavior(RouterBase):
         self.assertIn("registry error", p.stderr)
 
 
+class TestRouterSecurityRegressions(RouterBase):
+    """P1 hardening: extended security regression coverage for the router.
+
+    Covers:
+      - unknown project id
+      - malformed project id (empty / non-string)
+      - registry root outside expected structures (no INTERNAL_RAG)
+      - missing root directory
+      - root without INTERNAL_RAG/
+      - write: "false" (string) -> registry rejected at load
+      - write: 0 / 1 (int) -> registry rejected at load
+      - cross-project search isolation (re-check)
+      - cross-project write isolation (write:false blocks, write:true on A
+        does not allow writing into B)
+      - path traversal attempts in project id / args
+      - symlinked project roots
+      - malformed MCP arguments (non-dict arguments)
+      - modern + legacy protocol behavior after errors
+    """
+
+    def test_unknown_project_rejected_with_registered_list(self):
+        self._add_project("alpha", True, "mem-alpha", "Alpha", "alpha body content")
+        reg = self._write_registry(self.projs)
+        text, is_err, _ = self._call(reg, "search", {"project": "ghost", "query": "x"})
+        self.assertTrue(is_err)
+        self.assertIn("unknown project", text)
+        self.assertIn("Registered projects:", text)
+        self.assertIn("alpha", text)
+
+    def test_malformed_project_id_empty_string_rejected(self):
+        self._add_project("alpha", True, "mem-alpha", "Alpha", "alpha body content")
+        reg = self._write_registry(self.projs)
+        text, is_err, _ = self._call(reg, "search", {"project": "", "query": "x"})
+        self.assertTrue(is_err)
+        self.assertIn("unknown project", text)
+
+    def test_malformed_project_id_non_string_rejected(self):
+        self._add_project("alpha", True, "mem-alpha", "Alpha", "alpha body content")
+        reg = self._write_registry(self.projs)
+        # The router coerces args.get("project","") to str; an int id is
+        # converted to "123" which is not registered -> unknown project.
+        text, is_err, _ = self._call(reg, "search", {"project": 123, "query": "x"})
+        self.assertTrue(is_err)
+        self.assertIn("unknown project", text)
+
+    def test_root_without_internal_rag_unavailable(self):
+        # root exists but has no INTERNAL_RAG/
+        root = self.tmp / "no-rag"
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "README.md").write_text("not a rag project", encoding="utf-8")
+        reg = self._write_registry({"no-rag": {"root": str(root), "write": True}})
+        text, is_err, _ = self._call(reg, "projects")
+        data = json.loads(text)
+        by_id = {p["id"]: p for p in data["projects"]}
+        self.assertFalse(by_id["no-rag"]["available"])
+        self.assertIn("INTERNAL_RAG", by_id["no-rag"]["reason"])
+
+    def test_missing_root_directory_unavailable(self):
+        reg = self._write_registry({"ghost": {"root": str(self.tmp / "does-not-exist"), "write": False}})
+        text, is_err, _ = self._call(reg, "projects")
+        data = json.loads(text)
+        by_id = {p["id"]: p for p in data["projects"]}
+        self.assertFalse(by_id["ghost"]["available"])
+        self.assertIn("does not exist", by_id["ghost"]["reason"])
+
+    def test_write_string_false_rejected_at_load(self):
+        root = self.tmp / "p-str-false"; root.mkdir()
+        reg = self.tmp / "reg.json"
+        reg.write_text(json.dumps({"projects": {"p": {"root": str(root), "write": "false"}}}),
+                       encoding="utf-8")
+        with self.assertRaises(router.RegistryError):
+            router.load_registry(reg)
+
+    def test_write_int_zero_rejected_at_load(self):
+        root = self.tmp / "p-int-zero"; root.mkdir()
+        reg = self.tmp / "reg.json"
+        reg.write_text(json.dumps({"projects": {"p": {"root": str(root), "write": 0}}}),
+                       encoding="utf-8")
+        with self.assertRaises(router.RegistryError):
+            router.load_registry(reg)
+
+    def test_write_int_one_rejected_at_load(self):
+        root = self.tmp / "p-int-one"; root.mkdir()
+        reg = self.tmp / "reg.json"
+        reg.write_text(json.dumps({"projects": {"p": {"root": str(root), "write": 1}}}),
+                       encoding="utf-8")
+        with self.assertRaises(router.RegistryError):
+            router.load_registry(reg)
+
+    def test_cross_project_search_isolation(self):
+        self._add_project("alpha", True, "mem-alpha", "Alpha widget",
+                          "alpha unique xyzzy token")
+        self._add_project("beta", True, "mem-beta", "Beta widget",
+                          "beta unique qqqqq token")
+        reg = self._write_registry(self.projs)
+        ta, ea, _ = self._call(reg, "search", {"project": "alpha", "query": "unique token xyzzy qqqqq"})
+        tb, eb, _ = self._call(reg, "search", {"project": "beta", "query": "unique token xyzzy qqqqq"})
+        self.assertFalse(ea)
+        self.assertFalse(eb)
+        self.assertIn("mem-alpha", ta)
+        self.assertNotIn("mem-beta", ta)
+        self.assertIn("mem-beta", tb)
+        self.assertNotIn("mem-alpha", tb)
+
+    def test_cross_project_write_isolation(self):
+        # write:true on alpha does NOT allow writing into beta (beta is write:false)
+        self._add_project("alpha", True, "mem-alpha", "Alpha", "alpha body content")
+        self._add_project("beta", False, "mem-beta", "Beta", "beta body content")
+        reg = self._write_registry(self.projs)
+        # remember on alpha works
+        text_a, err_a, _ = self._call(reg, "remember",
+                                      {"project": "alpha", "type": "knowledge",
+                                       "title": "t", "body": "b"})
+        self.assertFalse(err_a, text_a)
+        # remember on beta is blocked
+        text_b, err_b, _ = self._call(reg, "remember",
+                                      {"project": "beta", "type": "knowledge",
+                                       "title": "t", "body": "b"})
+        self.assertTrue(err_b)
+        self.assertIn("read-only", text_b)
+        # beta knowledge dir unchanged
+        self.assertEqual(len(list((self.tmp / "beta" / "INTERNAL_RAG" / "knowledge").glob("*.md"))), 1)
+
+    def test_path_traversal_in_project_id_rejected(self):
+        self._add_project("alpha", True, "mem-alpha", "Alpha", "alpha body content")
+        reg = self._write_registry(self.projs)
+        for bad in ("../..", "..\\..", "alpha/../beta", "alpha/../../etc"):
+            text, is_err, _ = self._call(reg, "search", {"project": bad, "query": "x"})
+            self.assertTrue(is_err, f"path traversal id should be rejected: {bad}")
+            self.assertIn("unknown project", text)
+
+    def test_symlinked_project_root(self):
+        if os.name == "nt":
+            self.skipTest("symlink creation on Windows requires admin/developer mode")
+        real = self.tmp / "real_proj"
+        real.mkdir()
+        _make_project(real, "mem-real", "Real", "real body content")
+        link = self.tmp / "link_proj"
+        try:
+            os.symlink(real, link, target_is_directory=True)
+        except OSError:
+            self.skipTest("cannot create symlink")
+        reg = self._write_registry({"link": {"root": str(link), "write": False}})
+        text, is_err, _ = self._call(reg, "search", {"project": "link", "query": "real body content"})
+        self.assertFalse(is_err, text)
+        self.assertIn("mem-real", text)
+
+    def test_malformed_mcp_arguments_non_dict(self):
+        self._add_project("alpha", True, "mem-alpha", "Alpha", "alpha body content")
+        reg = self._write_registry(self.projs)
+        lines = [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+             "params": {"protocolVersion": "2025-06-18"}},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+             "params": {"name": "search", "arguments": "not-a-dict"}},
+            {"jsonrpc": "2.0", "id": 3, "method": "shutdown"},
+        ]
+        p = subprocess.run([sys.executable, str(ROUTER_PATH), "--registry", str(reg)],
+                           input="\n".join(json.dumps(l) for l in lines) + "\n",
+                           cwd=str(self.tmp), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           text=True, encoding="utf-8", timeout=120)
+        objs = _stdout_objects(p.stdout)
+        r = next(o for o in objs if o.get("id") == 2)
+        self.assertIn("error", r)
+        self.assertEqual(r["error"]["code"], -32602)
+
+    def test_modern_protocol_after_error(self):
+        """server/discover + a failing tools/call + another discover must still work."""
+        self._add_project("alpha", True, "mem-alpha", "Alpha", "alpha body content")
+        reg = self._write_registry(self.projs)
+        lines = [
+            {"jsonrpc": "2.0", "id": 1, "method": "server/discover",
+             "params": {"protocolVersion": "2026-07-28"}},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+             "params": {"name": "search", "arguments": {"project": "ghost", "query": "x"}}},
+            {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+             "params": {"name": "search", "arguments": {"project": "alpha", "query": "alpha body content"}}},
+            {"jsonrpc": "2.0", "id": 4, "method": "shutdown"},
+        ]
+        p = subprocess.run([sys.executable, str(ROUTER_PATH), "--registry", str(reg)],
+                           input="\n".join(json.dumps(l) for l in lines) + "\n",
+                           cwd=str(self.tmp), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           text=True, encoding="utf-8", timeout=120)
+        objs = _stdout_objects(p.stdout)
+        d = next(o for o in objs if o.get("id") == 1)
+        self.assertIn("supportedVersions", d["result"])
+        err = next(o for o in objs if o.get("id") == 2)
+        self.assertTrue(err["result"].get("isError"))
+        ok = next(o for o in objs if o.get("id") == 3)
+        self.assertIn("mem-alpha", "".join(c.get("text", "") for c in ok["result"].get("content", [])))
+
+    def test_legacy_protocol_after_error(self):
+        """initialize + a failing tools/call + ping must still work."""
+        self._add_project("alpha", True, "mem-alpha", "Alpha", "alpha body content")
+        reg = self._write_registry(self.projs)
+        lines = [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+             "params": {"protocolVersion": "2024-11-05"}},
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+             "params": {"name": "search", "arguments": {"project": "ghost", "query": "x"}}},
+            {"jsonrpc": "2.0", "id": 3, "method": "ping"},
+            {"jsonrpc": "2.0", "id": 4, "method": "shutdown"},
+        ]
+        p = subprocess.run([sys.executable, str(ROUTER_PATH), "--registry", str(reg)],
+                           input="\n".join(json.dumps(l) for l in lines) + "\n",
+                           cwd=str(self.tmp), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           text=True, encoding="utf-8", timeout=120)
+        objs = _stdout_objects(p.stdout)
+        init = next(o for o in objs if o.get("id") == 1)
+        self.assertEqual(init["result"]["protocolVersion"], "2024-11-05")
+        err = next(o for o in objs if o.get("id") == 2)
+        self.assertTrue(err["result"].get("isError"))
+        ping = next(o for o in objs if o.get("id") == 3)
+        self.assertEqual(ping["result"], {})
+
+    def test_stdout_purity_after_errors(self):
+        """No non-JSON lines on stdout even after a sequence of errors."""
+        self._add_project("alpha", True, "mem-alpha", "Alpha", "alpha body content")
+        reg = self._write_registry(self.projs)
+        lines = [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+             "params": {"protocolVersion": "2025-06-18"}},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+             "params": {"name": "search", "arguments": {"project": "ghost", "query": "x"}}},
+            {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+             "params": {"name": "nonexistent_tool", "arguments": {"project": "alpha"}}},
+            {"jsonrpc": "2.0", "id": 4, "method": "shutdown"},
+        ]
+        p = subprocess.run([sys.executable, str(ROUTER_PATH), "--registry", str(reg)],
+                           input="\n".join(json.dumps(l) for l in lines) + "\n",
+                           cwd=str(self.tmp), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           text=True, encoding="utf-8", timeout=120)
+        for line in p.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            json.loads(line)  # raises if any non-JSON leaked to stdout
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

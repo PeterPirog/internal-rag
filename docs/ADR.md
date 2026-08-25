@@ -75,8 +75,10 @@ in CI, never as a runtime dependency.
 dependencies. Requiring the SDK would break ADR-002 and the offline story.
 
 **Consequences.** The server negotiates protocol versions
-(`2025-11-25` … `2024-11-05`) and keeps stdout pure. Verified against the
-official `mcp>=2,<3` client in `tests/test_mcp_sdk_compat.py`.
+(`2026-07-28` and `2024-11-05`…`2025-11-25`; the full set is the canonical
+`SUPPORTED_VERSIONS` constant in `irag_mcp_protocol.py`) and keeps stdout
+pure. Verified against the official `mcp>=2,<3` client in
+`tests/test_mcp_sdk_compat.py`.
 
 ## ADR-006 — Multi-project via a router, not a shared store
 
@@ -125,8 +127,9 @@ the system falls back to the full scan and preserves the exact prior behavior.
 **Decision.** The stdio MCP server supports both legacy protocol versions
 (`2024-11-05`…`2025-11-25`) and the modern `2026-07-28` era
 (`server/discover` without `initialize`, per-request `_meta`, `resultType`,
-`structuredContent`, `outputSchema`, `ttlMs`/`cacheScope`). The `mcp` SDK
-remains test-only.
+`structuredContent`, `outputSchema`, `ttlMs`/`cacheScope`). The full supported
+version set is `2026-07-28`, `2025-11-25`, `2025-06-18`, `2025-03-26`,
+`2024-11-05` (canonical constant in `irag_mcp_protocol.py::SUPPORTED_VERSIONS`).
 
 **Why.** Existing clients (Claude Code, Cursor) use the legacy lifecycle and
 must not break. Modern clients can skip `initialize` and use `discover`.
@@ -135,9 +138,11 @@ cliff.
 
 **Consequences.** `irag_mcp_protocol.py` centralizes version negotiation,
 `discover_result`, `tools_list_result`, and `tool_call_result` envelopes so
-the server and router do not duplicate logic. Legacy `initialize` still works
-for modern clients (dual-era). `confidence_kind: "heuristic"` labels
-`retrieval_confidence` honestly until a calibration benchmark exists.
+the server and router do not duplicate logic. The canonical supported-version
+constant lives in `irag_mcp_protocol.py::SUPPORTED_VERSIONS`; documentation and
+tests reference it rather than duplicating the array. Legacy `initialize`
+still works for modern clients (dual-era). `confidence_kind: "heuristic"`
+labels `retrieval_confidence` honestly until a calibration benchmark exists.
 
 ## ADR-011 — Adaptive retrieval is opt-in, benchmark-gated
 
@@ -200,3 +205,47 @@ no measured gain.
 **Consequences.** If a future benchmark on a larger corpus or slower machine
 shows >100ms overhead, an ADR/proposal for a pool should be written first —
 not implemented inline.
+
+## ADR-015 — Retrieved memory is untrusted evidence (trust boundary)
+
+**Decision.** Every retrieved durable memory is wrapped in an explicit trust
+boundary that marks it as `trust: untrusted` evidence, never instructions.
+The context packet prints a `SECURITY NOTICE` header and delimits each memory
+with `=== BEGIN INTERNAL_RAG MEMORY ===` / `=== END INTERNAL_RAG MEMORY ===`.
+Structured JSON / MCP `structuredContent` carries `"trust": "untrusted"` on
+the containing packet and on each result record. An optional deterministic
+regex heuristic exposes `security_flags: ["instruction_like_content"]` when
+the content matches high-signal instruction-like phrases (`SYSTEM:`,
+`ignore previous instructions`, `you are now`, …).
+
+**Why.** Durable memory is user-writable and persists across sessions; an
+adversary (or a careless user) can store prompt-injection text in a memory.
+Agents consuming retrieved memories must treat the content as data, not as
+instructions that can override system/developer/user authority.
+
+**Consequences.** The durable Markdown is NOT altered to store the field —
+`trust` is derived at retrieval time. The `security_flags` heuristic is a
+WARNING ONLY, not a classifier: absence of the flag MUST NOT be interpreted
+as "trusted". The heuristic never blocks, rewrites, or removes the original
+text. No guardrail model is introduced; no external dependency is added.
+Adversarial tests in `tests/test_trust_boundary.py` verify the boundary is
+present, the flag fires on poisoned text, the text remains data, and no MCP
+protocol response is corrupted.
+
+## ADR-016 — Evidence freshness is derived metadata, not persisted
+
+**Decision.** Retrieval/context may expose `evidence_state` for each result:
+`present` / `missing` / `unverifiable`. It is DERIVED at retrieval time from
+the current project root + the evidence string, never persisted to Markdown
+or SQLite. No schema migration is required.
+
+**Why.** Evidence liveness is a function of the current filesystem state, not
+of the memory itself. Storing it would immediately go stale and require a
+sweeper. Deriving it cheaply (a single `exists()` check on a project-local
+path) keeps it correct and avoids a background watcher.
+
+**Consequences.** `evidence_state` does NOT influence ranking (by design —
+provenance only, for agent reasoning). Path traversal is contained: absolute
+paths and paths that escape the project root are reported as `unverifiable`,
+never inspected. Symlinks are resolved and tested explicitly. No network
+requests, no content hashing, no per-result Git command.

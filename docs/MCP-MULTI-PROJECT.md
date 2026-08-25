@@ -1,4 +1,4 @@
-# Multi-project MCP (v1.5.0)
+# Multi-project MCP (v1.6.0)
 
 One MCP server in front of many INTERNAL_RAG projects.
 
@@ -96,8 +96,9 @@ python .agents/skills/internal-rag/irag.py mcp
 
 - **Zero required dependencies.** The router is stdlib-only (Python 3.8+).
 - **Pure stdout.** Protocol messages only on stdout; logs on stderr.
-- **Negotiated protocol versions:** `2025-11-25`, `2025-06-18`, `2025-03-26`,
-  `2024-11-05` (client's version when supported, else the latest).
+- **Negotiated protocol versions:** `2026-07-28` (modern), `2025-11-25`,
+  `2025-06-18`, `2025-03-26`, `2024-11-05` (client's version when supported,
+  else the latest legacy version).
 - **No project can leak into another** — verified by
   `tests/test_mcp_router.py::test_isolation_between_projects` and
   `tests/test_mcp_sdk_compat.py`.

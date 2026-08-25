@@ -1,4 +1,4 @@
-# Architecture (v1.0.1)
+# Architecture (v1.6.0)
 
 ```text
 Warp / OpenCode / Claude Code / Cursor

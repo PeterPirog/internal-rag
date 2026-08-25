@@ -1,4 +1,4 @@
-# File map (v1.5.0)
+# File map (v1.6.0)
 
 ## In the package (internal-rag repo)
 
@@ -9,7 +9,7 @@
 - `pack.py` — offline packer (air-gapped support).
 - `requirements-optional.txt` — optional embeddings dependencies.
 - `.github/workflows/ci.yml` — CI (tests matrix + MCP SDK compatibility job).
-- `tests/` — unit + regression suites + retrieval benchmarks.
+- `tests/` — unit + regression suites + retrieval/mutation/scale benchmarks.
 - `examples/projects.example.json` — multi-project MCP router registry example.
 - `README.md`, `docs/` — documentation (incl. `docs/ADR.md`, `docs/MCP-MULTI-PROJECT.md`).
 - `VERSION`, `CHANGELOG.md` — versioning.
@@ -23,6 +23,8 @@
 - `.agents/skills/internal-rag/irag_embeddings.py` — optional embeddings plugin.
 - `.agents/skills/internal-rag/irag_hooks.py` — optional git hooks installer.
 - `.agents/skills/internal-rag/irag_index.py` — optional SQLite FTS5 index module.
+- `.agents/skills/internal-rag/irag_mcp_protocol.py` — shared MCP dual-era protocol helpers (canonical `SUPPORTED_VERSIONS`).
+- `.agents/skills/internal-rag/irag_mcp_router.py` — multi-project MCP router (subprocess-per-call isolation).
 - `INTERNAL_RAG/WORKING_STATE.md` — current checkpoint.
 - `INTERNAL_RAG/INDEX.md` — durable memory index.
 - `INTERNAL_RAG/.checkpoint.json` — last checkpoint metadata (schema-versioned).

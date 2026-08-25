@@ -1,12 +1,12 @@
 # INTERNAL_RAG
 
-![version](https://img.shields.io/badge/version-1.6.0-blue)
+![version](https://img.shields.io/badge/version-1.6.1-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![python](https://img.shields.io/badge/python-3.8%2B-blue)
 
 Local, persistent project memory for terminal coding agents (Warp, OpenCode, Claude Code, Cursor).
 
-**Version:** 1.6.0  
+**Version:** 1.6.1  
 **Verified:** 2026-08-25  
 **Integrations:** Warp, OpenCode, MCP (Claude Code / Cursor)  
 **Requirements:** Python 3.8+, Git  
@@ -15,9 +15,27 @@ Local, persistent project memory for terminal coding agents (Warp, OpenCode, Cla
 
 INTERNAL_RAG stores the minimum state needed to resume complex work without keeping the full session history in the model's context window. It works as a checkpoint + RAG for the agent.
 
+## What's new in 1.6.1 (post-v1.6 hardening)
+
+- **Memory mutation/lifecycle benchmark**: `tests/memory_mutation_benchmark.py` — deterministic, zero-dependency, 11 scenarios covering write/update/supersede/temporal/archive/export-import/index-rebuild/duplicate-protection. Asserts invariants: superseded memory not current truth, history never deleted, archived/invalid do not leak, export/import preserves lifecycle metadata, index deletion does not change durable semantics. `--smoke` canary for CI.
+- **Trust boundary for retrieved memory (ADR-015)**: every retrieved memory is wrapped as `trust: untrusted` evidence. The `context` packet prints a `SECURITY NOTICE` header and delimits each memory with `=== BEGIN/END INTERNAL_RAG MEMORY ===`. Structured JSON / MCP `structuredContent` carries `"trust": "untrusted"`. An optional deterministic regex heuristic exposes `security_flags: ["instruction_like_content"]` for high-signal injection-like phrases (`SYSTEM:`, `ignore previous instructions`, `you are now`, …). WARNING only — never blocks, rewrites, or removes the original text; absence of the flag does NOT mean trusted. Adversarial tests in `tests/test_trust_boundary.py`.
+- **Evidence freshness (ADR-016)**: retrieval/context exposes `evidence_state` (`present`/`missing`/`unverifiable`) for local path-like evidence. Derived at retrieval time, never persisted, no schema migration, no ranking change. Path-traversal-safe; symlinks tested.
+- **Scale benchmark**: `tests/scale_benchmark.py` — synthetic corpora of 100 / 1,000 / 10,000 memories; measures index build, incremental update, pure-Python BM25, FTS5 path, hybrid (when embeddings available), context generation, DB size, p50/p95. `--smoke` skips the 10k case in CI.
+- **MCP/router security regression suite**: extended `tests/test_mcp_router.py` — unknown/malformed project ids, missing root, root without INTERNAL_RAG, `write: "false"`/`0`/`1`, cross-project search/write isolation, path traversal, symlinked roots, malformed MCP args, modern + legacy protocol behavior after errors.
+- **Docs consistency test**: `tests/test_docs_consistency.py` — validates documented project version, MCP protocol version sets, JSON examples parse, JSONC examples validate, example filenames referenced by docs exist. Canonical `SUPPORTED_VERSIONS` constant in `irag_mcp_protocol.py` is the single source of truth.
+- **Docs drift fix**: `ARCHITECTURE.md`, `MEMORY-LIFECYCLE.md`, `CONFIG.md`, `MCP-MULTI-PROJECT.md`, `FILE-MAP.md` bumped to v1.6.x; MCP protocol-version lists aligned with the canonical constant; `CLI.md`/`README.md` document the new `trust`/`security_flags`/`evidence_state` fields.
+- **ADR-015** (trust boundary) and **ADR-016** (evidence freshness) added.
+- 249 tests pass (was 187); 0 required runtime dependencies; no retrieval-quality regression.
+
 ## What's new in 1.6.0
 
 - **Memory-quality benchmark**: `tests/memory_quality_benchmark.py` — deterministic, zero-dependency, 37 cases over a realistic coding-memory fixture corpus (identifiers, paths, paraphrase, PL/EN/mixed, superseded, temporal, contradictions, failures, abstention). Reports Recall@1/3/5, MRR, abstention P/R/F1, temporal accuracy, leakage, latency, tokens. `--smoke` canary for CI.
+- **Memory mutation/lifecycle benchmark**: `tests/memory_mutation_benchmark.py` — deterministic, zero-dependency, 11 scenarios covering write/update/supersede/temporal/archive/export-import/index-rebuild/duplicate-protection. Asserts invariants: superseded memory not current truth, history never deleted, archived/invalid do not leak, export/import preserves lifecycle metadata, index deletion does not change durable semantics. `--smoke` canary for CI.
+- **Trust boundary for retrieved memory (ADR-015)**: every retrieved memory is wrapped as `trust: untrusted` evidence. The `context` packet prints a `SECURITY NOTICE` header and delimits each memory with `=== BEGIN/END INTERNAL_RAG MEMORY ===`. Structured JSON / MCP `structuredContent` carries `"trust": "untrusted"`. An optional deterministic regex heuristic exposes `security_flags: ["instruction_like_content"]` for high-signal injection-like phrases (`SYSTEM:`, `ignore previous instructions`, `you are now`, …). WARNING only — never blocks, rewrites, or removes the original text; absence of the flag does NOT mean trusted. Adversarial tests in `tests/test_trust_boundary.py`.
+- **Evidence freshness (ADR-016)**: retrieval/context exposes `evidence_state` (`present`/`missing`/`unverifiable`) for local path-like evidence. Derived at retrieval time, never persisted, no schema migration, no ranking change. Path-traversal-safe; symlinks tested.
+- **Scale benchmark**: `tests/scale_benchmark.py` — synthetic corpora of 100 / 1,000 / 10,000 memories; measures index build, incremental update, pure-Python BM25, FTS5 path, hybrid (when embeddings available), context generation, DB size, p50/p95. `--smoke` skips the 10k case in CI.
+- **MCP/router security regression suite**: extended `tests/test_mcp_router.py` — unknown/malformed project ids, missing root, root without INTERNAL_RAG, `write: "false"`/`0`/`1`, cross-project search/write isolation, path traversal, symlinked roots, malformed MCP args, modern + legacy protocol behavior after errors.
+- **Docs consistency test**: `tests/test_docs_consistency.py` — validates documented project version, MCP protocol version sets, JSON examples parse, JSONC examples validate, example filenames referenced by docs exist. Canonical `SUPPORTED_VERSIONS` constant in `irag_mcp_protocol.py` is the single source of truth.
 - **MCP 2026-07-28 (dual-era)**: `server/discover` (no `initialize` required), per-request `_meta`, `resultType`, `structuredContent`, `outputSchema`, `ttlMs`/`cacheScope`. Legacy lifecycle unchanged. Shared `irag_mcp_protocol.py`.
 - **Better MCP schema**: precise `inputSchema` (types, enums, `required`, `minimum`, `additionalProperties: false`), tool `annotations` (`openWorldHint: false`), `outputSchema`+`structuredContent` for search/status/tasks/projects/guard. MCP `search` accepts `at` + `explain`.
 - **Registry strict `write`**: must be a JSON boolean — `"false"`/`0`/`1` rejected.
@@ -27,7 +45,7 @@ INTERNAL_RAG stores the minimum state needed to resume complex work without keep
 - **`consolidate --prepare`**: deterministic JSON segment packet (no LLM, no auto-write).
 - **Router latency benchmark**: ~64ms overhead → no persistent child pool (ADR-014).
 - **Client docs**: `docs/MCP.md` rewritten + `examples/` for Warp, OpenCode V2/legacy, JetBrains, router.
-- **ADR-010…014** for the architectural decisions.
+- **ADR-010…016** for the architectural decisions.
 - `confidence_kind: "heuristic"` labels abstention confidence honestly.
 
 ## What's new in 1.5.0

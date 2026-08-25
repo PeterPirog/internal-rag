@@ -1,5 +1,50 @@
 # Changelog
 
+## 1.6.1 — 2026-08-25
+
+Post-v1.6 hardening: trust boundary, mutation benchmark, evidence freshness, scale benchmark, router security regressions, docs consistency.
+
+### Trust boundary for retrieved memory (ADR-015)
+- Every retrieved durable memory is now explicitly marked `trust: "untrusted"` evidence, never instructions.
+- `context` text packet prints a `SECURITY NOTICE` header and delimits each memory with `=== BEGIN/END INTERNAL_RAG MEMORY ===`.
+- Structured JSON / MCP `structuredContent` carries `"trust": "untrusted"` on the containing packet and on each result record.
+- Optional deterministic regex heuristic exposes `security_flags: ["instruction_like_content"]` for high-signal injection-like phrases (`SYSTEM:`, `ignore previous instructions`, `you are now`, `ADMIN OVERRIDE`, …). WARNING ONLY — never blocks, rewrites, or removes the original text; absence of the flag does NOT mean trusted.
+- Adversarial tests: `tests/test_trust_boundary.py` (15 tests) — poisoned text remains data, trust boundary present, flag fires, no MCP protocol response corrupted, stdout purity preserved.
+
+### Memory mutation/lifecycle benchmark (P0)
+- `tests/memory_mutation_benchmark.py` — deterministic, zero-dependency, 11 scenarios: decision replacement, failure→fix, conflicting active, archived memory, duplicate writes (exact + near), links/backlinks, invalid evidence, PL/EN mixed, export/import, index delete + rebuild, update preserves history.
+- Invariants asserted: superseded memory not returned as current truth; historical retrieval still finds the old memory for a valid historical date; archived/invalid do not leak into normal active retrieval; history never silently deleted; backlinks coherent; export/import preserves lifecycle metadata; deleting `.index.sqlite3` does not change durable semantics; rebuilding the index produces equivalent retrieval results; duplicate protection deterministic.
+- `--smoke` canary for CI.
+
+### Evidence freshness (ADR-016)
+- Retrieval/context exposes `evidence_state` (`present`/`missing`/`unverifiable`) for local path-like evidence.
+- Derived at retrieval time from the project root + the evidence string; never persisted; no schema migration; no ranking change.
+- Path-traversal-safe (absolute paths and `../../` outside root → `unverifiable`, never inspected); Windows drive-letter paths handled; symlinks resolved and tested explicitly.
+- Tests: `tests/test_evidence_freshness.py` (20 tests).
+
+### Scale benchmark (P1)
+- `tests/scale_benchmark.py` — synthetic corpora of 100 / 1,000 / 10,000 memories.
+- Measures: initial index build, incremental update, pure-Python BM25, FTS5 path, hybrid (when optional embeddings available), context generation, `.index.sqlite3` size, p50/p95.
+- `--smoke` (100 only, CI canary), normal (100+1000), `--full` (100+1000+10000). The 10k case is NOT run in normal/smoke mode.
+- No vector DB added because of this benchmark (per ADR-004).
+
+### MCP/router security regression suite (P1)
+- Extended `tests/test_mcp_router.py` (+12 tests): unknown/malformed project ids, missing root, root without INTERNAL_RAG, `write: "false"`/`0`/`1` rejected at load, cross-project search/write isolation, path traversal in project id, symlinked roots, malformed MCP arguments (non-dict), modern + legacy protocol behavior after errors, stdout purity after errors.
+
+### Docs consistency test + drift fix (P0)
+- `tests/test_docs_consistency.py` (11 tests) — validates documented project version matches canonical, MCP protocol version sets in docs do not omit supported versions, all JSON examples parse, JSONC examples validate, example filenames referenced by docs exist, router `SUPPORTED_VERSIONS` matches the canonical constant in `irag_mcp_protocol.py`.
+- Canonical `SUPPORTED_VERSIONS` constant in `irag_mcp_protocol.py` is now the single source of truth referenced by ADR-005/010 and docs.
+- Docs drift fix: `ARCHITECTURE.md`, `MEMORY-LIFECYCLE.md`, `CONFIG.md`, `MCP-MULTI-PROJECT.md`, `FILE-MAP.md` bumped to v1.6.x; MCP protocol-version lists aligned; `CLI.md`/`README.md` document the new `trust`/`security_flags`/`evidence_state` fields.
+
+### ADRs
+- ADR-015 — Retrieved memory is untrusted evidence (trust boundary).
+- ADR-016 — Evidence freshness is derived metadata, not persisted.
+
+### Test / dependency status
+- 249 tests pass (was 187); 5 skipped (symlinks on Windows).
+- 0 required runtime dependencies (core stdlib-only; `sentence-transformers`/`numpy` optional).
+- No retrieval-quality regression (memory-quality benchmark: R@1=63.64%, MRR=0.738, leak=0% — unchanged).
+
 ## 1.6.0 — 2026-08-25
 
 Memory-quality benchmark, dual-era MCP 2026-07-28, tool schemas, adaptive retrieval, link-aware context, `consolidate --prepare`, router latency benchmark, client docs.
