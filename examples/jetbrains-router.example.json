@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "mcp-light-memory-router": {
+      "command": "python",
+      "args": [
+        ".agents/skills/internal-rag/irag_mcp_router.py",
+        "--registry",
+        "examples/projects.example.json"
+      ]
+    }
+  }
+}

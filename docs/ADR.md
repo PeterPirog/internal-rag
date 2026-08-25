@@ -1,4 +1,4 @@
-# Architecture Decision Records (v1.6.0)
+# Architecture Decision Records (v1.7.0)
 
 This project is local, offline-first, persistent project memory for terminal
 coding agents. The following decisions are deliberate. "Memory is evidence,

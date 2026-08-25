@@ -1,19 +1,49 @@
-# INTERNAL_RAG
+<p align="center">
+  <img src="docs/assets/logo.svg" alt="MCP Light Memory" width="120" height="120">
+</p>
 
-![version](https://img.shields.io/badge/version-1.6.1-blue)
-![license](https://img.shields.io/badge/license-MIT-green)
-![python](https://img.shields.io/badge/python-3.8%2B-blue)
+<h1 align="center">MCP Light Memory</h1>
 
-Local, persistent project memory for terminal coding agents (Warp, OpenCode, Claude Code, Cursor).
+<p align="center">
+  Lightweight local-first persistent memory for coding agents and MCP clients.<br>
+  <em>formerly <code>internal-rag</code></em>
+</p>
 
-**Version:** 1.6.1  
+<p align="center">
+  <img alt="version" src="https://img.shields.io/badge/version-1.7.0-blue">
+  <img alt="license" src="https://img.shields.io/badge/license-MIT-green">
+  <img alt="python" src="https://img.shields.io/badge/python-3.8%2B-blue">
+  <img alt="deps" src="https://img.shields.io/badge/dependencies-0-success">
+  <img alt="mcp" src="https://img.shields.io/badge/MCP-2026--07--28%20dual--era-cyan">
+</p>
+
+---
+
+**MCP Light Memory** (package `mcp-light-memory`, CLI `mlm`) is a lightweight, local-first, persistent memory system for coding agents and MCP clients. It keeps the minimum state needed to resume complex work without keeping the full session history in the model's context window — a checkpoint + retrieval layer for your agent.
+
+- **Local-first / offline-first** — no server, no cloud, no daemon. Markdown is the durable source of truth; SQLite is a rebuildable cache.
+- **Zero required runtime dependencies** — pure Python 3.8+ stdlib. Optional `sentence-transformers`/`numpy` for better semantic retrieval.
+- **MCP stdio server** — dual-era protocol support: modern `2026-07-28` (`server/discover`, `_meta`, `structuredContent`, `outputSchema`) + legacy `2024-11-05`…`2025-11-25`.
+- **Multi-project router** — one MCP server in front of many projects with registry allowlist, `write:false` hard boundary, and per-call subprocess isolation.
+- **Retrieved memory is untrusted evidence** — explicit trust boundary + prompt-injection warning heuristic (ADR-015).
+- **Works with** Warp, OpenCode, Claude Code, Cursor, JetBrains AI Assistant / PyCharm.
+
+**Version:** 1.7.0  
 **Verified:** 2026-08-25  
-**Integrations:** Warp, OpenCode, MCP (Claude Code / Cursor)  
+**Integrations:** Warp, OpenCode, MCP (Claude Code / Cursor), JetBrains  
 **Requirements:** Python 3.8+, Git  
 **Optional:** `sentence-transformers`, `numpy` (better semantic retrieval)  
 **Offline:** Fully functional without internet (BM25 core, optional pre-packaged embeddings)
 
-INTERNAL_RAG stores the minimum state needed to resume complex work without keeping the full session history in the model's context window. It works as a checkpoint + RAG for the agent.
+> **Migration:** This project was formerly named `internal-rag`. Existing installs keep working — the `irag.py` module, `INTERNAL_RAG/` storage folder, and old MCP server names are preserved as deprecated aliases. The new primary CLI is `mlm` (`mlm.py`). See [docs/MIGRATION-TO-MCP-LIGHT-MEMORY.md](docs/MIGRATION-TO-MCP-LIGHT-MEMORY.md).
+
+## What's new in 1.7.0 (rebrand to MCP Light Memory)
+
+- **Total rebrand** from `internal-rag` to **MCP Light Memory** (`mcp-light-memory`). New product name, new CLI alias `mlm` (`mlm.py`), updated MCP server display name (`mcp-light-memory`), updated router display name (`mcp-light-memory-router`), refreshed README/docs/examples, new logo/icon assets (`docs/assets/`), branding note (`docs/BRANDING.md`), GitHub rebrand checklist (`docs/GITHUB-REBRAND-CHECKLIST.md`), and a dedicated migration document (`docs/MIGRATION-TO-MCP-LIGHT-MEMORY.md`).
+- **Backward compatibility preserved**: the `irag.py` module filename, the `INTERNAL_RAG/` storage folder, and old MCP server names continue to work as deprecated aliases. No data migration required. Existing installs, scripts, and stored memories are unaffected.
+- **New CLI shim `mlm.py`** — primary entrypoint that forwards to the canonical `irag.py` core. `irag.py` remains a supported legacy alias.
+- **New router examples**: `examples/warp-router.example.json`, `examples/opencode-v2-router.example.jsonc`, `examples/jetbrains-router.example.json` for the multi-project router under the new name.
+- **Tests extended** with a rebrand consistency suite (`tests/test_rebrand.py`) validating: `mlm.py` shim forwards correctly, MCP `serverInfo.name` is `mcp-light-memory` / `mcp-light-memory-router`, examples use the new server names, docs reference `MCP Light Memory`, legacy aliases still work.
 
 ## What's new in 1.6.1 (post-v1.6 hardening)
 

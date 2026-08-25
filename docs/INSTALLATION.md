@@ -1,4 +1,4 @@
-# Installation (v1.0.1)
+# Installation (v1.7.0)
 
 ## Requirements
 

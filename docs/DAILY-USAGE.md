@@ -1,4 +1,4 @@
-# Daily usage (v1.0.1)
+# Daily usage (v1.7.0)
 
 ## Start a task
 

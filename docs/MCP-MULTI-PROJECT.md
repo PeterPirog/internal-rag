@@ -1,4 +1,4 @@
-# Multi-project MCP (v1.6.0)
+# Multi-project MCP (v1.7.0)
 
 One MCP server in front of many INTERNAL_RAG projects.
 

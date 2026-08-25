@@ -1,4 +1,4 @@
-# Offline / air-gapped usage (v1.0.2)
+# Offline / air-gapped usage (v1.7.0)
 
 INTERNAL_RAG is designed to work **fully offline** — the core (BM25+MMR) has zero external dependencies. For air-gapped environments with self-hosted models, you can also pre-package optional embeddings.
 

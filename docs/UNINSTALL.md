@@ -1,4 +1,4 @@
-# Uninstall (v1.0.1)
+# Uninstall (v1.7.0)
 
 ## Full cleanup of a repo
 

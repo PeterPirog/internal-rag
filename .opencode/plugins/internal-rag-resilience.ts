@@ -4,7 +4,7 @@ import { join } from "node:path"
 const py = process.platform === "win32" ? "python" : "python3"
 
 export const InternalRagResilience: Plugin = async ({ worktree }) => {
-  const script = join(worktree, ".agents", "skills", "internal-rag", "irag.py")
+  const script = join(worktree, ".agents", "skills", "internal-rag", "mlm.py")
 
   // H3: debounce — at least 60s between auto-checkpoints, count skipped
   let lastAutoCheckpoint = 0

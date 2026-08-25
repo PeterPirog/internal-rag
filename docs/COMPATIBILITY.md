@@ -1,4 +1,4 @@
-# Compatibility (v1.0.1)
+# Compatibility (v1.7.0)
 
 Verified: **2026-08-24**.
 

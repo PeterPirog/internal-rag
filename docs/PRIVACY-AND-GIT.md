@@ -1,4 +1,4 @@
-# Privacy & Git (v1.0.1)
+# Privacy & Git (v1.7.0)
 
 ## Default policy
 

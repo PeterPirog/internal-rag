@@ -38,6 +38,7 @@ jobs:
           python -m compileall -q \
             self_test.py install.py uninstall.py privacy_check.py \
             .agents/skills/internal-rag/irag.py \
+            .agents/skills/internal-rag/mlm.py \
             .agents/skills/internal-rag/irag_index.py \
             .agents/skills/internal-rag/irag_mcp_router.py \
             .agents/skills/internal-rag/irag_embeddings.py \
@@ -54,6 +55,8 @@ jobs:
           python tests/retrieval_benchmark.py
           python tests/multilingual_benchmark.py
           python tests/memory_quality_benchmark.py --smoke
+          python tests/memory_mutation_benchmark.py --smoke
+          python tests/scale_benchmark.py --smoke
 
   mcp-compat:
     name: MCP SDK compatibility (official client, py3.12)

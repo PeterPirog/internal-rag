@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
-"""INTERNAL_RAG CLI - persistent project memory for terminal coding agents.
+"""MCP Light Memory (mcp-light-memory) — CLI core.
+
+Persistent, local-first project memory for coding agents and MCP clients.
+Formerly `internal-rag`; the module filename `irag.py` is retained for
+backward compatibility with existing installs, stored data, and scripts.
 
 Zero required dependencies (pure Python 3.8+). Optional embeddings via
 irag_embeddings.py (sentence-transformers) if installed.
+
+Primary CLI alias: `mlm`  (see mlm.py shim)
+Legacy CLI alias:   `irag`
 
 Subcommands:
   init, context, checkpoint, guard, search, remember, show, update,
@@ -26,7 +33,10 @@ import unicodedata
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-VERSION = "1.6.1"
+VERSION = "1.7.0"
+PRODUCT_NAME = "MCP Light Memory"
+PRODUCT_SLUG = "mcp-light-memory"
+LEGACY_NAME = "internal-rag"  # deprecated alias; kept for compatibility
 
 ALLOWED_TYPES = {"decision", "knowledge", "constraint", "gotcha", "failure", "hypothesis", "session"}
 ALLOWED_STATUS = {"active", "tentative", "superseded", "invalid", "archived"}
@@ -4514,15 +4524,15 @@ def mcp_server() -> int:
             if _proto:
                 negotiated = _proto.negotiate_version(client_v)
                 result = _proto.discover_result(
-                    "internal-rag", VERSION,
-                    "INTERNAL_RAG persistent project memory. "
+                    "mcp-light-memory", VERSION,
+                    "MCP Light Memory - persistent project memory. "
                     "Use context before edits; checkpoint at milestones; guard before finishing.",
                     {"tools": {}})
             else:
                 negotiated = client_v if client_v in SUPPORTED else server_version_legacy
                 result = {"supportedVersions": SUPPORTED, "capabilities": {"tools": {}},
-                          "serverInfo": {"name": "internal-rag", "version": VERSION},
-                          "instructions": "INTERNAL_RAG persistent project memory."}
+                          "serverInfo": {"name": "mcp-light-memory", "version": VERSION},
+                          "instructions": "MCP Light Memory - persistent project memory."}
             # Validate requested version: if client asks for a version we don't support, error.
             if client_v and client_v not in SUPPORTED:
                 _err(rid, -32602, f"Unsupported protocol version: {client_v}. "
@@ -4541,7 +4551,7 @@ def mcp_server() -> int:
             conn_version = negotiated
             _send({"jsonrpc": "2.0", "id": rid, "result": {
                 "protocolVersion": negotiated,
-                "serverInfo": {"name": "internal-rag", "version": VERSION},
+                "serverInfo": {"name": "mcp-light-memory", "version": VERSION},
                 "capabilities": {"tools": {}},
                 "instructions": "INTERNAL_RAG persistent project memory. "
                                "Use context before edits; checkpoint at milestones; guard before finishing.",
@@ -4604,7 +4614,7 @@ class _Args:
 # ----------------------------- main / arg parsing ---------------------------
 
 def main() -> None:
-    ap = argparse.ArgumentParser(prog="irag.py", description=f"INTERNAL_RAG v{VERSION}")
+    ap = argparse.ArgumentParser(prog="mlm", description=f"MCP Light Memory v{VERSION}  (formerly internal-rag)")
     ap.add_argument("--version", action="version", version=VERSION)
     ap.add_argument("--quiet", action="store_true", help="Suppress non-essential output.")
     ap.add_argument("--verbose", action="store_true", help="Show extra detail.")

@@ -1,4 +1,4 @@
-# Warp (v1.0.1)
+# Warp (v1.7.0)
 
 Warp recognizes `AGENTS.md` as Project Rules and skills in `.agents/skills/`.
 

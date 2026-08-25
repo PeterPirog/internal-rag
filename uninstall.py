@@ -4,8 +4,8 @@ import argparse, datetime as dt, shutil, subprocess
 from pathlib import Path
 
 VERSION='1.6.0'
-AGENTS_START='<!-- INTERNAL_RAG_START -->'; AGENTS_END='<!-- INTERNAL_RAG_END -->'
-EXCLUDE_START='# >>> INTERNAL_RAG LOCAL-ONLY >>>'; EXCLUDE_END='# <<< INTERNAL_RAG LOCAL-ONLY <<<'
+AGENTS_START='<!-- MCP_LIGHT_MEMORY_START -->'; AGENTS_END='<!-- MCP_LIGHT_MEMORY_END -->'
+EXCLUDE_START='# >>> MCP_LIGHT_MEMORY LOCAL-ONLY >>>'; EXCLUDE_END='# <<< MCP_LIGHT_MEMORY LOCAL-ONLY <<<'
 MANAGED_PATHS=[
  Path('.agents/skills/internal-rag'),
  Path('.opencode/tools/memory-search.ts'),Path('.opencode/tools/memory-context.ts'),Path('.opencode/tools/memory-checkpoint.ts'),Path('.opencode/tools/memory-guard.ts'),Path('.opencode/tools/memory-remember.ts'),Path('.opencode/tools/memory-status.ts'),
