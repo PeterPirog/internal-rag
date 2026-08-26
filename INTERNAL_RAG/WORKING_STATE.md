@@ -1,8 +1,8 @@
 # Current Working State
 
-updated: 2026-08-26T10:24:32+02:00
+updated: 2026-08-26T10:39:33+02:00
 branch: feat/v1.8-mcp-compliance-ephemeral
-base_commit: 1d0292e
+base_commit: 84d0181
 
 ## Objective
 
@@ -18,8 +18,7 @@ v1.6.0 complete
 
 ## Completed
 
-- P0: MCP 2026-07-28 wire format + 21 conformance tests
-- OpenCode 1 vs 2 installer + plugin split. P1: ephemeral observations, diagnostic distillation, GC + retention, session snapshot GC, atomic writes, OpenCode compaction integration. P2: value-aware forgetting. 340 tests pass, 0 deps, no retrieval regression.
+- All docs updated. 340 tests pass.
 
 ## In progress
 
@@ -39,7 +38,7 @@ v1.6.0 complete
 
 ## Next actions
 
-1. update docs: README, MCP.md, MEMORY-LIFECYCLE.md, CONFIG.md, ARCHITECTURE.md, ZERO-SHOT-SETUP-PROMPTS.md
+1. Merge PR #9 to main
 
 ## Checkpoint health
 
@@ -48,9 +47,9 @@ v1.6.0 complete
 
 ## Recovery snapshot
 
-- Checkpoint reason: completed v1.8.0: MCP 2026-07-28 compliance, OpenCode 1/2 split, ephemeral memory, distillation, GC, atomic writes
+- Checkpoint reason: docs update complete for v1.8.0
 - Branch: feat/v1.8-mcp-compliance-ephemeral
-- HEAD: 1d0292e
+- HEAD: 84d0181
 - No project-code changes detected.
 
 ## Memory to retrieve if needed
