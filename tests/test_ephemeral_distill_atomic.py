@@ -244,11 +244,194 @@ class TestAtomicWrites(unittest.TestCase):
 
     def test_project_write_lock_stale_reclaim(self):
         lock_path = self.tmp / ".write.lock"
-        # Create a stale lock (old timestamp)
-        lock_path.write_text(f"99999\n{time.time() - 300}\n", encoding="ascii")
+        # Create a stale lock (old timestamp + dead PID)
+        lock_path.write_text(f"99999\n{time.time() - 300}\nabc-token\n", encoding="ascii")
         with self.atomic.ProjectWriteLock(lock_path, timeout=2, stale_seconds=60):
             self.assertTrue(lock_path.exists())
         self.assertFalse(lock_path.exists())
+
+    def test_lockfile_contains_ownership_token(self):
+        """Each lock file must contain PID + timestamp + random ownership token."""
+        lock_path = self.tmp / ".write.lock"
+        lock = self.atomic.ProjectWriteLock(lock_path, timeout=2)
+        lock.acquire()
+        content = lock_path.read_text(encoding="ascii")
+        lines = content.strip().split("\n")
+        self.assertGreaterEqual(len(lines), 3, "lock file must have 3 lines (pid/ts/token)")
+        self.assertTrue(lines[0].strip().isdigit())
+        float(lines[1].strip())
+        self.assertTrue(lines[2].strip(), "token line must be non-empty")
+        lock.release()
+
+    def test_release_does_not_delete_foreign_lock(self):
+        """A stale owner releasing must NOT delete a lock owned by a new token."""
+        lock_path = self.tmp / ".write.lock"
+        # Simulate: old owner acquires, then a NEW owner reclaims it.
+        old_lock = self.atomic.ProjectWriteLock(lock_path, timeout=2, stale_seconds=0.1)
+        old_lock.acquire()
+        old_token = old_lock._token
+        self.assertTrue(old_token)
+        # New owner (simulated by rewriting the lock file with a different token)
+        new_token = "new-owner-token-12345"
+        lock_path.write_text(f"{os.getpid()}\n{time.time()}\n{new_token}\n", encoding="ascii")
+        # Old owner releases — must NOT delete the new owner's lock file
+        old_lock.release()
+        self.assertTrue(lock_path.exists(),
+                        "stale owner must not delete the new owner's lock file")
+        self.assertEqual(
+            lock_path.read_text(encoding="ascii").strip().split("\n")[2],
+            new_token)
+
+
+class TestLockMultiprocess(unittest.TestCase):
+    """Multiprocess lock tests (not just threads).
+
+    Spawns child processes to verify:
+    - a live holder's lock is NOT stolen on age alone;
+    - after the holder exits, the lock IS reclaimable;
+    - a stale owner's release does not delete a new owner's lock;
+    - a dead stale PID is reclaimed.
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="lock-mp-"))
+        self.lock_path = self.tmp / ".write.lock"
+        self.atomic = _load_module("atomic_mp", ATOMIC_PATH)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    @staticmethod
+    def _dead_pid() -> int:
+        """Return a PID that is guaranteed to be dead (spawn + wait)."""
+        import subprocess
+        p = subprocess.Popen([sys.executable, "-c", "pass"],
+                             stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+        p.wait(timeout=10)
+        return p.pid
+
+    def _spawn_holder(self, hold_seconds: float):
+        """Spawn a child process that acquires the lock, holds it, then exits.
+        Returns the Popen object."""
+        code = (
+            "import sys, time, importlib.util\n"
+            "spec = importlib.util.spec_from_file_location('a', %r)\n"
+            "mod = importlib.util.module_from_spec(spec)\n"
+            "spec.loader.exec_module(mod)\n"
+            "lock = mod.ProjectWriteLock(%r, timeout=5, stale_seconds=1)\n"
+            "lock.acquire()\n"
+            "print('HELD', flush=True)\n"
+            "time.sleep(%r)\n"
+            "lock.release()\n"
+            "print('RELEASED', flush=True)\n"
+            "sys.exit(0)\n"
+        ) % (str(ATOMIC_PATH), str(self.lock_path), hold_seconds)
+        import subprocess
+        p = subprocess.Popen([sys.executable, "-c", code],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             text=True)
+        # Wait for the child to print HELD (lock acquired)
+        line = p.stdout.readline() if p.stdout else ""
+        self.assertIn("HELD", line)
+        return p
+
+    def _wait_and_close(self, proc) -> None:
+        try:
+            proc.stdout.read()
+        except Exception:
+            pass
+        proc.wait(timeout=15)
+        try:
+            proc.stderr.read()
+        except Exception:
+            pass
+
+    def test_live_holder_not_stolen_on_age(self):
+        """Process A holds the lock >2s (stale_seconds=1). Process B
+        must NOT be able to steal it while A is alive."""
+        p = self._spawn_holder(hold_seconds=3)
+        try:
+            # Try to acquire from THIS process — should time out (A is alive)
+            lock_b = self.atomic.ProjectWriteLock(
+                self.lock_path, timeout=2, stale_seconds=1, poll_interval=0.05)
+            try:
+                lock_b.acquire()
+                self.fail("B should NOT acquire while A is alive")
+            except TimeoutError:
+                pass  # expected
+        finally:
+            self._wait_and_close(p)
+    def test_dead_holder_reclaimable(self):
+        """After process A exits (releases), B can acquire."""
+        p = self._spawn_holder(hold_seconds=1)
+        self._wait_and_close(p)
+        # A has released; the lock file should be gone (or reclaimable)
+        lock_b = self.atomic.ProjectWriteLock(
+            self.lock_path, timeout=3, stale_seconds=1, poll_interval=0.05)
+        lock_b.acquire()
+        self.assertTrue(self.lock_path.exists())
+        lock_b.release()
+
+    def test_stale_owner_release_does_not_stomp_new_owner(self):
+        """Process A acquires, dies without releasing.
+        B reclaims. A's late release must NOT delete B's lock."""
+        code = (
+            "import sys, time, importlib.util\n"
+            "spec = importlib.util.spec_from_file_location('a', %r)\n"
+            "mod = importlib.util.module_from_spec(spec)\n"
+            "spec.loader.exec_module(mod)\n"
+            "lock = mod.ProjectWriteLock(%r, timeout=5, stale_seconds=1)\n"
+            "lock.acquire()\n"
+            "print('HELD', flush=True)\n"
+            "time.sleep(30)\n"
+        ) % (str(ATOMIC_PATH), str(self.lock_path))
+        import subprocess
+        p = subprocess.Popen([sys.executable, "-c", code],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             text=True)
+        line = p.stdout.readline()
+        self.assertIn("HELD", line)
+        # Kill A (simulates crash — no release)
+        p.kill()
+        p.wait()
+        # B reclaims (A's PID is dead)
+        lock_b = self.atomic.ProjectWriteLock(
+            self.lock_path, timeout=3, stale_seconds=1, poll_interval=0.05)
+        lock_b.acquire()
+        self.assertTrue(self.lock_path.exists())
+        # Simulate A's late release (A's token no longer matches file)
+        a_lock = self.atomic.ProjectWriteLock(
+            self.lock_path, timeout=2, stale_seconds=1)
+        a_lock._token = "stale-a-token-that-does-not-match"
+        a_lock.release()  # must NOT delete B's lock
+        self.assertTrue(self.lock_path.exists(),
+                        "stale owner release must not delete new owner's lock")
+        lock_b.release()
+
+    def test_dead_stale_pid_reclaimed(self):
+        """A lock file with a dead PID and old timestamp is reclaimed."""
+        dead_pid = self._dead_pid()
+        self.lock_path.write_text(
+            f"{dead_pid}\n{time.time() - 999}\nold-token\n", encoding="ascii")
+        lock = self.atomic.ProjectWriteLock(
+            self.lock_path, timeout=3, stale_seconds=1, poll_interval=0.05)
+        lock.acquire()
+        self.assertTrue(self.lock_path.exists())
+        self.assertNotEqual(lock._token, "old-token")
+        lock.release()
+
+    def test_dead_pid_always_reclaimable_posix(self):
+        """Even with a FRESH timestamp, a dead PID is reclaimable."""
+        dead_pid = self._dead_pid()
+        # Fresh timestamp (age=0) but dead PID → must still be reclaimable
+        self.lock_path.write_text(
+            f"{dead_pid}\n{time.time()}\nfresh-but-dead\n", encoding="ascii")
+        lock = self.atomic.ProjectWriteLock(
+            self.lock_path, timeout=3, stale_seconds=1, poll_interval=0.05)
+        lock.acquire()
+        self.assertTrue(self.lock_path.exists())
+        lock.release()
 
 
 if __name__ == "__main__":
