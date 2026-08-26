@@ -306,6 +306,20 @@ DEFAULT_CONFIG = {
     "privacy": {"scan_on_checkpoint": False},
     "usage": {"stale_days": 30},
     "links": {"max_hops": 1, "max_neighbors_per_memory": 2, "max_linked_results": 3},
+    "ephemeral": {
+        "ttl_seconds": 1800,
+        "max_records": 200,
+        "max_bytes": 2 * 1024 * 1024,
+        "max_record_bytes": 64 * 1024,
+    },
+    "gc": {
+        "grace_days": 30,
+        "stale_days": 90,
+        "gc_candidate_days": 180,
+        "snapshot_max_age_days": 30,
+        "snapshot_max_count": 20,
+        "snapshot_max_bytes": 0,
+    },
 }
 
 
@@ -2738,6 +2752,13 @@ def remember(args) -> None:
         schema2.append("derived_from:\n" + "".join(f"  - {x}\n" for x in der))
     else:
         schema2.append("derived_from: []")
+    # Provenance: which ephemeral observation this memory was distilled from
+    src_obs = str(getattr(args, "source_observation", "") or "").strip()
+    src_obs_hash = str(getattr(args, "source_observation_hash", "") or "").strip()
+    if src_obs:
+        schema2.append(f"source_observation: {src_obs}")
+        if src_obs_hash:
+            schema2.append(f"obs_content_hash: {src_obs_hash}")
     if schema2:
         content += "".join(x if x.endswith("\n") else x + "\n" for x in schema2)
     content += (
@@ -4361,6 +4382,187 @@ class _Capture:
             _mcp_log("handler output:\n" + captured.strip())
 
 
+def observe_cmd(args) -> int:
+    """Store a raw tool output as an ephemeral observation (not durable).
+
+    Input: --file PATH or --stdin. Content is truncated, secret-redacted,
+    TTL-bound (ephemeral.ttl_seconds), and stored in the ephemeral store.
+    Returns the observation id. Durable memory is created ONLY via
+    `promote` after distillation + admission.
+    """
+    import importlib.util as _ilu
+    _pp = Path(__file__).resolve().parent / "irag_ephemeral.py"
+    _spec = _ilu.spec_from_file_location("irag_ephemeral", str(_pp))
+    try:
+        eph = _ilu.module_from_spec(_spec); _spec.loader.exec_module(eph)
+    except Exception as e:
+        print(f"ERROR: ephemeral module unavailable: {e}", file=sys.stderr)
+        return 1
+
+    if args.file:
+        try:
+            content = Path(args.file).expanduser().read_text(encoding="utf-8", errors="replace")
+        except Exception as e:
+            print(f"ERROR: cannot read {args.file}: {e}", file=sys.stderr)
+            return 1
+    else:
+        content = sys.stdin.read()
+
+    cfg = load_config().get("ephemeral", {})
+    oid = eph.add_observation(
+        RAG,
+        source=args.source or "tool",
+        content=content,
+        command=args.command,
+        exit_code=args.exit_code,
+        ttl_seconds=int(cfg.get("ttl_seconds", 1800)),
+        max_record_bytes=int(cfg.get("max_record_bytes", 65536)),
+        max_records=int(cfg.get("max_records", 200)),
+        max_bytes=int(cfg.get("max_bytes", 2 * 1024 * 1024)),
+        metadata={"via": "observe"},
+    )
+    if oid is None:
+        print("ERROR: failed to store observation", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps({"observation_id": oid, "durable": False,
+                          "note": "ephemeral only — use `promote` to distill"}, ensure_ascii=False))
+    else:
+        print(oid)
+    return 0
+
+
+def promote_cmd(args) -> int:
+    """Promote an ephemeral observation to durable memory.
+
+    Pipeline (P7 lifecycle, P18/P19 provenance):
+      observation -> distillation (irag_distill.distill_output)
+                 -> admission (confidence >= 0.5 AND root cause present)
+                 -> remember() (secret scan + dedup + atomic write under lock)
+                 -> observation marked promoted + DELETED
+    If admission fails the observation stays ephemeral (no durable memory).
+    """
+    import importlib.util as _ilu
+    _base = Path(__file__).resolve().parent
+    eph = dist = None
+    for name, fname in (("irag_ephemeral", "irag_ephemeral.py"),
+                        ("irag_distill", "irag_distill.py")):
+        spec = _ilu.spec_from_file_location(name, str(_base / fname))
+        mod = _ilu.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        if name == "irag_ephemeral":
+            eph = mod
+        else:
+            dist = mod
+
+    obs = eph.get_observation(RAG, args.observation_id)
+    if obs is None:
+        print(f"ERROR: observation {args.observation_id} not found or expired", file=sys.stderr)
+        return 1
+
+    d = dist.distill_output(
+        obs.get("source", "tool"), obs.get("content", ""),
+        command=obs.get("command"), exit_code=obs.get("exit_code"))
+    result = dist.distill_to_memory_body(d)
+
+    if result is None:
+        msg = {"promoted": False,
+               "reason": f"admission failed: confidence={d['confidence']:.2f} < 0.5 or no root cause",
+               "observation_id": obs["id"],
+               "confidence": d["confidence"],
+               "distilled": {k: d[k] for k in
+                             ("errors", "exception_type", "root_cause", "remediation")}}
+        print(json.dumps(msg, ensure_ascii=False, indent=2) if args.json
+              else "NOT PROMOTED: distillation confidence too low or no root cause. "
+                   "Observation remains ephemeral (expires on TTL).")
+        return 0
+
+    title, body = result
+    ns = argparse.Namespace(
+        type=args.type, status="active", title=title, body=body,
+        scope=args.scope, tags="diagnosed", evidence=obs.get("command") or "",
+        consequence=d.get("root_cause") or "", links="",
+        confidence="medium", valid_from=None, valid_to=None,
+        supersedes="", derived_from="",
+        source_observation=str(obs["id"]),
+        source_observation_hash=d.get("content_hash") or "",
+        force=args.force, allow_secret=args.allow_secret,
+        json=False,  # keep stdout a single JSON document
+    )
+    status = remember(ns)
+    if status != "created":
+        print(json.dumps({"promoted": False, "reason": f"remember: {status}",
+                          "observation_id": obs["id"]}, ensure_ascii=False), file=sys.stderr)
+        return 1
+    # Promotion succeeded: mark + DELETE the raw observation (lifecycle end)
+    eph.mark_promoted(RAG, obs["id"], promoted_to=title, distilled=d.get("root_cause"))
+    eph.delete_observation(RAG, obs["id"])
+    out = {"promoted": True, "title": title,
+           "observation_id": obs["id"],
+           "provenance": {"source_observation": obs["id"],
+                          "content_hash": d.get("content_hash"),
+                          "confidence": d["confidence"]}}
+    print(json.dumps(out, ensure_ascii=False, indent=2))
+    return 0
+
+
+def gc_cli_cmd(args) -> int:
+    """Retention/GC CLI: gc [--dry-run|--apply] [--json] [--grace-days N]"""
+    import importlib.util as _ilu
+    _spec = _ilu.spec_from_file_location("irag_gc", str(Path(__file__).resolve().parent / "irag_gc.py"))
+    gc = _ilu.module_from_spec(_spec); _spec.loader.exec_module(gc)
+
+    files = []
+    for p in memory_files():
+        try:
+            text, fm = _read_memory(p)
+            files.append((p, fm))
+        except Exception:
+            continue
+    plan = gc.gc_plan(RAG, files, grace_days=args.grace_days)
+
+    # Include ephemeral cleanup + snapshot cleanup in the report
+    eph_stats = None
+    snap_plan = gc.snapshot_gc_plan(RAG)
+    if args.apply:
+        snap_run = gc.snapshot_gc_run(snap_plan, apply=True)
+    else:
+        snap_run = None
+
+    result = gc.gc_run(RAG, plan, apply=args.apply,
+                       write_lock=(ProjectWriteLock(RAG / ".write.lock") if args.apply else None))
+    # Ephemeral expiry runs on every GC (cheap, TTL-based)
+    try:
+        import importlib.util as _ilu2
+        _sp = _ilu2.spec_from_file_location("irag_ephemeral", str(Path(__file__).resolve().parent / "irag_ephemeral.py"))
+        eph = _ilu2.module_from_spec(_sp); _sp.loader.exec_module(eph)
+        deleted = eph.cleanup_expired(RAG)
+        eph_stats = {"expired_deleted": deleted, **eph.ephemeral_stats(RAG)}
+    except Exception:
+        eph_stats = None
+
+    out = {"applied": args.apply,
+           "plan": {"total": plan["total"], "protected": plan["protected_count"],
+                    "would_archive": plan["would_archive"],
+                    "would_delete": plan["would_delete"],
+                    "would_deprioritize": plan["would_deprioritize"]},
+           "executed": {k: result.get(k) for k in ("archived", "deleted", "deprioritized")},
+           "snapshot_gc": {"would_delete": snap_plan.get("would_delete", 0),
+                           "deleted": (snap_run or {}).get("deleted", 0)},
+           "ephemeral": eph_stats}
+    if args.json:
+        print(json.dumps(out, ensure_ascii=False, indent=2))
+    else:
+        p = out["plan"]
+        print(f"GC {'APPLIED' if args.apply else 'DRY-RUN'}: "
+              f"total={p['total']} protected={p['protected']} "
+              f"archive={p['would_archive']} delete={p['would_delete']} deprioritize={p['would_deprioritize']}")
+        if args.apply:
+            e = out["executed"]
+            print(f"  archived={e['archived']} deleted={e['deleted']} deprioritized={e['deprioritized']}")
+    return 0
+
+
 def _mcp_dispatch(name: str, args_d: Dict[str, Any]
                   ) -> Tuple[str, bool, Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     """Dispatch a tool call. Returns (text_result, is_error, structured_content, output_schema).
@@ -4534,7 +4736,11 @@ def mcp_server() -> int:
     except Exception:
         _proto = None
     SUPPORTED = (getattr(_proto, "SUPPORTED_VERSIONS", None) or
-                 ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"])
+                  ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"])
+    SUPPORTED_MODERN = (getattr(_proto, "SUPPORTED_MODERN_VERSIONS", None) or
+                        ["2026-07-28"])
+    SUPPORTED_LEGACY = (getattr(_proto, "SUPPORTED_LEGACY_VERSIONS", None) or
+                        ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"])
     MODERN = getattr(_proto, "MODERN_VERSION", "2026-07-28")
     _META_PV = getattr(_proto, "META_PROTOCOL_VERSION", "io.modelcontextprotocol/protocolVersion")
     _META_SI = getattr(_proto, "META_SERVER_INFO", "io.modelcontextprotocol/serverInfo")
@@ -4569,7 +4775,9 @@ def mcp_server() -> int:
           - _meta["io.modelcontextprotocol/protocolVersion"] (required)
           - _meta["io.modelcontextprotocol/clientCapabilities"] (required)
 
-        Unsupported protocol versions return -32022.
+        The declared version MUST be a supported MODERN revision — a legacy
+        revision (2024-11-05 … 2025-11-25) in per-request _meta is rejected
+        as unsupported in the modern era.
         """
         meta = params.get("_meta")
         if not isinstance(meta, dict):
@@ -4577,12 +4785,12 @@ def mcp_server() -> int:
         pv = meta.get(_META_PV)
         if pv is None:
             return None  # no _meta or no PV -> legacy dispatch
-        # Check supported version
-        if pv not in SUPPORTED:
+        # Check supported modern version
+        if pv not in SUPPORTED_MODERN:
             return {
                 "code": _ERR_UNSUP,
                 "message": f"Unsupported protocol version: {pv}",
-                "data": {"supported": SUPPORTED, "requested": pv},
+                "data": {"supported": SUPPORTED_MODERN, "requested": pv},
             }
         return None
 
@@ -4617,10 +4825,10 @@ def mcp_server() -> int:
             # Read protocol version from _meta (not params.protocolVersion)
             meta = params.get("_meta", {})
             client_v = str(meta.get(_META_PV, ""))
-            # Validate requested version
-            if client_v and client_v not in SUPPORTED:
+            # Validate requested version (modern era only)
+            if client_v and client_v not in SUPPORTED_MODERN:
                 _err(rid, _ERR_UNSUP, f"Unsupported protocol version: {client_v}",
-                     {"supported": SUPPORTED, "requested": client_v})
+                     {"supported": SUPPORTED_MODERN, "requested": client_v})
                 continue
             if _proto:
                 result = _proto.discover_result(
@@ -4631,7 +4839,7 @@ def mcp_server() -> int:
             else:
                 result = {
                     "resultType": "complete",
-                    "supportedVersions": SUPPORTED,
+                    "supportedVersions": SUPPORTED_MODERN,
                     "capabilities": {"tools": {}},
                     "instructions": "MCP Light Memory - persistent project memory.",
                     "_meta": {_META_SI: {"name": "mcp-light-memory", "version": VERSION}},
@@ -4642,12 +4850,15 @@ def mcp_server() -> int:
             continue
 
         if method == "initialize":
-            # Legacy initialize handshake
+            # Legacy initialize handshake. The modern era (2026-07-28) is NOT
+            # negotiable via initialize — a modern revision is countered to the
+            # latest supported LEGACY revision (legacy clients are never
+            # force-upgraded into the modern era).
             client_v = str(params.get("protocolVersion", ""))
             if _proto:
                 negotiated = _proto.negotiate_version(client_v)
             else:
-                negotiated = client_v if client_v in SUPPORTED else server_version_legacy
+                negotiated = client_v if client_v in SUPPORTED_LEGACY else server_version_legacy
             conn_version = negotiated
             if _proto:
                 result = _proto.legacy_initialize_result(
@@ -4816,6 +5027,8 @@ def main() -> None:
     p.add_argument("--supersedes", default="", help="schema-2: comma-separated ids this memory replaces.")
     p.add_argument("--derived-from", dest="derived_from", default="",
                    help="schema-2: comma-separated ids this memory was derived from.")
+    p.add_argument("--source-observation", dest="source_observation", default="",
+                   help="Provenance: ephemeral observation id this memory was distilled from.")
     p.add_argument("--force", action="store_true", help="Create even if a similar/conflicting memory exists.")
     p.add_argument("--allow-secret", action="store_true", help="Bypass secret-pattern scan (use with caution).")
     p.add_argument("--json", action="store_true", help="Machine-readable result (including duplicate detection).")
@@ -4895,6 +5108,28 @@ def main() -> None:
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--apply", action="store_true")
     p.add_argument("--strip", action="store_true", help="Also remove last_accessed from Markdown.")
+    p.add_argument("--json", action="store_true")
+
+    p = sub.add_parser("observe", help="Store raw tool output as ephemeral observation (not durable).")
+    p.add_argument("--file", help="Read content from a file (default: stdin).")
+    p.add_argument("--source", default="tool", help="Source label (e.g. pytest, build, lint).")
+    p.add_argument("--command", default=None, help="The command that produced the output.")
+    p.add_argument("--exit-code", type=int, default=None, help="Exit code of the command.")
+    p.add_argument("--json", action="store_true")
+
+    p = sub.add_parser("promote", help="Distill an ephemeral observation into durable memory.")
+    p.add_argument("--observation-id", type=int, required=True)
+    p.add_argument("--type", default="failure", choices=sorted(TYPE_DIR.keys()),
+                   help="Memory type for the distilled conclusion (default: failure).")
+    p.add_argument("--scope", default="")
+    p.add_argument("--force", action="store_true", help="Bypass duplicate/conflict blocks.")
+    p.add_argument("--allow-secret", action="store_true")
+    p.add_argument("--json", action="store_true")
+
+    p = sub.add_parser("gc", help="Retention/GC: non-aggressive lifecycle management.")
+    p.add_argument("--dry-run", action="store_true", help="Report only (default).")
+    p.add_argument("--apply", action="store_true", help="Execute the plan.")
+    p.add_argument("--grace-days", type=int, default=30)
     p.add_argument("--json", action="store_true")
 
     p = sub.add_parser("config")
@@ -4997,6 +5232,12 @@ def main() -> None:
         raise SystemExit(remember_batch(a))
     elif a.cmd == "clean":
         raise SystemExit(clean_cmd(a))
+    elif a.cmd == "observe":
+        raise SystemExit(observe_cmd(a))
+    elif a.cmd == "promote":
+        raise SystemExit(promote_cmd(a))
+    elif a.cmd == "gc":
+        raise SystemExit(gc_cli_cmd(a))
     elif a.cmd == "show":
         raise SystemExit(show_memory(a))
     elif a.cmd == "update":

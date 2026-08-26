@@ -30,17 +30,25 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional
 
-# Supported protocol versions, newest first.
-SUPPORTED_VERSIONS: List[str] = [
+# Explicit era-separated protocol version lists (newest first).
+# Modern era (per-request _meta protocolVersion + server/discover):
+SUPPORTED_MODERN_VERSIONS: List[str] = [
     "2026-07-28",      # modern: discover, no-init, per-request _meta, resultType
+]
+# Legacy era (initialize handshake):
+SUPPORTED_LEGACY_VERSIONS: List[str] = [
     "2025-11-25",
     "2025-06-18",
     "2025-03-26",
     "2024-11-05",      # legacy baseline
 ]
+# Combined list — informational only (aggregate "supported by this server").
+# Era-specific checks MUST use the era-specific subsets above.
+SUPPORTED_VERSIONS: List[str] = SUPPORTED_MODERN_VERSIONS + SUPPORTED_LEGACY_VERSIONS
+
 MODERN_VERSION = "2026-07-28"
-LEGACY_VERSIONS = SUPPORTED_VERSIONS[1:]  # everything except the modern one
-DEFAULT_LEGACY = "2025-11-25"  # safe default for legacy clients
+LEGACY_VERSIONS = list(SUPPORTED_LEGACY_VERSIONS)  # back-compat alias
+DEFAULT_LEGACY = "2025-11-25"  # safe counter-offer for legacy clients
 
 # Namespace keys for _meta (MCP 2026-07-28)
 META_PROTOCOL_VERSION = "io.modelcontextprotocol/protocolVersion"
@@ -66,9 +74,14 @@ def is_modern(version: str) -> bool:
 
 
 def negotiate_version(client_version: str) -> str:
-    """Return the client's version if supported, else the latest legacy
-    version (NOT the modern one — legacy clients must not be force-upgraded)."""
-    if client_version in SUPPORTED_VERSIONS:
+    """Negotiate a LEGACY initialize handshake version.
+
+    Only SUPPORTED_LEGACY_VERSIONS are negotiable. The modern era
+    (2026-07-28) is NOT negotiable via initialize — a modern revision is
+    never advertised as the legacy handshake version. Unsupported or modern
+    revisions fall back to the latest supported legacy version (counter-offer).
+    """
+    if client_version in SUPPORTED_LEGACY_VERSIONS:
         return client_version
     return DEFAULT_LEGACY
 
@@ -114,12 +127,13 @@ def validate_modern_request(params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         # but could be a legacy request with an empty _meta. Only enforce if
         # the request uses modern methods.
         return None
-    # Check supported version
-    if pv not in SUPPORTED_VERSIONS:
+    # Check supported version (modern era only — legacy revisions in
+    # per-request _meta are unsupported in the modern era)
+    if pv not in SUPPORTED_MODERN_VERSIONS:
         return {
             "code": ERR_UNSUPPORTED_PROTOCOL_VERSION,
             "message": f"Unsupported protocol version: {pv}",
-            "data": {"supported": SUPPORTED_VERSIONS, "requested": pv},
+            "data": {"supported": SUPPORTED_MODERN_VERSIONS, "requested": pv},
         }
     return None
 
@@ -131,7 +145,9 @@ def discover_result(server_name: str, server_version: str,
     """Build a `server/discover` result for MCP 2026-07-28.
 
     Per the final spec:
-    - `supportedVersions`: list of protocol versions
+    - `supportedVersions`: modern revisions only (2026-07-28 era). The
+      legacy era (2024-11-05 … 2025-11-25, initialize-based) is NOT
+      advertised here — those versions negotiate exclusively via initialize.
     - `capabilities`: server capabilities
     - `serverInfo` goes in `_meta["io.modelcontextprotocol/serverInfo"]` (NOT top-level)
     - `ttlMs` and `cacheScope` are top-level result fields
@@ -139,7 +155,7 @@ def discover_result(server_name: str, server_version: str,
     """
     return {
         "resultType": "complete",
-        "supportedVersions": SUPPORTED_VERSIONS,
+        "supportedVersions": list(SUPPORTED_MODERN_VERSIONS),
         "capabilities": capabilities or {"tools": {}},
         "instructions": instructions,
         "_meta": {

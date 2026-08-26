@@ -246,8 +246,10 @@ class TestProtocolHelpers(unittest.TestCase):
         self.assertEqual(proto.negotiate_version("2024-11-05"), "2024-11-05")
         self.assertEqual(proto.negotiate_version("2025-06-18"), "2025-06-18")
 
-    def test_negotiate_modern(self):
-        self.assertEqual(proto.negotiate_version("2026-07-28"), "2026-07-28")
+    def test_negotiate_modern_counters_to_legacy(self):
+        # 2026-07-28 is NOT negotiable via the legacy initialize handshake —
+        # a modern revision is countered to the latest supported legacy version.
+        self.assertEqual(proto.negotiate_version("2026-07-28"), proto.DEFAULT_LEGACY)
 
     def test_negotiate_unknown_falls_back(self):
         self.assertEqual(proto.negotiate_version("2099-01-01"), proto.DEFAULT_LEGACY)

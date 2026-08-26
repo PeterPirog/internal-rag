@@ -463,6 +463,151 @@ class TestRouterUnsupportedVersion(unittest.TestCase):
         self.assertEqual(d["error"]["code"], ERR_UNSUP)
 
 
+class TestEraSeparation(ConformanceBase):
+    """14. Modern vs legacy era separation.
+
+    - Modern era: 2026-07-28+, per-request _meta + server/discover.
+    - Legacy era: 2024-11-05 … 2025-11-25, initialize handshake.
+    - 2026-07-28 is NOT negotiable via initialize.
+    - server/discover advertises ONLY modern revisions.
+    - A legacy revision in per-request _meta is rejected in the modern era.
+    """
+
+    def test_discover_supported_versions_is_modern_subset(self):
+        """1. server/discover supportedVersions == modern subset, no 2025-11-25."""
+        lines = [
+            {"jsonrpc": "2.0", "id": 1, "method": "server/discover",
+             "params": {"_meta": _modern_meta()}},
+            {"jsonrpc": "2.0", "id": 2, "method": "shutdown"},
+        ]
+        objs = self._run(lines)
+        r = _find(objs, 1)["result"]
+        sv = r["supportedVersions"]
+        self.assertIn(MODERN_VERSION, sv)
+        self.assertNotIn("2025-11-25", sv)
+        self.assertNotIn("2025-06-18", sv)
+        self.assertNotIn("2025-03-26", sv)
+        self.assertNotIn("2024-11-05", sv)
+
+    def test_initialize_with_modern_version_counters_to_legacy(self):
+        """2. initialize with 2026-07-28 does NOT negotiate the modern era —
+        the server counters with the latest supported LEGACY revision."""
+        lines = [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+             "params": {"protocolVersion": MODERN_VERSION,
+                        "clientInfo": {"name": "era-test", "version": "1.0"}}},
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {"jsonrpc": "2.0", "id": 2, "method": "shutdown"},
+        ]
+        objs = self._run(lines)
+        init = _find(objs, 1)
+        self.assertIn("result", init)
+        negotiated = init["result"]["protocolVersion"]
+        self.assertNotEqual(negotiated, MODERN_VERSION,
+                            "2026-07-28 must not be negotiated via initialize")
+        self.assertEqual(negotiated, "2025-11-25",
+                         "counter-offer must be the latest legacy revision")
+
+    def test_initialize_with_legacy_2025_11_25_still_works(self):
+        """3. initialize with 2025-11-25 negotiates itself (legacy era)."""
+        lines = [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+             "params": {"protocolVersion": "2025-11-25",
+                        "clientInfo": {"name": "era-test", "version": "1.0"}}},
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {"jsonrpc": "2.0", "id": 2, "method": "shutdown"},
+        ]
+        objs = self._run(lines)
+        init = _find(objs, 1)
+        self.assertIn("result", init)
+        self.assertEqual(init["result"]["protocolVersion"], "2025-11-25")
+
+    def test_modern_request_with_legacy_version_rejected(self):
+        """4. Modern tools/list with _meta protocolVersion=2025-11-25 is
+        rejected as unsupported in the modern era (not silently downgraded)."""
+        lines = [
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/list",
+             "params": {"_meta": _modern_meta("2025-11-25")}},
+            {"jsonrpc": "2.0", "id": 2, "method": "shutdown"},
+        ]
+        objs = self._run(lines)
+        d = _find(objs, 1)
+        self.assertIn("error", d, "legacy revision in modern _meta must be rejected")
+        self.assertEqual(d["error"]["code"], ERR_UNSUP)
+        data = d["error"].get("data", {})
+        self.assertIn("supported", data)
+        self.assertNotIn("2025-11-25", data["supported"],
+                         "supported list for modern era must not contain legacy revisions")
+
+    def test_modern_tools_list_with_2026_07_28_works(self):
+        """5. 2026-07-28 modern tools/list still works."""
+        lines = [
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/list",
+             "params": {"_meta": _modern_meta(MODERN_VERSION)}},
+            {"jsonrpc": "2.0", "id": 2, "method": "shutdown"},
+        ]
+        objs = self._run(lines)
+        r = _find(objs, 1)["result"]
+        self.assertEqual(r.get("resultType"), "complete")
+        self.assertIn("tools", r)
+        self.assertGreater(len(r["tools"]), 0)
+
+
+class TestRouterEraSeparation(unittest.TestCase):
+    """6. The router must behave identically for era separation."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="mcp-conf-rou-"))
+        root = self.tmp / "proj"
+        rag = root / "INTERNAL_RAG"
+        for d in ("decisions", "knowledge", "gotchas", "failures",
+                  "hypotheses", "sessions", "sessions/.snapshots", "archive"):
+            (rag / d).mkdir(parents=True, exist_ok=True)
+        (rag / "WORKING_STATE.md").write_text("# ws\n", encoding="utf-8")
+        self.reg = self.tmp / "reg.json"
+        self.reg.write_text(json.dumps({"projects": {
+            "p": {"root": str(root), "write": False}}}), encoding="utf-8")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _run(self, lines: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        stdout = _run_stdio([sys.executable, str(ROUTER_PATH),
+                             "--registry", str(self.reg)], lines, self.tmp)
+        return _objs(stdout)
+
+    def test_router_discover_modern_subset(self):
+        lines = [
+            {"jsonrpc": "2.0", "id": 1, "method": "server/discover",
+             "params": {"_meta": _modern_meta()}},
+            {"jsonrpc": "2.0", "id": 2, "method": "shutdown"},
+        ]
+        r = _find(self._run(lines), 1)["result"]
+        self.assertIn(MODERN_VERSION, r["supportedVersions"])
+        self.assertNotIn("2025-11-25", r["supportedVersions"])
+
+    def test_router_initialize_modern_counters_to_legacy(self):
+        lines = [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+             "params": {"protocolVersion": MODERN_VERSION}},
+            {"jsonrpc": "2.0", "id": 2, "method": "shutdown"},
+        ]
+        init = _find(self._run(lines), 1)
+        self.assertNotEqual(init["result"]["protocolVersion"], MODERN_VERSION)
+        self.assertEqual(init["result"]["protocolVersion"], "2025-11-25")
+
+    def test_router_modern_request_with_legacy_version_rejected(self):
+        lines = [
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/list",
+             "params": {"_meta": _modern_meta("2025-11-25")}},
+            {"jsonrpc": "2.0", "id": 2, "method": "shutdown"},
+        ]
+        d = _find(self._run(lines), 1)
+        self.assertIn("error", d)
+        self.assertEqual(d["error"]["code"], ERR_UNSUP)
+        self.assertNotIn("2025-11-25", d["error"].get("data", {}).get("supported", []))
+
+
 class TestLegacyInitializeRegression(ConformanceBase):
     """12. Legacy initialize regression."""
 

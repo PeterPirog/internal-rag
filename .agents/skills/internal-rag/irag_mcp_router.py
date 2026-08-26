@@ -31,6 +31,8 @@ ROUTER_VERSION = "1.8.0"
 ROUTER_NAME = "mcp-light-memory-router"
 ROUTER_LEGACY_NAME = "internal-rag-router"  # deprecated alias
 SUPPORTED_VERSIONS = ["2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]
+SUPPORTED_MODERN_VERSIONS = ["2026-07-28"]
+SUPPORTED_LEGACY_VERSIONS = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]
 
 MUTATING_TOOLS = {"remember", "checkpoint", "resume"}
 READ_TOOLS = ("context", "search", "guard", "status", "tasks")
@@ -288,11 +290,11 @@ def serve(registry: Dict[str, Dict[str, Any]], irag_path: str, timeout: float) -
         pv = meta.get(_META_PV)
         if pv is None:
             return None
-        if pv not in SUPPORTED_VERSIONS:
+        if pv not in SUPPORTED_MODERN_VERSIONS:
             return {
                 "code": _ERR_UNSUP,
                 "message": f"Unsupported protocol version: {pv}",
-                "data": {"supported": SUPPORTED_VERSIONS, "requested": pv},
+                "data": {"supported": SUPPORTED_MODERN_VERSIONS, "requested": pv},
             }
         return None
 
@@ -327,9 +329,9 @@ def serve(registry: Dict[str, Dict[str, Any]], irag_path: str, timeout: float) -
             # Modern: read protocol version from _meta (not params.protocolVersion)
             meta = params.get("_meta", {})
             client_v = str(meta.get(_META_PV, ""))
-            if client_v and client_v not in SUPPORTED_VERSIONS:
+            if client_v and client_v not in SUPPORTED_MODERN_VERSIONS:
                 _err(rid, _ERR_UNSUP, f"Unsupported protocol version: {client_v}",
-                     {"supported": SUPPORTED_VERSIONS, "requested": client_v})
+                     {"supported": SUPPORTED_MODERN_VERSIONS, "requested": client_v})
                 continue
             if _proto:
                 result = _proto.discover_result(
@@ -340,7 +342,7 @@ def serve(registry: Dict[str, Dict[str, Any]], irag_path: str, timeout: float) -
             else:
                 result = {
                     "resultType": "complete",
-                    "supportedVersions": SUPPORTED_VERSIONS,
+                    "supportedVersions": SUPPORTED_MODERN_VERSIONS,
                     "capabilities": {"tools": {}},
                     "instructions": "Multi-project MCP Light Memory router.",
                     "_meta": {_META_SI: {"name": "mcp-light-memory-router", "version": ROUTER_VERSION}},
@@ -350,11 +352,14 @@ def serve(registry: Dict[str, Dict[str, Any]], irag_path: str, timeout: float) -
             _send({"jsonrpc": "2.0", "id": rid, "result": result})
             continue
         if method == "initialize":
+            # Legacy initialize handshake. The modern era (2026-07-28) is NOT
+            # negotiable via initialize — it is countered to the latest
+            # supported LEGACY revision.
             client_v = str(params.get("protocolVersion", ""))
             if _proto:
                 negotiated = _proto.negotiate_version(client_v)
             else:
-                negotiated = client_v if client_v in SUPPORTED_VERSIONS else SUPPORTED_VERSIONS[1]
+                negotiated = client_v if client_v in SUPPORTED_LEGACY_VERSIONS else SUPPORTED_LEGACY_VERSIONS[0]
             conn_version = negotiated
             if _proto:
                 result = _proto.legacy_initialize_result(
