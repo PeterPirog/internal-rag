@@ -1,5 +1,79 @@
 # Changelog
 
+## 1.8.0 — 2026-08-26
+
+Major modernization: MCP 2026-07-28 final spec compliance, OpenCode 1/2 split, ephemeral memory lifecycle, diagnostic distillation, GC/retention, atomic writes.
+
+### P0 — MCP 2026-07-28 final wire format compliance
+- **Per-request protocol version** read from `_meta["io.modelcontextprotocol/protocolVersion"]` (NOT `params.protocolVersion` as in the draft).
+- **`server/discover`** reads version from `_meta`, returns `serverInfo` in `_meta["io.modelcontextprotocol/serverInfo"]` (NOT top-level).
+- **`ttlMs`/`cacheScope`** are top-level result fields (NOT in `_meta`). Values: `"public"` | `"private"`.
+- **`resultType`** required on every result.
+- **`outputSchema`** declared in tool definitions (NOT in `tools/call` results).
+- **Stateless dispatch**: modern requests are self-describing per-request; no `conn_version` needed.
+- **`UnsupportedProtocolVersionError`** uses code `-32022` with `supported`/`requested` data.
+- Legacy `initialize` still works (dual-era). Legacy `initialize` returns `serverInfo` top-level (backward compat).
+- Router updated to the same wire format.
+- **21 conformance/golden tests** (`tests/test_mcp_conformance.py`) based on the official spec.
+
+### P0 — OpenCode 1 vs OpenCode 2 split
+- `--client opencode` = stable OpenCode 1 (uses `enabled: true` on server entry).
+- `--client opencode2` = OpenCode 2 beta (no `enabled` field; V2 uses `disabled` with absent = enabled).
+- Both write `opencode.json` with `mcp.servers.<name>` shape, `type: "local"`, `command` as array, `cwd`.
+- Merge preserves existing MCP servers and other config keys.
+- OpenCode plugin V1 (`internal-rag-resilience.ts`) and V2 (`internal-rag-resilience-v2.ts`) split.
+- V2 plugin uses best-effort `ctx.tool.hook` / `ctx.event` patterns (beta API, may change).
+
+### P1 — Ephemeral observations layer (`irag_ephemeral.py`)
+- SQLite-based bounded storage for raw tool outputs (console, terminal, builds, lints, tests).
+- NOT durable Markdown memory; NOT indexed for retrieval.
+- TTL-based expiry (default 30 min, configurable via `ephemeral.*`).
+- `max_records` (200) and `max_bytes` (2MB) limits. `max_record_bytes` (64KB) per observation.
+- Secret redaction (password=, api_key=, token=, etc.).
+- Lifecycle: raw → ephemeral → distillation → admission → durable → deletion.
+- Promotion marks observation + deletes after durable memory created.
+
+### P1 — Diagnostic distillation (`irag_distill.py`)
+- Stdlib-first extraction from large tool outputs (no LLM dependency).
+- Extracts: command name, exit code, ERROR/WARNING/FAILED, exception type+message, stack frames, root cause, remediation, evidence excerpt, content hash.
+- `should_promote` only if confidence ≥ MEDIUM and root_cause/errors present.
+- Successful output / warnings without value → `should_promote=False`.
+- 5000-line output → short conclusion like "Test X fails because Y. Root cause in Z."
+
+### P1 — OpenCode compaction integration
+- `--compaction` flag: merges compaction settings into OpenCode config (does NOT overwrite existing values).
+- V1: `compaction.auto=true`, `compaction.prune=true`, `compaction.reserved=10000`.
+- V2: `tool_output.max_lines=500`, `tool_output.max_bytes=65536`.
+- MCP Light Memory manages its own persistent/ephemeral memory; does NOT pretend to control host conversation history.
+
+### P1 — Retention + GC (`irag_gc.py`)
+- Retention classes: `protected` (decisions/constraints — never GC'd), `tentative_hypotheses`, `normal_durable`, `archived`.
+- 4-stage decay: deprioritize → archive candidate → archive → delete (after grace period).
+- Factors: created, last_accessed, access_count, confidence, status, type, evidence freshness, link count, reinforcement.
+- `gc --dry-run` is the safe default. `gc --apply` executes.
+- Protected decisions/constraints NEVER appear in GC candidates.
+
+### P1 — Session snapshot GC
+- `snapshot_gc_plan()`: `max_age_days`, `max_count`, `max_bytes`.
+- Active recovery point (most recent snapshot) is NEVER deleted.
+- Dry-run report before destructive cleanup.
+
+### P1 — Concurrency + atomic writes (`irag_atomic.py`)
+- `atomic_write_text()`: temp file → fsync → `os.replace`.
+- `ProjectWriteLock`: cross-platform file lock (O_EXCL + fcntl on POSIX) with stale-lock detection.
+- Applied to: `save_working`, `save_checkpoint`, `_append_history`, tasks, fpcache.
+
+### P2 — Value-aware forgetting
+- `_compute_memory_value()`: recency × reuse × confidence × evidence × type × reinforcement.
+- Decisions/constraints are protected; never deleted by decay alone.
+- "Not accessed in 30 days" is NEVER sufficient alone for deletion.
+- Value score is separate from relevance score (no benchmark mixing).
+
+### Tests
+- **340 tests pass** (was 279), 5 skipped, 0 required dependencies.
+- New: `test_mcp_conformance.py` (21), `test_ephemeral_distill_atomic.py` (23), `test_gc.py` (14), `test_install_cli.py` (+3 OpenCode V1/V2 split).
+- No retrieval-quality regression.
+
 ## 1.7.3 — 2026-08-26
 
 Critical fix for JetBrains/PyCharm: `--client jetbrains` no longer claims to "register" a server, because PyCharm does NOT auto-read any MCP config file.

@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-VERSION = "1.7.3"
+VERSION = "1.8.0"
 PRODUCT_NAME = "MCP Light Memory"
 PRODUCT_SLUG = "mcp-light-memory"
 LEGACY_NAME = "internal-rag"  # deprecated; kept for compatibility
@@ -319,7 +319,16 @@ def client_config_path(client: str, project: Path, global_cfg: bool) -> Path:
             return home / ".warp" / ".mcp.json"
         return project / ".warp" / ".mcp.json"
     elif client == "opencode":
-        # OpenCode V2 reads opencode.json / opencode.jsonc in the project root
+        # OpenCode 1 (stable): reads opencode.json / opencode.jsonc in the project root
+        # or ~/.config/opencode/opencode.json (global)
+        if global_cfg:
+            return home / ".config" / "opencode" / "opencode.json"
+        return project / "opencode.json"
+    elif client == "opencode2":
+        # OpenCode 2 (beta): same config file paths as V1, but uses a different
+        # MCP server structure (mcp.servers.<name> with disabled instead of enabled)
+        if global_cfg:
+            return home / ".config" / "opencode" / "opencode.json"
         return project / "opencode.json"
     elif client == "jetbrains":
         # JetBrains AI Assistant reads ~/.config/jetbrains/mcp.json (Linux/macOS)
@@ -344,12 +353,19 @@ def register_client(client: str, project: Path, global_cfg: bool,
     py = detect_python()
     script_abs = str((project / script_rel).resolve())
     full_args = [py, script_abs] + extra_args
-    if client == "opencode":
+    if client in ("opencode", "opencode2"):
+        # Both OpenCode 1 and 2 use the mcp.servers.<name> shape with
+        # type: "local" and command as an array.
+        # OpenCode 1 uses "enabled": true; OpenCode 2 uses "disabled": false
+        # (i.e. absence of "disabled" = enabled in V2).
         server_entry = {
             "type": "local",
             "command": full_args,
             "cwd": str(project.resolve()),
         }
+        if client == "opencode":
+            server_entry["enabled"] = True
+        # opencode2: don't add "enabled"; V2 uses "disabled" (absent = enabled)
     else:
         server_entry = {
             "command": full_args[0],
@@ -379,7 +395,7 @@ def register_client(client: str, project: Path, global_cfg: bool,
     else:
         data = {}
     # Navigate to the servers container
-    if client == "opencode":
+    if client in ("opencode", "opencode2"):
         mcp = data.setdefault("mcp", {})
         servers = mcp.setdefault("servers", {})
     else:
@@ -481,14 +497,14 @@ def unregister_client(client: str, project: Path, global_cfg: bool,
     except Exception:
         print(f"Could not parse {cfg_path} — leaving unchanged.")
         return
-    if client == "opencode":
+    if client in ("opencode", "opencode2"):
         servers = data.get("mcp", {}).get("servers", {})
     else:
         servers = data.get("mcpServers", {})
     if server_name in servers:
         del servers[server_name]
         is_empty = False
-        if client == "opencode":
+        if client in ("opencode", "opencode2"):
             mcp_servers = data.get("mcp", {}).get("servers", {})
             is_empty = len(mcp_servers) == 0 and len(data.get("mcp", {})) <= 1
         else:
@@ -624,19 +640,77 @@ def write_manifest(target: Path, backup_root: Path, agent_info: dict, mode: str,
     (d / 'manifest.json').write_text(json.dumps(data, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
 
 
+def integrate_compaction(client: str, project: Path, global_cfg: bool):
+    """Merge compaction settings into the OpenCode config.
+
+    For OpenCode 1 (stable): sets compaction.auto=true, compaction.prune=true
+    (if not already present — does NOT overwrite existing values).
+
+    For OpenCode 2 (beta): sets tool_output.max_lines and tool_output.max_bytes
+    (if not already present).
+
+    MCP Light Memory manages its own persistent/ephemeral memory; this
+    integration only configures the host's context compaction to work
+    alongside it. It does NOT pretend to control the host's conversation
+    history — only the compaction settings that help keep context manageable.
+    """
+    if client == "opencode":
+        cfg_path = client_config_path("opencode", project, global_cfg)
+    elif client == "opencode2":
+        cfg_path = client_config_path("opencode2", project, global_cfg)
+    else:
+        return
+    if not cfg_path.exists():
+        # Config was just created by register_client; read it
+        pass
+    try:
+        data = json.loads(cfg_path.read_text(encoding="utf-8"))
+    except Exception:
+        data = {}
+
+    if client == "opencode":
+        comp = data.setdefault("compaction", {})
+        # Only set if not already configured (respect user's explicit choices)
+        if "auto" not in comp:
+            comp["auto"] = True
+        if "prune" not in comp:
+            comp["prune"] = True
+        if "reserved" not in comp:
+            comp["reserved"] = 10000
+        print(f"  OpenCode 1 compaction: auto={comp['auto']}, prune={comp['prune']}, reserved={comp['reserved']}")
+    elif client == "opencode2":
+        # V2 uses tool_output limits instead of V1's compaction.auto/prune
+        to = data.setdefault("tool_output", {})
+        if "max_lines" not in to:
+            to["max_lines"] = 500
+        if "max_bytes" not in to:
+            to["max_bytes"] = 65536
+        print(f"  OpenCode 2 tool_output: max_lines={to['max_lines']}, max_bytes={to['max_bytes']}")
+
+    cfg_path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n",
+                        encoding="utf-8")
+    print(f"  Compaction settings merged into {cfg_path} (existing values preserved)")
+
+
 def main():
     ap = argparse.ArgumentParser(description=f'Install/update MCP Light Memory v{VERSION} in an existing Git repository.')
     ap.add_argument('repo', nargs='?', help='Target Git repository; default current directory.')
     ap.add_argument('--share-tools', action='store_true', help='Allow integration/tool files to be tracked. INTERNAL_RAG memory remains locally excluded.')
-    ap.add_argument('--client', choices=['warp', 'opencode', 'jetbrains'],
-                    help='Register the MCP server: warp/opencode write a config file; '
-                         'jetbrains prints manual IDE setup instructions (PyCharm does not auto-read config files).')
+    ap.add_argument('--client', choices=['warp', 'opencode', 'opencode2', 'jetbrains'],
+                    help='Register the MCP server: warp/opencode/opencode2 write a config file; '
+                         'opencode = stable OpenCode 1 (enabled: true); '
+                         'opencode2 = OpenCode 2 beta (disabled field, no enabled); '
+                         'jetbrains prints manual IDE setup instructions.')
     ap.add_argument('--global', dest='global_cfg', action='store_true',
                     help="Use the client's global config (default: project-local).")
     ap.add_argument('--server-name', default='mcp-light-memory',
                     help='MCP server name in the client config (default: mcp-light-memory).')
     ap.add_argument('--unregister', action='store_true',
                     help='Remove the MCP server from the client config and exit (no install).')
+    ap.add_argument('--compaction', action='store_true',
+                    help='Integrate context compaction management for OpenCode '
+                         '(V1: compaction.auto+prune; V2: tool_output limits). '
+                         'Does NOT overwrite existing user settings — merges only.')
     args = ap.parse_args()
     target = ensure_repo(Path(args.repo) if args.repo else Path.cwd())
     if args.unregister:
@@ -664,17 +738,20 @@ def main():
     if args.client:
         script_rel = '.agents/skills/internal-rag/mlm.py'
         register_client(args.client, target, args.global_cfg, args.server_name, script_rel, ['mcp'])
+    if args.compaction and args.client in ("opencode", "opencode2"):
+        integrate_compaction(args.client, target, args.global_cfg)
     print('\nINSTALLATION COMPLETE')
     print('Existing INTERNAL_RAG memory was preserved.')
     print(f'Git local exclude: {exclude_path}')
-    if args.client and args.client != "jetbrains":
+    if args.client and args.client not in ("jetbrains",):
         print(f'MCP server registered for {args.client}.')
     elif args.client == "jetbrains":
         print('MCP setup instructions printed above (manual IDE step required).')
     # Client-specific restart instruction
     restart_msgs = {
         'warp': 'Restart Warp, then run context for the current task.',
-        'opencode': 'Restart OpenCode, then run context for the current task.',
+        'opencode': 'Restart OpenCode 1, then run context for the current task.',
+        'opencode2': 'Restart OpenCode 2, then run context for the current task.',
         'jetbrains': 'Add the server in Settings -> Tools -> AI Assistant -> MCP (see instructions above), then run context for the current task.',
     }
     print(restart_msgs.get(args.client, 'Restart Warp/OpenCode/PyCharm, then run context for the current task.'))

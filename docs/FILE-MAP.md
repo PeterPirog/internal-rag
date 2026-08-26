@@ -1,4 +1,4 @@
-# File map (v1.7.0)
+# File map (v1.8.0)
 
 ## In the package (internal-rag repo)
 
@@ -22,6 +22,10 @@
 - `.agents/skills/internal-rag/irag.py` — CLI (core, zero-dep).
 - `.agents/skills/internal-rag/irag_embeddings.py` — optional embeddings plugin.
 - `.agents/skills/internal-rag/irag_hooks.py` — optional git hooks installer.
+- `.agents/skills/internal-rag/irag_atomic.py` — atomic writes + project write lock.
+- `.agents/skills/internal-rag/irag_ephemeral.py` — ephemeral observations (SQLite, TTL, bounded).
+- `.agents/skills/internal-rag/irag_distill.py` — diagnostic distillation (stdlib-first extraction).
+- `.agents/skills/internal-rag/irag_gc.py` — retention + GC + snapshot GC + value-aware forgetting.
 - `.agents/skills/internal-rag/irag_index.py` — optional SQLite FTS5 index module.
 - `.agents/skills/internal-rag/irag_mcp_protocol.py` — shared MCP dual-era protocol helpers (canonical `SUPPORTED_VERSIONS`).
 - `.agents/skills/internal-rag/irag_mcp_router.py` — multi-project MCP router (subprocess-per-call isolation).

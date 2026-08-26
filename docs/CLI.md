@@ -1,4 +1,4 @@
-# CLI reference (v1.7.0)
+# CLI reference (v1.8.0)
 
 All commands are invoked as `mlm.py <command> [options]` (primary alias) or `irag.py <command> [options]` (legacy alias, still supported). Use `python` on Windows and `python3` on Linux/macOS.
 

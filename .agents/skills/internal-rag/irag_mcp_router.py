@@ -27,7 +27,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-ROUTER_VERSION = "1.7.3"
+ROUTER_VERSION = "1.8.0"
 ROUTER_NAME = "mcp-light-memory-router"
 ROUTER_LEGACY_NAME = "internal-rag-router"  # deprecated alias
 SUPPORTED_VERSIONS = ["2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]
@@ -270,6 +270,9 @@ def serve(registry: Dict[str, Dict[str, Any]], irag_path: str, timeout: float) -
         _send({"jsonrpc": "2.0", "id": rid, "error": {"code": code, "message": message}})
 
     conn_version = ""
+    _META_PV = getattr(_proto, "META_PROTOCOL_VERSION", "io.modelcontextprotocol/protocolVersion") if _proto else "io.modelcontextprotocol/protocolVersion"
+    _META_SI = getattr(_proto, "META_SERVER_INFO", "io.modelcontextprotocol/serverInfo") if _proto else "io.modelcontextprotocol/serverInfo"
+    _ERR_UNSUP = getattr(_proto, "ERR_UNSUPPORTED_PROTOCOL_VERSION", -32022) if _proto else -32022
 
     for line in sys.stdin:
         line = line.strip()
@@ -286,23 +289,29 @@ def serve(registry: Dict[str, Dict[str, Any]], irag_path: str, timeout: float) -
         params = req.get("params", {}) or {}
 
         if method == "server/discover":
-            client_v = str(params.get("protocolVersion", ""))
+            # Modern: read protocol version from _meta (not params.protocolVersion)
+            meta = params.get("_meta", {})
+            client_v = str(meta.get(_META_PV, ""))
             if client_v and client_v not in SUPPORTED_VERSIONS:
-                _err(rid, -32602, f"Unsupported protocol version: {client_v}")
+                _err(rid, _ERR_UNSUP, f"Unsupported protocol version: {client_v}",
+                     {"supported": SUPPORTED_VERSIONS, "requested": client_v})
                 continue
             if _proto:
-                negotiated = _proto.negotiate_version(client_v)
                 result = _proto.discover_result(
                     "mcp-light-memory-router", ROUTER_VERSION,
-                    "Multi-project INTERNAL_RAG router. Pass the `project` parameter "
+                    "Multi-project MCP Light Memory router. Pass the `project` parameter "
                     "(see the `projects` tool) on every project-scoped call.",
                     {"tools": {}})
             else:
-                negotiated = client_v if client_v in SUPPORTED_VERSIONS else SUPPORTED_VERSIONS[1]
-                result = {"supportedVersions": SUPPORTED_VERSIONS, "capabilities": {"tools": {}},
-                          "serverInfo": {"name": "mcp-light-memory-router", "version": ROUTER_VERSION},
-                          "instructions": "Multi-project INTERNAL_RAG router."}
-            conn_version = negotiated
+                result = {
+                    "resultType": "complete",
+                    "supportedVersions": SUPPORTED_VERSIONS,
+                    "capabilities": {"tools": {}},
+                    "instructions": "Multi-project MCP Light Memory router.",
+                    "_meta": {_META_SI: {"name": "mcp-light-memory-router", "version": ROUTER_VERSION}},
+                    "ttlMs": 300000,
+                    "cacheScope": "public",
+                }
             _send({"jsonrpc": "2.0", "id": rid, "result": result})
             continue
         if method == "initialize":
@@ -312,13 +321,20 @@ def serve(registry: Dict[str, Dict[str, Any]], irag_path: str, timeout: float) -
             else:
                 negotiated = client_v if client_v in SUPPORTED_VERSIONS else SUPPORTED_VERSIONS[1]
             conn_version = negotiated
-            _send({"jsonrpc": "2.0", "id": rid, "result": {
-                "protocolVersion": negotiated,
-                "serverInfo": {"name": "mcp-light-memory-router", "version": ROUTER_VERSION},
-                "capabilities": {"tools": {}},
-                "instructions": "Multi-project INTERNAL_RAG router. Pass the `project` "
-                               "parameter (see the `projects` tool) on every project-scoped call.",
-            }})
+            if _proto:
+                result = _proto.legacy_initialize_result(
+                    "mcp-light-memory-router", ROUTER_VERSION,
+                    "Multi-project MCP Light Memory router. Pass the `project` "
+                    "parameter (see the `projects` tool) on every project-scoped call.",
+                    negotiated)
+            else:
+                result = {
+                    "protocolVersion": negotiated,
+                    "serverInfo": {"name": "mcp-light-memory-router", "version": ROUTER_VERSION},
+                    "capabilities": {"tools": {}},
+                    "instructions": "Multi-project MCP Light Memory router.",
+                }
+            _send({"jsonrpc": "2.0", "id": rid, "result": result})
             continue
         if method == "notifications/initialized":
             continue
@@ -330,7 +346,12 @@ def serve(registry: Dict[str, Dict[str, Any]], irag_path: str, timeout: float) -
             if _proto:
                 result = _proto.tools_list_result(build_tools())
             else:
-                result = {"tools": sorted(build_tools(), key=lambda t: t.get("name", ""))}
+                result = {
+                    "resultType": "complete",
+                    "tools": sorted(build_tools(), key=lambda t: t.get("name", "")),
+                    "ttlMs": 60000,
+                    "cacheScope": "public",
+                }
             _send({"jsonrpc": "2.0", "id": rid, "result": result})
             continue
         if method == "tools/call":
@@ -340,20 +361,14 @@ def serve(registry: Dict[str, Dict[str, Any]], irag_path: str, timeout: float) -
                 _err(rid, -32602, "invalid arguments")
                 continue
             text, is_error = _dispatch(registry, irag_path, timeout, name, args_d)
-            # Router does NOT strip structuredContent from child servers — it passes
-            # through whatever the child returned (CEL C). For router-level tools
-            # (projects), we build structuredContent directly.
             structured = None
-            schema = None
             if name == "projects":
                 try:
                     structured = json.loads(text)
-                    schema = {"type": "object", "properties": {"projects": {"type": "array"}},
-                              "required": ["projects"]}
                 except Exception:
                     pass
             if _proto:
-                result = _proto.tool_call_result(text, is_error, structured, schema)
+                result = _proto.tool_call_result(text, is_error, structured)
             else:
                 result = {"content": [{"type": "text", "text": text}], "isError": bool(is_error),
                           "resultType": "complete"}

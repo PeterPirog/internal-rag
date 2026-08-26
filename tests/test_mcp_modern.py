@@ -88,7 +88,7 @@ class TestServerDiscover(ModernMcpBase):
         """2026-07-28: server/discover works without a prior initialize."""
         lines = [
             {"jsonrpc": "2.0", "id": 1, "method": "server/discover",
-             "params": {"protocolVersion": "2026-07-28"}},
+             "params": {"_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28"}}},
             {"jsonrpc": "2.0", "id": 2, "method": "shutdown"},
         ]
         stdout, _ = _run_stdio([sys.executable, str(IRAG_PATH), "mcp"], lines, self.tmp)
@@ -96,14 +96,17 @@ class TestServerDiscover(ModernMcpBase):
         d = _find(objs, 1)
         res = d["result"]
         self.assertIn("2026-07-28", res["supportedVersions"])
-        self.assertEqual(res["serverInfo"]["name"], "mcp-light-memory")
-        self.assertIn("ttlMs", res.get("_meta", {}))
+        self.assertEqual(res["_meta"]["io.modelcontextprotocol/serverInfo"]["name"], "mcp-light-memory")
+        self.assertIn("ttlMs", res)  # top-level per 2026-07-28
+        self.assertIn("cacheScope", res)  # top-level per 2026-07-28
+        self.assertEqual(res["resultType"], "complete")
 
     def test_discover_then_tools_list_modern(self):
         lines = [
             {"jsonrpc": "2.0", "id": 1, "method": "server/discover",
-             "params": {"protocolVersion": "2026-07-28"}},
-            {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+             "params": {"_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28"}}},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/list",
+             "params": {"_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28"}}},
             {"jsonrpc": "2.0", "id": 3, "method": "shutdown"},
         ]
         stdout, _ = _run_stdio([sys.executable, str(IRAG_PATH), "mcp"], lines, self.tmp)
@@ -112,18 +115,20 @@ class TestServerDiscover(ModernMcpBase):
         self.assertEqual(tl.get("resultType"), "complete")
         names = [t["name"] for t in tl["tools"]]
         self.assertEqual(names, sorted(names))  # deterministic order
-        self.assertIn("_meta", tl)
+        self.assertIn("ttlMs", tl)  # top-level per 2026-07-28
+        self.assertIn("cacheScope", tl)  # top-level per 2026-07-28
 
     def test_unsupported_version_errors(self):
         lines = [
             {"jsonrpc": "2.0", "id": 1, "method": "server/discover",
-             "params": {"protocolVersion": "2099-01-01"}},
+             "params": {"_meta": {"io.modelcontextprotocol/protocolVersion": "2099-01-01"}}},
             {"jsonrpc": "2.0", "id": 2, "method": "shutdown"},
         ]
         stdout, _ = _run_stdio([sys.executable, str(IRAG_PATH), "mcp"], lines, self.tmp)
         objs = _objs(stdout)
         d = _find(objs, 1)
         self.assertIn("error", d)
+        self.assertEqual(d["error"]["code"], -32022)  # UnsupportedProtocolVersionError
         self.assertIn("Unsupported", d["error"]["message"])
 
 
@@ -145,7 +150,7 @@ class TestModernToolsCall(ModernMcpBase):
         self.assertIn("abstained", sc)
         self.assertIn("confidence_kind", sc)
         self.assertEqual(sc["confidence_kind"], "heuristic")
-        self.assertIn("outputSchema", r)
+        self.assertNotIn("outputSchema", r)
         self.assertIn("results", sc)
 
     def test_search_at_and_explain(self):
@@ -193,7 +198,7 @@ class TestModernToolsCall(ModernMcpBase):
         for rid in (2, 3):
             r = _find(objs, rid)["result"]
             self.assertIn("structuredContent", r)
-            self.assertIn("outputSchema", r)
+            self.assertNotIn("outputSchema", r)
 
 
 class TestLegacyRegression(ModernMcpBase):
@@ -245,19 +250,19 @@ class TestProtocolHelpers(unittest.TestCase):
         self.assertEqual(proto.negotiate_version("2026-07-28"), "2026-07-28")
 
     def test_negotiate_unknown_falls_back(self):
-        self.assertEqual(proto.negotiate_version("2099-01-01"), proto.DEFAULT_NEGOTIATED)
+        self.assertEqual(proto.negotiate_version("2099-01-01"), proto.DEFAULT_LEGACY)
 
     def test_discover_result_shape(self):
         r = proto.discover_result("x", "1.0", "instr")
         self.assertIn("2026-07-28", r["supportedVersions"])
-        self.assertEqual(r["serverInfo"]["name"], "x")
-        self.assertIn("ttlMs", r["_meta"])
+        self.assertEqual(r["_meta"]["io.modelcontextprotocol/serverInfo"]["name"], "x")
+        self.assertIn("ttlMs", r)
 
     def test_tool_call_result_modern_fields(self):
-        r = proto.tool_call_result("txt", False, {"k": 1}, {"type": "object"})
+        r = proto.tool_call_result("txt", False, {"k": 1})
         self.assertEqual(r["resultType"], "complete")
         self.assertIn("structuredContent", r)
-        self.assertIn("outputSchema", r)
+        self.assertNotIn("outputSchema", r)
 
 
 class TestRouterModern(unittest.TestCase):
@@ -282,7 +287,7 @@ class TestRouterModern(unittest.TestCase):
                                lines, self.tmp)
         objs = _objs(stdout)
         d = _find(objs, 1)
-        self.assertEqual(d["result"]["serverInfo"]["name"], "mcp-light-memory-router")
+        self.assertEqual(d["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"], "mcp-light-memory-router")
         self.assertIn("2026-07-28", d["result"]["supportedVersions"])
 
     def test_router_projects_structured(self):

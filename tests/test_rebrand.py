@@ -58,16 +58,16 @@ def _objs(stdout: str) -> List[Dict[str, Any]]:
 
 
 class TestRebrandVersion(unittest.TestCase):
-    def test_version_is_1_7_3(self):
+    def test_version_is_1_8_0(self):
         irag = _load_irag()
-        self.assertEqual(irag.VERSION, "1.7.3")
+        self.assertEqual(irag.VERSION, "1.8.0")
         self.assertEqual(irag.PRODUCT_NAME, "MCP Light Memory")
         self.assertEqual(irag.PRODUCT_SLUG, "mcp-light-memory")
         self.assertEqual(irag.LEGACY_NAME, "internal-rag")
 
     def test_version_file_matches(self):
         v = (PROJECT_ROOT / "VERSION").read_text(encoding="utf-8").strip()
-        self.assertEqual(v, "1.7.3")
+        self.assertEqual(v, "1.8.0")
 
 
 class TestMlmShim(unittest.TestCase):
@@ -90,7 +90,7 @@ class TestMlmShim(unittest.TestCase):
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 text=True, encoding="utf-8", timeout=60)
         self.assertEqual(p_mlm.stdout.strip(), p_irag.stdout.strip())
-        self.assertIn("1.7.3", p_mlm.stdout)
+        self.assertIn("1.8.0", p_mlm.stdout)
 
 
 class TestMcpServerName(unittest.TestCase):
@@ -115,7 +115,7 @@ class TestMcpServerName(unittest.TestCase):
         objs = _objs(stdout)
         init = next(o for o in objs if o.get("id") == 1)
         self.assertEqual(init["result"]["serverInfo"]["name"], "mcp-light-memory")
-        self.assertEqual(init["result"]["serverInfo"]["version"], "1.7.3")
+        self.assertEqual(init["result"]["serverInfo"]["version"], "1.8.0")
 
     def test_server_discover_name_is_mcp_light_memory(self):
         lines = [
@@ -126,7 +126,7 @@ class TestMcpServerName(unittest.TestCase):
         stdout = _run_stdio([sys.executable, str(IRAG_PATH), "mcp"], lines, self.tmp)
         objs = _objs(stdout)
         d = next(o for o in objs if o.get("id") == 1)
-        self.assertEqual(d["result"]["serverInfo"]["name"], "mcp-light-memory")
+        self.assertEqual(d["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"], "mcp-light-memory")
 
 
 class TestRouterServerName(unittest.TestCase):
@@ -156,7 +156,7 @@ class TestRouterServerName(unittest.TestCase):
         objs = _objs(stdout)
         init = next(o for o in objs if o.get("id") == 1)
         self.assertEqual(init["result"]["serverInfo"]["name"], "mcp-light-memory-router")
-        self.assertEqual(init["result"]["serverInfo"]["version"], "1.7.3")
+        self.assertEqual(init["result"]["serverInfo"]["version"], "1.8.0")
 
 
 class TestExamplesUseNewNames(unittest.TestCase):
@@ -250,7 +250,7 @@ class TestLegacyAliasStillWorks(unittest.TestCase):
                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                            text=True, encoding="utf-8", timeout=60)
         self.assertEqual(p.returncode, 0)
-        self.assertIn("1.7.3", p.stdout)
+        self.assertIn("1.8.0", p.stdout)
 
 
 if __name__ == "__main__":

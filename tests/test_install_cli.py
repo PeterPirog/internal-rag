@@ -20,8 +20,8 @@ PROMPTS_MD = PROJECT_ROOT / "docs" / "ZERO-SHOT-SETUP-PROMPTS.md"
 
 def _install_help() -> str:
     p = subprocess.run([sys.executable, str(INSTALL_PY), "--help"],
-                       stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                       text=True, encoding="utf-8", timeout=30)
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+    return p.stdout.decode("utf-8", errors="replace")
     return p.stdout
 
 
@@ -48,6 +48,7 @@ class TestZeroShotPromptsMatchInstaller(unittest.TestCase):
         self.assertIn("--client", help_text)
         self.assertIn("warp", help_text)
         self.assertIn("opencode", help_text)
+        self.assertIn("opencode2", help_text)
         self.assertIn("jetbrains", help_text)
         self.assertIn("--unregister", help_text)
 
@@ -172,6 +173,79 @@ class TestUnregisterCleanup(unittest.TestCase):
         data = json.loads(cfg.read_text(encoding="utf-8"))
         self.assertNotIn("mcp-light-memory", data["mcpServers"])
         self.assertIn("other-server", data["mcpServers"])
+
+
+class TestOpenCodeV1V2Split(unittest.TestCase):
+    """OpenCode 1 (stable) vs OpenCode 2 (beta) config structure."""
+
+    def setUp(self):
+        import tempfile, shutil
+        self.tmp = Path(tempfile.mkdtemp(prefix="irag-oc-split-"))
+        (self.tmp / ".git").mkdir()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _load(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("_install_oc", str(INSTALL_PY))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_opencode_v1_has_enabled_true(self):
+        """OpenCode 1 config uses 'enabled': true on the server entry."""
+        import json
+        mod = self._load()
+        mod.register_client("opencode", self.tmp, False, "mcp-light-memory",
+                            ".agents/skills/internal-rag/mlm.py", ["mcp"])
+        cfg = self.tmp / "opencode.json"
+        self.assertTrue(cfg.exists())
+        data = json.loads(cfg.read_text(encoding="utf-8"))
+        entry = data["mcp"]["servers"]["mcp-light-memory"]
+        self.assertEqual(entry["type"], "local")
+        self.assertIn("enabled", entry)
+        self.assertTrue(entry["enabled"])
+        self.assertIn("command", entry)
+        self.assertIsInstance(entry["command"], list)
+        self.assertIn("cwd", entry)
+
+    def test_opencode_v2_has_no_enabled(self):
+        """OpenCode 2 beta config does NOT use 'enabled'; V2 uses 'disabled' (absent = enabled)."""
+        import json
+        mod = self._load()
+        mod.register_client("opencode2", self.tmp, False, "mcp-light-memory",
+                            ".agents/skills/internal-rag/mlm.py", ["mcp"])
+        cfg = self.tmp / "opencode.json"
+        self.assertTrue(cfg.exists())
+        data = json.loads(cfg.read_text(encoding="utf-8"))
+        entry = data["mcp"]["servers"]["mcp-light-memory"]
+        self.assertEqual(entry["type"], "local")
+        self.assertNotIn("enabled", entry)  # V2 does NOT use 'enabled'
+        self.assertIn("command", entry)
+        self.assertIsInstance(entry["command"], list)
+        self.assertIn("cwd", entry)
+
+    def test_opencode_merge_preserves_other_servers(self):
+        """Merge must preserve existing MCP servers and other config keys."""
+        import json
+        mod = self._load()
+        cfg = self.tmp / "opencode.json"
+        cfg.write_text(json.dumps({
+            "$schema": "https://opencode.ai/config.json",
+            "model": "anthropic/claude-sonnet-4-5",
+            "mcp": {"servers": {"other-mcp": {"type": "remote", "url": "https://x"}}}
+        }), encoding="utf-8")
+        mod.register_client("opencode", self.tmp, False, "mcp-light-memory",
+                            ".agents/skills/internal-rag/mlm.py", ["mcp"])
+        data = json.loads(cfg.read_text(encoding="utf-8"))
+        # original server preserved
+        self.assertIn("other-mcp", data["mcp"]["servers"])
+        # new server added
+        self.assertIn("mcp-light-memory", data["mcp"]["servers"])
+        # other config preserved
+        self.assertEqual(data["model"], "anthropic/claude-sonnet-4-5")
 
 
 if __name__ == "__main__":

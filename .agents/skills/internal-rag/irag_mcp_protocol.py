@@ -3,21 +3,36 @@
 
 Stdlib-only (Python 3.8+). No `mcp` SDK required at runtime. Used by both
 `irag.py mcp` and `irag_mcp_router.py` to avoid logic duplication for the
-dual-era protocol support (CEL B/C).
+dual-era protocol support.
 
 Eras:
   - Legacy (2024-11-05 … 2025-11-25): initialize / notifications/initialized /
     tools/list / tools/call / ping / shutdown. Backward compatible.
-  - Modern (2026-07-28): server/discover (no initialize required), per-request
-    `_meta`, resultType envelopes, structuredContent, ttlMs/cacheScope.
+  - Modern (2026-07-28): stateless, self-describing per-request metadata in
+    `_meta["io.modelcontextprotocol/protocolVersion"]`; `server/discover`
+    (no initialize required); `resultType` mandatory on every result;
+    `ttlMs`/`cacheScope` as top-level result fields (cacheScope: "public"|"private");
+    `structuredContent` as result data; `outputSchema` in the tool definition
+    (not in tool/call results); serverInfo in `_meta["io.modelcontextprotocol/serverInfo"]`.
+
+Key spec compliance (MCP 2026-07-28 final):
+  - Per-request protocol version is read from `_meta["io.modelcontextprotocol/protocolVersion"]`.
+  - No `conn_version` is needed for modern dispatch — each request is self-describing.
+  - `server/discover` takes no body params beyond standard `_meta`.
+  - `server/discover` response carries `serverInfo` in `_meta`, not as a top-level field.
+  - `ttlMs` and `cacheScope` are top-level result fields (NOT in `_meta`).
+  - `cacheScope` values: "public" or "private" (NOT "connection" or "request").
+  - `resultType` is required on every result (legacy fallback: absent = "complete").
+  - `outputSchema` is declared in the tool definition, not in tool/call results.
+  - Legacy `initialize` still works (dual-era).
 """
 from __future__ import annotations
 import json
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 # Supported protocol versions, newest first.
 SUPPORTED_VERSIONS: List[str] = [
-    "2026-07-28",      # modern: discover, no-init, _meta, resultType
+    "2026-07-28",      # modern: discover, no-init, per-request _meta, resultType
     "2025-11-25",
     "2025-06-18",
     "2025-03-26",
@@ -25,7 +40,25 @@ SUPPORTED_VERSIONS: List[str] = [
 ]
 MODERN_VERSION = "2026-07-28"
 LEGACY_VERSIONS = SUPPORTED_VERSIONS[1:]  # everything except the modern one
-DEFAULT_NEGOTIATED = "2025-11-25"  # safe default for legacy clients
+DEFAULT_LEGACY = "2025-11-25"  # safe default for legacy clients
+
+# Namespace keys for _meta (MCP 2026-07-28)
+META_PROTOCOL_VERSION = "io.modelcontextprotocol/protocolVersion"
+META_CLIENT_INFO = "io.modelcontextprotocol/clientInfo"
+META_CLIENT_CAPABILITIES = "io.modelcontextprotocol/clientCapabilities"
+META_SERVER_INFO = "io.modelcontextprotocol/serverInfo"
+META_LOG_LEVEL = "io.modelcontextprotocol/logLevel"
+
+# Error codes (MCP 2026-07-28)
+ERR_UNSUPPORTED_PROTOCOL_VERSION = -32022
+ERR_MISSING_REQUIRED_CLIENT_CAPABILITY = -32021
+
+# Cache scope values (MCP 2026-07-28)
+CACHE_PUBLIC = "public"
+CACHE_PRIVATE = "private"
+
+# Valid cacheScope values
+VALID_CACHE_SCOPES = frozenset(["public", "private"])
 
 
 def is_modern(version: str) -> bool:
@@ -37,76 +70,156 @@ def negotiate_version(client_version: str) -> str:
     version (NOT the modern one — legacy clients must not be force-upgraded)."""
     if client_version in SUPPORTED_VERSIONS:
         return client_version
-    return DEFAULT_NEGOTIATED
+    return DEFAULT_LEGACY
 
 
 def server_info(name: str, version: str) -> Dict[str, Any]:
     return {"name": name, "version": version}
 
 
+def extract_request_version(params: Dict[str, Any]) -> str:
+    """Extract the per-request protocol version from modern _meta.
+
+    Per MCP 2026-07-28, the protocol version is in
+    `_meta["io.modelcontextprotocol/protocolVersion"]`.
+    Returns "" if not present (legacy request).
+    """
+    meta = params.get("_meta")
+    if not isinstance(meta, dict):
+        return ""
+    return str(meta.get(META_PROTOCOL_VERSION, ""))
+
+
+def is_modern_request(params: Dict[str, Any]) -> bool:
+    """True if the request carries modern per-request _meta with a protocol version."""
+    return extract_request_version(params) == MODERN_VERSION
+
+
+def validate_modern_request(params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Validate a modern request's required _meta fields.
+
+    Returns an error dict (code, message) if the request is malformed,
+    or None if the request is valid (or is a legacy request with no _meta).
+
+    Per MCP 2026-07-28, modern requests MUST include:
+      - _meta["io.modelcontextprotocol/protocolVersion"] (required)
+      - _meta["io.modelcontextprotocol/clientCapabilities"] (required)
+    """
+    meta = params.get("_meta")
+    if not isinstance(meta, dict):
+        return None  # legacy request — no validation needed
+    pv = meta.get(META_PROTOCOL_VERSION)
+    if pv is None:
+        # If _meta exists but protocolVersion is absent, it's malformed for modern
+        # but could be a legacy request with an empty _meta. Only enforce if
+        # the request uses modern methods.
+        return None
+    # Check supported version
+    if pv not in SUPPORTED_VERSIONS:
+        return {
+            "code": ERR_UNSUPPORTED_PROTOCOL_VERSION,
+            "message": f"Unsupported protocol version: {pv}",
+            "data": {"supported": SUPPORTED_VERSIONS, "requested": pv},
+        }
+    return None
+
+
 def discover_result(server_name: str, server_version: str,
                     instructions: str,
-                    capabilities: Optional[Dict[str, Any]] = None
+                    capabilities: Optional[Dict[str, Any]] = None,
                     ) -> Dict[str, Any]:
     """Build a `server/discover` result for MCP 2026-07-28.
 
-    Includes supportedVersions, capabilities, instructions, server info,
-    and ttlMs/cacheScope metadata in `_meta` per the modern spec.
+    Per the final spec:
+    - `supportedVersions`: list of protocol versions
+    - `capabilities`: server capabilities
+    - `serverInfo` goes in `_meta["io.modelcontextprotocol/serverInfo"]` (NOT top-level)
+    - `ttlMs` and `cacheScope` are top-level result fields
+    - `resultType` is required
     """
     return {
+        "resultType": "complete",
         "supportedVersions": SUPPORTED_VERSIONS,
         "capabilities": capabilities or {"tools": {}},
         "instructions": instructions,
-        "serverInfo": server_info(server_name, server_version),
         "_meta": {
-            "ttlMs": 300000,          # 5 min cache window for discover
-            "cacheScope": "connection",
+            META_SERVER_INFO: server_info(server_name, server_version),
         },
+        "ttlMs": 300000,          # 5 min cache window for discover
+        "cacheScope": CACHE_PUBLIC,
     }
 
 
 def tools_list_result(tools: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Modern tools/list result with resultType and cache metadata."""
-    # Deterministic order: sort by name (tools/list must be deterministic).
+    """Modern tools/list result with resultType and cache metadata.
+
+    Per MCP 2026-07-28:
+    - `resultType` is required
+    - `ttlMs` and `cacheScope` are top-level result fields
+    - `outputSchema` is part of each tool definition (not the result envelope)
+    - tools are sorted deterministically by name
+    """
     ordered = sorted(tools, key=lambda t: t.get("name", ""))
     return {
-        "tools": ordered,
         "resultType": "complete",
-        "_meta": {"ttlMs": 60000, "cacheScope": "connection"},
+        "tools": ordered,
+        "ttlMs": 60000,
+        "cacheScope": CACHE_PUBLIC,
     }
 
 
 def tool_call_result(content_text: str, is_error: bool,
                      structured: Optional[Dict[str, Any]] = None,
-                     output_schema: Optional[Dict[str, Any]] = None
                      ) -> Dict[str, Any]:
     """Build a tools/call result envelope.
 
-    - Legacy clients read `content` (TextContent) and `isError`.
-    - Modern clients additionally read `structuredContent`, `outputSchema`,
-      `resultType`, and `_meta`.
+    Per MCP 2026-07-28:
+    - `resultType` is required
+    - `content` is the TextContent array (for backward compat with legacy clients)
+    - `structuredContent` is the structured result data (if the tool has outputSchema)
+    - `outputSchema` is NOT included in the result — it's in the tool definition
+    - `ttlMs`/`cacheScope` are NOT required for tools/call (only for cacheable list/read ops)
+    - `isError` marks tool execution errors (vs protocol errors)
     """
     res: Dict[str, Any] = {
+        "resultType": "complete",
         "content": [{"type": "text", "text": content_text}],
         "isError": bool(is_error),
-        "resultType": "complete",
     }
     if structured is not None:
         res["structuredContent"] = structured
-    if output_schema is not None:
-        res["outputSchema"] = output_schema
-    res["_meta"] = {"ttlMs": 0, "cacheScope": "request"}
     return res
 
 
-def parse_meta(params: Dict[str, Any]) -> Dict[str, Any]:
-    """Extract per-request `_meta` from modern request params."""
-    meta = params.get("_meta")
-    return meta if isinstance(meta, dict) else {}
+def legacy_initialize_result(server_name: str, server_version: str,
+                             instructions: str,
+                             negotiated_version: str,
+                             ) -> Dict[str, Any]:
+    """Build a legacy `initialize` result (2024-11-05 … 2025-11-25)."""
+    return {
+        "protocolVersion": negotiated_version,
+        "serverInfo": server_info(server_name, server_version),
+        "capabilities": {"tools": {}},
+        "instructions": instructions,
+    }
 
 
-def error_envelope(code: int, message: str) -> Dict[str, Any]:
-    return {"code": code, "message": message}
+def error_envelope(code: int, message: str,
+                   data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    err: Dict[str, Any] = {"code": code, "message": message}
+    if data is not None:
+        err["data"] = data
+    return err
+
+
+def make_response(rid: Any, result: Dict[str, Any]) -> Dict[str, Any]:
+    """Wrap a result into a JSON-RPC 2.0 success response."""
+    return {"jsonrpc": "2.0", "id": rid, "result": result}
+
+
+def make_error_response(rid: Any, code: int, message: str,
+                        data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    return {"jsonrpc": "2.0", "id": rid, "error": error_envelope(code, message, data)}
 
 
 # Tool annotations (CEL C). These describe behavioral hints to clients.
@@ -128,9 +241,12 @@ ANNOTATIONS_PURE_READ = {
 
 
 # Output schemas (CEL C) for tools that return structured content.
+# Per MCP 2026-07-28, outputSchema is declared in the tool definition,
+# not in the tools/call result.
 OUTPUT_SCHEMA_SEARCH = {
     "type": "object",
     "properties": {
+        "trust": {"type": "string", "enum": ["untrusted"]},
         "abstained": {"type": "boolean"},
         "retrieval_confidence": {"type": "number"},
         "confidence_kind": {"type": "string", "enum": ["heuristic", "calibrated"]},
@@ -145,8 +261,9 @@ OUTPUT_SCHEMA_SEARCH = {
 OUTPUT_SCHEMA_STATUS = {
     "type": "object",
     "properties": {
-        "memories": {"type": "integer"},
-        "checkpoints": {"type": "integer"},
+        "irag_version": {"type": "string"},
+        "total_memories": {"type": "integer"},
+        "total_checkpoints": {"type": "integer"},
         "last_checkpoint": {"type": "string"},
         "index_status": {"type": "string"},
     },

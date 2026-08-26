@@ -1,24 +1,24 @@
-# MCP server (v1.7.0)
+# MCP server (v1.8.0)
 
 MCP Light Memory (formerly `internal-rag`) ships a minimal MCP-over-stdio server, compatible with Claude Code, Cursor, OpenCode, JetBrains, Warp, and the official `mcp` SDK.
 
 For **multiple projects** through one connection, see [MCP-MULTI-PROJECT.md](MCP-MULTI-PROJECT.md) (`irag_mcp_router.py`).
 
-## Dual-era protocol (v1.7.0)
+## Dual-era protocol (v1.8.0)
 
 The server supports both legacy and modern MCP protocol versions:
 
 - **Legacy** (`2024-11-05`, `2025-03-26`, `2025-06-18`, `2025-11-25`): `initialize` / `notifications/initialized` / `tools/list` / `tools/call` / `ping` / `shutdown`. Backward compatible — existing clients unchanged.
 - **Modern** (`2026-07-28`): `server/discover` (no `initialize` required), per-request `_meta`, `resultType: "complete"` envelopes, `structuredContent`, `outputSchema`, `ttlMs`/`cacheScope`. Legacy `initialize` still works for modern clients too.
 
-## Tool annotations (v1.7.0)
+## Tool annotations (v1.8.0)
 
 Every tool carries `annotations`:
 - `openWorldHint: false` — operates on local memory, not the open internet.
 - `readOnlyHint` / `destructiveHint` / `idempotentHint` — match the tool's actual semantics.
 - `search` and `context` update usage metadata in SQLite, so they are **not** marked `idempotent`.
 
-## Structured content (v1.7.0)
+## Structured content (v1.8.0)
 
 `search`, `status`, `tasks`, `projects`, `guard` return `structuredContent` + `outputSchema` for modern clients. Legacy clients read `content` (TextContent) as before.
 

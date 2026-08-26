@@ -1,4 +1,4 @@
-# Memory lifecycle (v1.7.0)
+# Memory lifecycle (v1.8.0)
 
 `WORKING_STATE.md` is short, frequently updated working memory (write-ahead checkpoint).
 
@@ -123,3 +123,92 @@ A hypothesis is not a fact and should remain `tentative` until verified.
 If memory contradicts current code/tests: trust the code, mark the old memory `superseded`/`invalid`, record new evidence, and rebuild the index (`irag.py index`).
 
 Never store: passwords, tokens, keys, production data, full logs, full chain-of-thought.
+
+
+## Ephemeral observations (v1.8.0)
+
+Raw tool outputs (console, terminal, builds, lints, tests) do NOT automatically
+become durable Markdown memory. They flow through an ephemeral layer first:
+
+```
+raw tool output -> ephemeral observation -> distillation -> admission -> durable conclusion -> raw observation deletion
+```
+
+### Ephemeral store (`irag_ephemeral.py`)
+
+- SQLite-based, bounded storage (NOT durable Markdown; NOT indexed for retrieval)
+- TTL-based expiry (default 30 minutes, configurable via `ephemeral.ttl_seconds`)
+- `max_records` (200) and `max_bytes` (2MB) limits
+- `max_record_bytes` (64KB) per observation
+- Secret redaction (password=, api_key=, token=, etc. are replaced with [REDACTED])
+- Promotion marks observation + deletes the raw content after durable memory is created
+- Session-end cleanup via `clear_all()`
+
+### Diagnostic distillation (`irag_distill.py`)
+
+Stdlib-first extraction from large tool outputs (no LLM dependency):
+
+- Extracts: command name, exit code, ERROR/WARNING/FAILED, exception type+message,
+  stack frames (file:line:func), root cause, remediation, evidence excerpt, content hash
+- `should_promote` only if confidence >= MEDIUM and root_cause/errors are present
+- Successful output / warnings without future value -> `should_promote=False`
+- 5000-line output -> short conclusion like "Test X fails because Y. Root cause in Z."
+
+If the automatic conclusion is not confident enough, the observation remains
+ephemeral and NO durable memory is created.
+
+## Retention + GC (v1.8.0)
+
+Non-aggressive lifecycle management. Never auto-deletes important knowledge.
+
+### Retention classes
+
+| Class | Description | GC behavior |
+|---|---|---|
+| `protected` | Active decisions, constraints | NEVER GC'd |
+| `tentative_hypotheses` | Tentative hypotheses | Low priority, GC candidate after long disuse |
+| `normal_durable` | Active knowledge, gotchas, failures | Standard retention |
+| `archived` | Archived memories | Delete candidate after grace period |
+
+### 4-stage decay
+
+1. **Deprioritize** — reduce retrieval priority for unused low-value memories
+2. **Archive candidate** — mark as GC/archive candidate after long disuse
+3. **Archive** — move to `archive/` directory
+4. **Delete** — physical removal only after additional grace period + explicit policy
+
+Factors: created time, last accessed, access count, confidence, status, memory type,
+evidence freshness, link/reference count, reinforcement/recent verification.
+
+### CLI
+
+```
+mlm.py gc --dry-run          # safe default: report only
+mlm.py gc --apply            # execute the plan
+mlm.py gc --json             # machine-readable
+mlm.py gc --grace-days N     # override grace period
+```
+
+**Decisions and constraints are NEVER deleted by decay alone.**
+"Not accessed in 30 days" is NEVER sufficient for deletion of important knowledge.
+
+## Session snapshot GC (v1.8.0)
+
+Configurable cleanup of `sessions/.snapshots/`:
+
+- `max_snapshot_age_days` (default 30)
+- `max_snapshot_count` (default 20)
+- `max_snapshot_bytes` (default 0 = unlimited)
+
+The **active recovery point** (most recent snapshot) is NEVER deleted.
+Dry-run report is generated before any destructive cleanup.
+
+## Concurrency + atomic writes (v1.8.0)
+
+All Markdown mutations use atomic writes (`irag_atomic.py`):
+
+- `atomic_write_text()`: temp file -> fsync -> `os.replace`
+- `ProjectWriteLock`: cross-platform file lock (O_EXCL + fcntl on POSIX)
+  with stale-lock detection and timeout
+
+Applied to: `save_working`, `save_checkpoint`, `_append_history`, task state, fingerprint cache.
