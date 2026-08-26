@@ -88,7 +88,8 @@ class TestServerDiscover(ModernMcpBase):
         """2026-07-28: server/discover works without a prior initialize."""
         lines = [
             {"jsonrpc": "2.0", "id": 1, "method": "server/discover",
-             "params": {"_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28"}}},
+             "params": {"_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                                  "io.modelcontextprotocol/clientCapabilities": {}}}},
             {"jsonrpc": "2.0", "id": 2, "method": "shutdown"},
         ]
         stdout, _ = _run_stdio([sys.executable, str(IRAG_PATH), "mcp"], lines, self.tmp)
@@ -104,9 +105,11 @@ class TestServerDiscover(ModernMcpBase):
     def test_discover_then_tools_list_modern(self):
         lines = [
             {"jsonrpc": "2.0", "id": 1, "method": "server/discover",
-             "params": {"_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28"}}},
+             "params": {"_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                                  "io.modelcontextprotocol/clientCapabilities": {}}}},
             {"jsonrpc": "2.0", "id": 2, "method": "tools/list",
-             "params": {"_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28"}}},
+             "params": {"_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                                  "io.modelcontextprotocol/clientCapabilities": {}}}},
             {"jsonrpc": "2.0", "id": 3, "method": "shutdown"},
         ]
         stdout, _ = _run_stdio([sys.executable, str(IRAG_PATH), "mcp"], lines, self.tmp)
@@ -136,7 +139,8 @@ class TestModernToolsCall(ModernMcpBase):
     def test_search_structured_content_and_schema(self):
         lines = [
             {"jsonrpc": "2.0", "id": 1, "method": "server/discover",
-             "params": {"protocolVersion": "2026-07-28"}},
+             "params": {"protocolVersion": "2026-07-28",
+                        "clientCapabilities": {}}},
             {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
              "params": {"name": "search", "arguments": {"query": "redis cache"}}},
             {"jsonrpc": "2.0", "id": 3, "method": "shutdown"},
@@ -172,7 +176,8 @@ class TestModernToolsCall(ModernMcpBase):
     def test_guard_structured(self):
         lines = [
             {"jsonrpc": "2.0", "id": 1, "method": "server/discover",
-             "params": {"protocolVersion": "2026-07-28"}},
+             "params": {"protocolVersion": "2026-07-28",
+                        "clientCapabilities": {}}},
             {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
              "params": {"name": "guard", "arguments": {}}},
             {"jsonrpc": "2.0", "id": 3, "method": "shutdown"},
@@ -186,7 +191,8 @@ class TestModernToolsCall(ModernMcpBase):
     def test_status_and_tasks_structured(self):
         lines = [
             {"jsonrpc": "2.0", "id": 1, "method": "server/discover",
-             "params": {"protocolVersion": "2026-07-28"}},
+             "params": {"protocolVersion": "2026-07-28",
+                        "clientCapabilities": {}}},
             {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
              "params": {"name": "status", "arguments": {}}},
             {"jsonrpc": "2.0", "id": 3, "method": "tools/call",

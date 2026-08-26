@@ -48,6 +48,7 @@ META_SI = "io.modelcontextprotocol/serverInfo"
 META_CI = "io.modelcontextprotocol/clientInfo"
 META_CC = "io.modelcontextprotocol/clientCapabilities"
 ERR_UNSUP = -32022
+ERR_INVALID_PARAMS = -32602
 
 
 def _run_stdio(server_args: List[str], lines: List[Dict[str, Any]],
@@ -80,12 +81,23 @@ def _find(objs: List[Dict[str, Any]], rid: Any) -> Dict[str, Any]:
 
 
 def _modern_meta(version: str = MODERN_VERSION) -> Dict[str, Any]:
-    """Build a modern _meta block per MCP 2026-07-28."""
+    """Build a modern _meta block per MCP 2026-07-28.
+
+    `cc` controls clientCapabilities: None -> key ABSENT (malformed
+    modern request), any value -> key present with that value.
+    """
     return {
         META_PV: version,
         META_CI: {"name": "conformance-test", "version": "1.0.0"},
         META_CC: {},
     }
+
+
+def _modern_meta_missing_cc(version: str = MODERN_VERSION) -> Dict[str, Any]:
+    """Modern _meta WITHOUT the required clientCapabilities key."""
+    m = _modern_meta(version)
+    del m[META_CC]
+    return m
 
 
 class ConformanceBase(unittest.TestCase):
@@ -551,6 +563,177 @@ class TestEraSeparation(ConformanceBase):
         self.assertEqual(r.get("resultType"), "complete")
         self.assertIn("tools", r)
         self.assertGreater(len(r["tools"]), 0)
+
+
+class TestClientCapabilitiesValidation(ConformanceBase):
+    """15. Required per-request clientCapabilities (MCP 2026-07-28).
+
+    Per the official schema, EVERY modern request must carry:
+      - io.modelcontextprotocol/protocolVersion (string)
+      - io.modelcontextprotocol/clientCapabilities (object)
+    clientInfo is optional. Missing/wrong-type clientCapabilities is
+    malformed required metadata -> JSON-RPC -32602 (invalid params),
+    NOT -32021 (reserved for a specific required capability).
+    """
+
+    def test_missing_clientCapabilities_returns_32602(self):
+        """1. Missing clientCapabilities with a valid modern version -> -32602."""
+        lines = [
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/list",
+             "params": {"_meta": _modern_meta_missing_cc()}},
+            {"jsonrpc": "2.0", "id": 2, "method": "shutdown"},
+        ]
+        objs = self._run(lines)
+        d = _find(objs, 1)
+        self.assertIn("error", d, "missing clientCapabilities must be rejected")
+        self.assertEqual(d["error"]["code"], ERR_INVALID_PARAMS)
+        self.assertNotEqual(d["error"]["code"], -32021)
+
+    def test_wrong_type_clientCapabilities_returns_32602(self):
+        """2. clientCapabilities null / list / string -> -32602."""
+        for bad in (None, ["x"], "tools"):
+            meta = _modern_meta()
+            meta[META_CC] = bad
+            lines = [
+                {"jsonrpc": "2.0", "id": 1, "method": "tools/list",
+                 "params": {"_meta": meta}},
+                {"jsonrpc": "2.0", "id": 2, "method": "shutdown"},
+            ]
+            d = _find(self._run(lines), 1)
+            self.assertIn("error", d,
+                          f"clientCapabilities={bad!r} must be rejected")
+            self.assertEqual(d["error"]["code"], ERR_INVALID_PARAMS,
+                             f"clientCapabilities={bad!r} must be -32602")
+
+    def test_empty_clientCapabilities_object_accepted(self):
+        """3. clientCapabilities={} is a valid object -> accepted."""
+        lines = [
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/list",
+             "params": {"_meta": _modern_meta()}},
+            {"jsonrpc": "2.0", "id": 2, "method": "shutdown"},
+        ]
+        objs = self._run(lines)
+        r = _find(objs, 1)
+        self.assertNotIn("error", r, "clientCapabilities={} must be accepted")
+        self.assertIn("tools", r["result"])
+
+    def test_legacy_no_meta_accepted(self):
+        """4. Legacy flow (no _meta at all) must NOT be rejected."""
+        lines = [
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+            {"jsonrpc": "2.0", "id": 2, "method": "shutdown"},
+        ]
+        objs = self._run(lines)
+        d = _find(objs, 1)
+        self.assertNotIn("error", d, "legacy request without _meta must work")
+        self.assertIn("tools", d["result"])
+
+    def test_connection_survives_malformed_request(self):
+        """5. A malformed modern request must not poison the connection —
+        a subsequent valid request still works."""
+        lines = [
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/list",
+             "params": {"_meta": _modern_meta_missing_cc()}},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/list",
+             "params": {"_meta": _modern_meta()}},
+            {"jsonrpc": "2.0", "id": 3, "method": "shutdown"},
+        ]
+        objs = self._run(lines)
+        self.assertEqual(_find(objs, 1)["error"]["code"], ERR_INVALID_PARAMS)
+        r = _find(objs, 2)
+        self.assertNotIn("error", r)
+        self.assertIn("tools", r["result"])
+
+    def test_unsupported_version_still_32022_with_data(self):
+        """Unsupported modern version keeps -32022 + supported/requested."""
+        lines = [
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/list",
+             "params": {"_meta": _modern_meta_missing_cc("2099-01-01")}},
+            {"jsonrpc": "2.0", "id": 2, "method": "shutdown"},
+        ]
+        d = _find(self._run(lines), 1)
+        self.assertEqual(d["error"]["code"], ERR_UNSUP)
+        self.assertIn("supported", d["error"].get("data", {}))
+        self.assertIn("requested", d["error"].get("data", {}))
+
+
+class TestRouterClientCapabilitiesValidation(unittest.TestCase):
+    """15b. The router enforces the SAME clientCapabilities rules."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="mcp-conf-rcc-"))
+        root = self.tmp / "proj"
+        rag = root / "INTERNAL_RAG"
+        for d in ("decisions", "knowledge", "gotchas", "failures",
+                  "hypotheses", "sessions", "sessions/.snapshots", "archive"):
+            (rag / d).mkdir(parents=True, exist_ok=True)
+        (rag / "WORKING_STATE.md").write_text("# ws\n", encoding="utf-8")
+        self.reg = self.tmp / "reg.json"
+        self.reg.write_text(json.dumps({"projects": {
+            "p": {"root": str(root), "write": False}}}), encoding="utf-8")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _run(self, lines: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        stdout = _run_stdio([sys.executable, str(ROUTER_PATH),
+                             "--registry", str(self.reg)], lines, self.tmp)
+        return _objs(stdout)
+
+    def test_router_missing_clientCapabilities_returns_32602(self):
+        lines = [
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/list",
+             "params": {"_meta": _modern_meta_missing_cc()}},
+            {"jsonrpc": "2.0", "id": 2, "method": "shutdown"},
+        ]
+        d = _find(self._run(lines), 1)
+        self.assertIn("error", d)
+        self.assertEqual(d["error"]["code"], ERR_INVALID_PARAMS)
+
+    def test_router_wrong_type_clientCapabilities_returns_32602(self):
+        meta = _modern_meta()
+        meta[META_CC] = "not-an-object"
+        lines = [
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/list",
+             "params": {"_meta": meta}},
+            {"jsonrpc": "2.0", "id": 2, "method": "shutdown"},
+        ]
+        d = _find(self._run(lines), 1)
+        self.assertIn("error", d)
+        self.assertEqual(d["error"]["code"], ERR_INVALID_PARAMS)
+
+    def test_router_empty_object_accepted(self):
+        lines = [
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/list",
+             "params": {"_meta": _modern_meta()}},
+            {"jsonrpc": "2.0", "id": 2, "method": "shutdown"},
+        ]
+        d = _find(self._run(lines), 1)
+        self.assertNotIn("error", d)
+        self.assertIn("tools", d["result"])
+
+    def test_router_legacy_no_meta_accepted(self):
+        lines = [
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+            {"jsonrpc": "2.0", "id": 2, "method": "shutdown"},
+        ]
+        d = _find(self._run(lines), 1)
+        self.assertNotIn("error", d)
+        self.assertIn("tools", d["result"])
+
+    def test_router_connection_survives_malformed(self):
+        lines = [
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/list",
+             "params": {"_meta": _modern_meta_missing_cc()}},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/list",
+             "params": {"_meta": _modern_meta()}},
+            {"jsonrpc": "2.0", "id": 3, "method": "shutdown"},
+        ]
+        objs = self._run(lines)
+        self.assertEqual(_find(objs, 1)["error"]["code"], ERR_INVALID_PARAMS)
+        r = _find(objs, 2)
+        self.assertNotIn("error", r)
+        self.assertIn("tools", r["result"])
 
 
 class TestRouterEraSeparation(unittest.TestCase):

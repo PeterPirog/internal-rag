@@ -284,6 +284,12 @@ def serve(registry: Dict[str, Dict[str, Any]], irag_path: str, timeout: float) -
         return _META_PV in meta
 
     def _validate_modern(params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        # Shared validator — single source of truth (irag_mcp_protocol.py).
+        # Checks: modern protocolVersion supported (-32022) and
+        # clientCapabilities present as an object (-32602). Legacy requests
+        # (no modern _meta) pass through.
+        if _proto is not None:
+            return _proto.validate_modern_request(params)
         meta = params.get("_meta")
         if not isinstance(meta, dict):
             return None
@@ -296,6 +302,15 @@ def serve(registry: Dict[str, Dict[str, Any]], irag_path: str, timeout: float) -
                 "message": f"Unsupported protocol version: {pv}",
                 "data": {"supported": SUPPORTED_MODERN_VERSIONS, "requested": pv},
             }
+        cc = meta.get("io.modelcontextprotocol/clientCapabilities")
+        if cc is None:
+            return {"code": -32602,
+                    "message": "missing required _meta field: "
+                               "io.modelcontextprotocol/clientCapabilities"}
+        if not isinstance(cc, dict):
+            return {"code": -32602,
+                    "message": "_meta field 'io.modelcontextprotocol/clientCapabilities' "
+                               "must be an object"}
         return None
 
     conn_version = ""

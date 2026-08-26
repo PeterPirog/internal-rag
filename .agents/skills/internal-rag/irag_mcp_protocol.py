@@ -60,6 +60,8 @@ META_LOG_LEVEL = "io.modelcontextprotocol/logLevel"
 # Error codes (MCP 2026-07-28)
 ERR_UNSUPPORTED_PROTOCOL_VERSION = -32022
 ERR_MISSING_REQUIRED_CLIENT_CAPABILITY = -32021
+# JSON-RPC 2.0 standard: invalid params (malformed/missing required _meta field)
+ERR_INVALID_PARAMS = -32602
 
 # Cache scope values (MCP 2026-07-28)
 CACHE_PUBLIC = "public"
@@ -109,31 +111,51 @@ def is_modern_request(params: Dict[str, Any]) -> bool:
 
 
 def validate_modern_request(params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Validate a modern request's required _meta fields.
+    """SHARED validator for modern (2026-07-28) per-request `_meta`.
 
-    Returns an error dict (code, message) if the request is malformed,
-    or None if the request is valid (or is a legacy request with no _meta).
+    Single source of truth for both the single-project server (irag.py)
+    and the router (irag_mcp_router.py).
 
-    Per MCP 2026-07-28, modern requests MUST include:
-      - _meta["io.modelcontextprotocol/protocolVersion"] (required)
-      - _meta["io.modelcontextprotocol/clientCapabilities"] (required)
+    Returns an error dict (code, message[, data]) if the request is
+    malformed, or None if the request is valid — or if it is a legacy
+    request (no modern _meta) that needs no modern validation.
+
+    Per MCP 2026-07-28, every modern request MUST include:
+      - _meta["io.modelcontextprotocol/protocolVersion"]: string
+      - _meta["io.modelcontextprotocol/clientCapabilities"]: object
+    `_meta["io.modelcontextprotocol/clientInfo"]` is OPTIONAL.
+
+    Errors:
+      - unsupported modern protocol version -> -32022 with
+        data.supported / data.requested
+      - missing or wrong-type clientCapabilities -> JSON-RPC -32602
+        (invalid params; -32021 is reserved for a specific required
+        capability, not for malformed required metadata)
     """
     meta = params.get("_meta")
     if not isinstance(meta, dict):
-        return None  # legacy request — no validation needed
+        return None  # legacy request — no modern validation needed
     pv = meta.get(META_PROTOCOL_VERSION)
     if pv is None:
-        # If _meta exists but protocolVersion is absent, it's malformed for modern
-        # but could be a legacy request with an empty _meta. Only enforce if
-        # the request uses modern methods.
-        return None
-    # Check supported version (modern era only — legacy revisions in
-    # per-request _meta are unsupported in the modern era)
+        return None  # _meta without protocolVersion -> legacy dispatch
+    # Unsupported modern version (legacy revisions are not modern revisions)
     if pv not in SUPPORTED_MODERN_VERSIONS:
         return {
             "code": ERR_UNSUPPORTED_PROTOCOL_VERSION,
             "message": f"Unsupported protocol version: {pv}",
-            "data": {"supported": SUPPORTED_MODERN_VERSIONS, "requested": pv},
+            "data": {"supported": list(SUPPORTED_MODERN_VERSIONS), "requested": pv},
+        }
+    # Required: clientCapabilities must be an object
+    cc = meta.get(META_CLIENT_CAPABILITIES)
+    if cc is None:
+        return {
+            "code": ERR_INVALID_PARAMS,
+            "message": "missing required _meta field: " + META_CLIENT_CAPABILITIES,
+        }
+    if not isinstance(cc, dict):
+        return {
+            "code": ERR_INVALID_PARAMS,
+            "message": f"_meta field {META_CLIENT_CAPABILITIES!r} must be an object",
         }
     return None
 

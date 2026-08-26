@@ -4744,6 +4744,7 @@ def mcp_server() -> int:
     MODERN = getattr(_proto, "MODERN_VERSION", "2026-07-28")
     _META_PV = getattr(_proto, "META_PROTOCOL_VERSION", "io.modelcontextprotocol/protocolVersion")
     _META_SI = getattr(_proto, "META_SERVER_INFO", "io.modelcontextprotocol/serverInfo")
+    _META_CC = getattr(_proto, "META_CLIENT_CAPABILITIES", "io.modelcontextprotocol/clientCapabilities")
     _ERR_UNSUP = getattr(_proto, "ERR_UNSUPPORTED_PROTOCOL_VERSION", -32022)
     # Redirect any module-level print() leakage to stderr for the server lifetime
     real_stdout = sys.stdout
@@ -4769,29 +4770,40 @@ def mcp_server() -> int:
         return _META_PV in meta
 
     def _validate_modern(params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Validate a modern request's _meta. Returns error dict or None.
+        """Validate a modern request via the SHARED protocol validator
+        (irag_mcp_protocol.validate_modern_request — single source of truth
+        for both the single-project server and the router).
 
         Per MCP 2026-07-28, every modern request MUST include:
-          - _meta["io.modelcontextprotocol/protocolVersion"] (required)
-          - _meta["io.modelcontextprotocol/clientCapabilities"] (required)
-
-        The declared version MUST be a supported MODERN revision — a legacy
-        revision (2024-11-05 … 2025-11-25) in per-request _meta is rejected
-        as unsupported in the modern era.
+          - _meta["io.modelcontextprotocol/protocolVersion"] (string)
+          - _meta["io.modelcontextprotocol/clientCapabilities"] (object)
+        clientInfo is optional.
+        Errors: -32022 (unsupported modern version) or -32602
+        (missing/wrong-type clientCapabilities). Legacy requests (no
+        modern _meta) pass through untouched.
         """
+        if _proto is not None:
+            return _proto.validate_modern_request(params)
+        # Fallback (protocol module unavailable): same rules, same codes.
         meta = params.get("_meta")
         if not isinstance(meta, dict):
-            return None  # legacy request — no validation needed
+            return None
         pv = meta.get(_META_PV)
         if pv is None:
-            return None  # no _meta or no PV -> legacy dispatch
-        # Check supported modern version
+            return None
         if pv not in SUPPORTED_MODERN:
             return {
                 "code": _ERR_UNSUP,
                 "message": f"Unsupported protocol version: {pv}",
                 "data": {"supported": SUPPORTED_MODERN, "requested": pv},
             }
+        cc = meta.get(_META_CC)
+        if cc is None:
+            return {"code": -32602,
+                    "message": "missing required _meta field: " + _META_CC}
+        if not isinstance(cc, dict):
+            return {"code": -32602,
+                    "message": f"_meta field {_META_CC!r} must be an object"}
         return None
 
     server_version_legacy = "2025-11-25"
