@@ -1,4 +1,4 @@
-# Architecture (v1.7.0)
+# Architecture (v1.8.0)
 
 ```text
 Warp / OpenCode / Claude Code / Cursor
@@ -86,3 +86,53 @@ Warp / OpenCode / Claude Code / Cursor
 - `INTERNAL_RAG/` and tools should never be committed (unless `--share-tools`).
 
 Durable memory from `decisions`, `knowledge`, `gotchas`, `failures`, `hypotheses` is loaded selectively via retrieval, never in bulk.
+
+
+## New modules (v1.8.0)
+
+| Module | Purpose |
+|---|---|
+| `irag_atomic.py` | Atomic writes (temp->fsync->replace) + ProjectWriteLock |
+| `irag_ephemeral.py` | Ephemeral observations (SQLite, TTL, bounded, secret redaction) |
+| `irag_distill.py` | Diagnostic distillation (stdlib-first extraction from tool output) |
+| `irag_gc.py` | Retention + GC + snapshot GC + value-aware forgetting |
+
+### Memory lifecycle (v1.8.0)
+
+```
+raw tool output
+    |
+    v
+ephemeral observation (SQLite, TTL 30min, bounded)
+    |
+    v
+diagnostic distillation (irag_distill.py)
+    |
+    +-- confidence < MEDIUM --> remain ephemeral, expire on TTL
+    |
+    +-- confidence >= MEDIUM --> promote to durable
+         |
+         v
+    durable Markdown memory (remember)
+         |
+         v
+    raw observation deleted
+         |
+         v
+    durable memory lifecycle:
+      active -> tentative -> superseded -> archived -> GC
+                                    |
+                                    +-- protected (decisions/constraints) -> never GC'd
+```
+
+### GC decay stages
+
+1. Deprioritize (reduce retrieval priority)
+2. Archive candidate (mark)
+3. Archive (move to archive/)
+4. Delete (after grace period, only non-protected)
+
+### Concurrency
+
+All Markdown mutations are atomic (temp->fsync->os.replace).
+ProjectWriteLock serializes concurrent agent mutations.

@@ -64,6 +64,23 @@ Do not ask me any questions. Do not require manual editing. Do everything yourse
 
 ---
 
+## OpenCode 2 (beta)
+
+```
+Install and configure MCP Light Memory (mcp-light-memory) as an MCP server for this project, fully automatically.
+
+Steps:
+1. Clone: git clone https://github.com/PeterPirog/mcp-light-memory.git ~/mcp-light-memory
+   (if it exists: git -C ~/mcp-light-memory pull --ff-only)
+2. Install: python ~/mcp-light-memory/install.py . --client opencode2
+   (use python3 on Linux/macOS)
+   The installer writes opencode.json with mcp.servers shape, type:local, no 'enabled' field (V2 uses 'disabled').
+3. Optionally add compaction integration: python ~/mcp-light-memory/install.py . --client opencode2 --compaction
+4. Verify: python .agents/skills/internal-rag/mlm.py --version  (expect 1.8.0)
+           python .agents/skills/internal-rag/mlm.py guard      (expect GUARD OK)
+5. Report success or the exact error. Do not ask me anything.
+```
+
 ## JetBrains AI Assistant / PyCharm
 
 ```
