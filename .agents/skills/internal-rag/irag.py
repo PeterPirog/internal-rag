@@ -1643,6 +1643,9 @@ def _policy_boost(fm: Dict[str, Any], at_date: Optional[str] = None) -> float:
     mtype = str(fm.get("type", "")).lower()
     boost += TYPE_PRIORITY.get(mtype, 0.0)
     boost += recency_boost(fm)
+    # GC "deprioritize" marker: lower retrieval rank (reversible, not deleted)
+    if str(fm.get("priority", "")).lower() == "low":
+        boost -= 2.0
     return boost
 
 
@@ -2745,7 +2748,8 @@ def remember(args) -> None:
         "## Consequence\n\n"
         f"{(args.consequence or 'To be determined.').strip()}\n"
     )
-    path.write_text(content, encoding="utf-8")
+    with ProjectWriteLock(RAG / ".write.lock"):
+        atomic_write_text(path, content, encoding="utf-8")
     rebuild_index()
     if want_json:
         print(json.dumps({"status": "created", "path": str(path.relative_to(ROOT)),
@@ -3132,7 +3136,8 @@ def update_memory(args) -> int:
     new_text = write_fm(fm) + "\n" + body
     if args.append:
         new_text = new_text.rstrip() + "\n\n## Update " + today() + "\n\n" + args.append.strip() + "\n"
-    p.write_text(new_text, encoding="utf-8")
+    with ProjectWriteLock(RAG / ".write.lock"):
+        atomic_write_text(p, new_text, encoding="utf-8")
     rebuild_index()
     print(f"Updated: {p.relative_to(ROOT)}")
     return 0
@@ -3180,8 +3185,8 @@ def supersede(args) -> int:
             fm.pop("superseded_by", None)
     body_start = text.find("---\n", 4)
     body = text[body_start + 4:].lstrip("\n") if body_start >= 0 else text
-    p.write_text(write_fm(fm) + "\n" + body, encoding="utf-8")
     # Link the replacement: supersedes -> [old_id]
+    new_content = None
     if new_p is not None:
         new_text, new_fm = _read_memory(new_p)
         supersedes = new_fm.get("supersedes", [])
@@ -3194,7 +3199,11 @@ def supersede(args) -> int:
         new_fm["supersedes"] = supersedes
         new_body_start = new_text.find("---\n", 4)
         new_body = new_text[new_body_start + 4:].lstrip("\n") if new_body_start >= 0 else new_text
-        new_p.write_text(write_fm(new_fm) + "\n" + new_body, encoding="utf-8")
+        new_content = write_fm(new_fm) + "\n" + new_body
+    with ProjectWriteLock(RAG / ".write.lock"):
+        atomic_write_text(p, write_fm(fm) + "\n" + body, encoding="utf-8")
+        if new_content is not None:
+            atomic_write_text(new_p, new_content, encoding="utf-8")
     rebuild_index()
     suffix = f" (superseded by {new_id})" if new_id else ""
     print(f"Superseded: {p.relative_to(ROOT)}{suffix}")
@@ -3213,7 +3222,24 @@ def forget(args) -> int:
     while target.exists():
         target = archive / f"{p.stem}-{n}.md"
         n += 1
-    p.rename(target)
+    # Stamp archive metadata BEFORE moving (crash-safe; GC grace period
+    # depends on archived_at being set).
+    def _stamp_and_move():
+        try:
+            text, fm = _read_memory(p)
+            if not str(fm.get("archived_at") or ""):
+                fm["archived_at"] = today()
+            if str(fm.get("status", "active")) not in ("archived", "superseded", "invalid"):
+                fm["status"] = "archived"
+            fm["updated"] = today()
+            body_start = text.find("---\n", 4)
+            body = text[body_start + 4:].lstrip("\n") if body_start >= 0 else text
+            atomic_write_text(p, write_fm(fm) + "\n" + body, encoding="utf-8")
+        except Exception:
+            pass  # metadata stamping is best-effort; move is the real action
+        p.rename(target)
+    with ProjectWriteLock(RAG / ".write.lock"):
+        _stamp_and_move()
     rebuild_index()
     print(f"Archived: {p.relative_to(ROOT)} -> {target.relative_to(ROOT)}")
     return 0
@@ -3235,8 +3261,9 @@ def clean_cmd(args) -> int:
             print(f"  {p.relative_to(ROOT)}")
         print("Run with --force to confirm permanent deletion.")
         return 1
-    for p in targets:
-        p.unlink()
+    with ProjectWriteLock(RAG / ".write.lock"):
+        for p in targets:
+            p.unlink()
     print(f"Permanently deleted {len(targets)} archived memory file(s).")
     return 0
 
@@ -3258,7 +3285,8 @@ def link_memories(args) -> int:
     fm["updated"] = today()
     body_start = text.find("---\n", 4)
     body = text[body_start + 4:].lstrip("\n") if body_start >= 0 else text
-    p1.write_text(write_fm(fm) + "\n" + body, encoding="utf-8")
+    with ProjectWriteLock(RAG / ".write.lock"):
+        atomic_write_text(p1, write_fm(fm) + "\n" + body, encoding="utf-8")
     print(f"Linked: {p1.relative_to(ROOT)} -> {p2.relative_to(ROOT)}")
     return 0
 

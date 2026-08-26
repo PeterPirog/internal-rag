@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -47,6 +48,51 @@ DEFAULT_GRACE_DAYS = 30
 DEFAULT_STALE_DAYS = 90          # not accessed in 90 days -> reduce priority
 DEFAULT_GC_CANDIDATE_DAYS = 180  # not accessed in 180 days -> GC candidate
 DEFAULT_ARCHIVE_AFTER_DAYS = 365 # archive after 1 year of disuse
+
+
+def _parse_ts(value: Any) -> Optional[float]:
+    """Parse a timestamp value into a UNIX epoch float, or None if unparseable.
+
+    Accepts:
+      - int / float epoch seconds (e.g. 1756178400.0)
+      - ISO-8601 date or datetime strings (e.g. '2026-08-26', '2026-08-26T10:00:00',
+        with 'Z' or explicit UTC offset, as written by irag_index.record_access)
+
+    NOTE: irag_index stores `last_accessed` as an ISO *date* string, not an
+    epoch float — this helper is the single place that normalizes both forms.
+    """
+    if value is None:
+        return None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        v = float(value)
+        return v if v > 0 else None
+    s = str(value).strip()
+    if not s:
+        return None
+    # Numeric string -> epoch seconds
+    try:
+        v = float(s)
+        return v if v > 0 else None
+    except (ValueError, OverflowError):
+        pass
+    # ISO-8601 (Python 3.7+ fromisoformat; handle trailing 'Z')
+    iso = s.replace("Z", "+00:00") if s.endswith("Z") else s
+    try:
+        dt = datetime.fromisoformat(iso)
+    except ValueError:
+        # Try a couple of common explicit formats as a fallback
+        for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y/%m/%d"):
+            try:
+                dt = datetime.strptime(s, fmt)
+                break
+            except ValueError:
+                continue
+        else:
+            return None
+    if dt.tzinfo is None:
+        # Naive date/datetime is stored as local wall-clock; interpret as local.
+        dt = dt.astimezone()
+    return dt.timestamp()
 
 
 def _load_usage(rag_dir: Path) -> Dict[str, Dict[str, Any]]:
@@ -117,11 +163,9 @@ def _compute_memory_value(fm: Dict[str, Any], usage: Dict[str, Any],
 
     # Recency (last_accessed or created)
     last_accessed = usage.get("last_accessed")
-    if last_accessed:
-        try:
-            age_days = (now_ts - float(last_accessed)) / 86400.0
-        except (ValueError, TypeError):
-            age_days = 999
+    la_ts = _parse_ts(last_accessed)
+    if la_ts is not None:
+        age_days = (now_ts - la_ts) / 86400.0
     else:
         # Fall back to created date
         try:
@@ -204,23 +248,17 @@ def gc_plan(rag_dir: Path,
             continue
 
         u = usage.get(mid, {})
-        last_accessed = u.get("last_accessed")
         access_count = u.get("access_count", 0)
 
-        # Compute age
-        if last_accessed:
-            try:
-                age_days = (now_ts - float(last_accessed)) / 86400.0
-            except (ValueError, TypeError):
-                age_days = 999
+        # Compute age (last_accessed may be an ISO date string or epoch float —
+        # _parse_ts normalizes both; unparseable falls back to created)
+        la_ts = _parse_ts(u.get("last_accessed"))
+        if la_ts is not None:
+            age_days = (now_ts - la_ts) / 86400.0
         else:
             created = fm.get("created", "")
-            try:
-                from datetime import datetime
-                ct = datetime.fromisoformat(created.replace("Z", "+00:00"))
-                age_days = (now_ts - ct.timestamp()) / 86400.0
-            except Exception:
-                age_days = 999
+            c_ts = _parse_ts(created)
+            age_days = (now_ts - c_ts) / 86400.0 if c_ts is not None else 999
 
         value = _compute_memory_value(fm, u, now_ts=now_ts)
 
@@ -230,30 +268,26 @@ def gc_plan(rag_dir: Path,
 
         if retention == "archived":
             # Already archived — check grace period for physical deletion
-            archived_at = fm.get("archived_at", "")
-            if archived_at:
-                try:
-                    from datetime import datetime
-                    at = datetime.fromisoformat(archived_at.replace("Z", "+00:00"))
-                    archive_age_days = (now_ts - at.timestamp()) / 86400.0
-                    if archive_age_days > grace_days:
-                        action = "delete"
-                        reason = f"archived {archive_age_days:.0f}d ago, value={value:.2f}, grace={grace_days}d"
-                        would_delete += 1
-                        candidates.append({
-                            "path": str(path),
-                            "id": mid,
-                            "type": mtype,
-                            "status": status,
-                            "value": round(value, 3),
-                            "age_days": round(age_days, 1),
-                            "access_count": access_count,
-                            "reason": reason,
-                            "action": action,
-                            "retention_class": retention,
-                        })
-                except Exception:
-                    pass
+            archived_at = fm.get("archived_at", "") or fm.get("superseded_at", "")
+            at_ts = _parse_ts(archived_at)
+            if at_ts is not None:
+                archive_age_days = (now_ts - at_ts) / 86400.0
+                if archive_age_days > grace_days:
+                    action = "delete"
+                    reason = f"archived {archive_age_days:.0f}d ago, value={value:.2f}, grace={grace_days}d"
+                    would_delete += 1
+                    candidates.append({
+                        "path": str(path),
+                        "id": mid,
+                        "type": mtype,
+                        "status": status,
+                        "value": round(value, 3),
+                        "age_days": round(age_days, 1),
+                        "access_count": access_count,
+                        "reason": reason,
+                        "action": action,
+                        "retention_class": retention,
+                    })
             continue
 
         if age_days > gc_candidate_days and value < 0.3:
@@ -289,16 +323,55 @@ def gc_plan(rag_dir: Path,
     }
 
 
+def _set_fm_field(text: str, key: str, value: str) -> str:
+    """Insert or update a single frontmatter scalar field `key: value`.
+
+    Frontmatter block is delimited by the first two '---' lines. If `key` is
+    already present it is replaced in place (preserving order); otherwise the
+    line is appended before the closing '---'. Body is untouched.
+    """
+    lines = text.split("\n")
+    # locate closing '---' of frontmatter
+    close = None
+    for i in range(1, len(lines)):
+        if lines[i].strip() == "---":
+            close = i
+            break
+    if close is None:
+        return text
+    new_line = f"{key}: {value}"
+    for i in range(1, close):
+        if lines[i].startswith(f"{key}:"):
+            lines[i] = new_line
+            return "\n".join(lines)
+    lines.insert(close, new_line)
+    return "\n".join(lines)
+
+
 def gc_run(rag_dir: Path, plan: Dict[str, Any], apply: bool = False,
+           write_lock: Optional[Any] = None,
+           atomic_write: Optional[Any] = None,
            ) -> Dict[str, Any]:
     """Execute a GC plan. If apply=False, only reports. If apply=True, executes.
 
     Execution:
-      - deprioritize: no file change (just reported; priority is derived at
-        retrieval time from usage data)
-      - archive: move to archive/ directory (like forget)
-      - delete: unlink the file (only for archived memories past grace period)
+      - deprioritize: frontmatter `priority: low` (retrieval recency_boost
+        reads this; reversible — no file move). If `write_lock` is a
+        ProjectWriteLock context manager, all mutations run under it.
+      - archive: frontmatter `status: archived` + `archived_at` set, THEN move
+        to archive/ (metadata first, so the file is never lost to a crash).
+      - delete: unlink the file (only for archived memories past grace period).
     """
+    if atomic_write is None:
+        try:
+            from irag_atomic import atomic_write_text as _awt
+            atomic_write = _awt
+        except Exception:
+            atomic_write = lambda p, c, encoding="utf-8": Path(p).write_text(c, encoding=encoding)
+
+    def _w(p: Path, content: str) -> None:
+        atomic_write(p, content, encoding="utf-8")
+
     results: List[Dict[str, Any]] = []
     archived = 0
     deleted = 0
@@ -308,39 +381,82 @@ def gc_run(rag_dir: Path, plan: Dict[str, Any], apply: bool = False,
     if apply:
         archive_dir.mkdir(exist_ok=True)
 
-    for c in plan.get("candidates", []):
-        path = Path(c["path"])
-        action = c["action"]
+    today = time.strftime("%Y-%m-%d", time.gmtime())
 
-        if action == "deprioritize":
-            deprioritized += 1
-            results.append({**c, "executed": apply, "result": "deprioritized (no file change)"})
-            continue
+    candidates = list(plan.get("candidates", []))
 
-        if action == "archive":
-            if apply and path.exists():
-                dst = archive_dir / path.name
-                try:
-                    path.rename(dst)
-                    archived += 1
-                    results.append({**c, "executed": True, "result": f"archived to {dst}"})
-                except Exception as e:
-                    results.append({**c, "executed": False, "result": f"error: {e}"})
-            else:
-                results.append({**c, "executed": False, "result": "would archive"})
-            continue
+    def _run_locked():
+        nonlocal archived, deleted, deprioritized
 
-        if action == "delete":
-            if apply and path.exists():
-                try:
-                    path.unlink()
-                    deleted += 1
-                    results.append({**c, "executed": True, "result": "deleted"})
-                except Exception as e:
-                    results.append({**c, "executed": False, "result": f"error: {e}"})
-            else:
-                results.append({**c, "executed": False, "result": "would delete"})
-            continue
+        for c in candidates:
+            path = Path(c["path"])
+            action = c["action"]
+
+            if action == "deprioritize":
+                if path.exists():
+                    try:
+                        text = path.read_text(encoding="utf-8", errors="replace")
+                        new_text = _set_fm_field(text, "priority", "low")
+                        if new_text != text:
+                            _w(path, new_text)
+                        deprioritized += 1
+                        results.append({**c, "executed": True,
+                                        "result": "deprioritized (priority: low)"})
+                    except Exception as e:
+                        results.append({**c, "executed": False, "result": f"error: {e}"})
+                else:
+                    results.append({**c, "executed": False, "result": "would deprioritize"})
+                continue
+
+            if action == "archive":
+                if path.exists():
+                    try:
+                        # metadata first (crash-safe: file keeps its identity),
+                        # then move
+                        text = path.read_text(encoding="utf-8", errors="replace")
+                        new_text = _set_fm_field(text, "archived_at", today)
+                        new_text = _set_fm_field(new_text, "status", "archived")
+                        if new_text != text:
+                            _w(path, new_text)
+                        dst = archive_dir / path.name
+                        n = 1
+                        while dst.exists():
+                            dst = archive_dir / f"{path.stem}-{n}.md"
+                            n += 1
+                        path.rename(dst)
+                        archived += 1
+                        results.append({**c, "executed": True, "result": f"archived to {dst}"})
+                    except Exception as e:
+                        results.append({**c, "executed": False, "result": f"error: {e}"})
+                else:
+                    results.append({**c, "executed": False, "result": "would archive"})
+                continue
+
+            if action == "delete":
+                if path.exists():
+                    try:
+                        path.unlink()
+                        deleted += 1
+                        results.append({**c, "executed": True, "result": "deleted"})
+                    except Exception as e:
+                        results.append({**c, "executed": False, "result": f"error: {e}"})
+                else:
+                    results.append({**c, "executed": False, "result": "would delete"})
+                continue
+
+    if apply and write_lock is not None:
+        with write_lock:
+            _run_locked()
+    elif apply:
+        _run_locked()
+    else:
+        # dry-run: report what would happen, no file changes
+        for c in candidates:
+            action = c["action"]
+            results.append({
+                **c, "executed": False,
+                "result": f"would {action}",
+            })
 
     return {
         "applied": apply,

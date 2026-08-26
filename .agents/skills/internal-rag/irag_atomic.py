@@ -23,6 +23,25 @@ from pathlib import Path
 from typing import Optional, Union
 
 
+def _replace_retry(tmp: str, target: str, attempts: int = 8, delay: float = 0.05) -> None:
+    """os.replace with bounded retry for transient Windows sharing violations
+    (WinError 32) — e.g. an antivirus scan briefly holding a handle on the
+    target, or the target file still being closed by another thread."""
+    last: Optional[Exception] = None
+    for i in range(attempts):
+        try:
+            os.replace(tmp, target)
+            return
+        except (PermissionError, OSError) as e:
+            last = e
+            # WinError 32 = ERROR_SHARING_VIOLATION; also retry other EACCES-like
+            if not isinstance(e, PermissionError) and getattr(e, "winerror", None) not in (32, 5):
+                raise
+            time.sleep(delay * (i + 1))
+    assert last is not None
+    raise last
+
+
 def atomic_write_text(path: Union[str, Path], content: str,
                       encoding: str = "utf-8") -> None:
     """Write text to `path` atomically: temp file -> fsync -> os.replace.
@@ -43,7 +62,7 @@ def atomic_write_text(path: Union[str, Path], content: str,
                 os.fsync(f.fileno())
             except (OSError, AttributeError):
                 pass  # fsync not available on some platforms
-        os.replace(tmp, str(p))
+        _replace_retry(tmp, str(p))
     except Exception:
         try:
             os.unlink(tmp)
@@ -66,7 +85,7 @@ def atomic_write_bytes(path: Union[str, Path], content: bytes) -> None:
                 os.fsync(f.fileno())
             except (OSError, AttributeError):
                 pass
-        os.replace(tmp, str(p))
+        _replace_retry(tmp, str(p))
     except Exception:
         try:
             os.unlink(tmp)
@@ -166,7 +185,13 @@ class ProjectWriteLock:
             f"Could not acquire write lock {self.lock_path} within {self.timeout}s")
 
     def release(self) -> None:
-        """Release the lock."""
+        """Release the lock.
+
+        On Windows, unlinking a file another thread still has open (e.g. a
+        concurrent stale-check read) raises WinError 32 — unlink is therefore
+        retried and treated as best-effort: if it ultimately fails, the stale
+        reclaim logic will collect the lock on a later acquisition.
+        """
         if self._fd is not None and self._have_posix_lock:
             try:
                 import fcntl
@@ -179,7 +204,12 @@ class ProjectWriteLock:
                 pass
             self._fd = None
             self._have_posix_lock = False
-        self.lock_path.unlink(missing_ok=True)
+        for i in range(8):
+            try:
+                self.lock_path.unlink(missing_ok=True)
+                return
+            except OSError:
+                time.sleep(0.02 * (i + 1))
 
     def __enter__(self):
         self.acquire()
