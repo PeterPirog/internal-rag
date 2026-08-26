@@ -3985,6 +3985,84 @@ def export_cmd(args) -> int:
     return 0
 
 
+def _safe_import_destination(rag_dir: Path, rel: str) -> Optional[Path]:
+    """Compute a safe destination path inside `rag_dir` for an import entry.
+
+    Returns the resolved destination Path IF it is provably inside `rag_dir`
+    (after resolving `..` and any symlink traversal), or None if the entry
+    would escape `rag_dir` (absolute path, `..` escape, symlink-to-outside,
+    or any resolved path not prefixed by `rag_dir`).
+
+    Security guarantees (no write outside INTERNAL_RAG):
+      1. Reject absolute `rel` (PosixPath("/x") or WindowsPath("C:/x")).
+      2. Reject any `..` component that would escape `rag_dir` after resolve.
+      3. Resolve symlinks on the *parent* chain and reject if the resolved
+         real path is not inside `rag_dir.resolve()`.
+      4. The final component (file name) is NOT required to exist yet, so we
+         resolve the parent and append the file name; this catches a symlinked
+         directory pointing outside RAG without requiring the target file.
+
+    Pure stdlib, Python 3.8+.
+    """
+    if rel is None:
+        return None
+    rel = rel.strip()
+    if not rel:
+        return None
+    # Strip a single leading "INTERNAL_RAG/" prefix (bundle convention).
+    if rel.startswith("INTERNAL_RAG/"):
+        rel = rel[len("INTERNAL_RAG/"):]
+    # Reject absolute paths (Posix and Windows drive letters / UNC).
+    if Path(rel).is_absolute():
+        return None
+    # Reject Windows-style drive/UNC even when is_absolute() misses them on
+    # some platforms (defensive).
+    if len(rel) >= 2 and rel[1] == ":" and rel[0].isalpha():
+        return None
+    if rel.startswith("//") or rel.startswith("\\\\"):
+        return None
+    # Reject explicit empty after stripping.
+    if not rel:
+        return None
+
+    rag_resolved = rag_dir.resolve()
+    candidate = (rag_resolved / rel)
+    # Resolve the parent chain to catch symlink traversal; the final component
+    # may not exist yet, so we resolve its parent and append the file name.
+    parent = candidate.parent
+    try:
+        parent_real = parent.resolve(strict=False)
+    except (OSError, RuntimeError):
+        # resolve() can fail on missing roots or symlink loops; treat as
+        # unsafe rather than risking a write outside RAG.
+        return None
+    # The parent must be inside RAG. Use os.path-commonpath for a robust
+    # prefix check that respects path-component boundaries.
+    try:
+        common = os.path.commonpath([str(rag_resolved), str(parent_real)])
+    except ValueError:
+        # commonpath raises ValueError on cross-drive comparisons (Windows);
+        # the parent is clearly not inside RAG.
+        return None
+    if common != str(rag_resolved):
+        return None
+    # Reconstruct the destination from the resolved parent + file name to
+    # keep the final component stable (no symlink resolution on the file
+    # itself, which may not exist yet).
+    name = candidate.name
+    if not name or name in (".", ".."):
+        return None
+    dst = parent_real / name
+    # Final belt-and-braces: resolved destination must still be inside RAG.
+    try:
+        common2 = os.path.commonpath([str(rag_resolved), str(dst)])
+    except ValueError:
+        return None
+    if common2 != str(rag_resolved):
+        return None
+    return dst
+
+
 def import_cmd(args) -> int:
     src = Path(args.file).expanduser().resolve()
     if not src.is_file():
@@ -4000,22 +4078,27 @@ def import_cmd(args) -> int:
         (RAG / d).mkdir(exist_ok=True)
     imported = 0
     skipped = 0
-    for m in payload.get("memories", []):
-        rel = m.get("path", "")
-        if not rel or rel.startswith("INTERNAL_RAG/") is False:
-            continue
-        rel_clean = rel[len("INTERNAL_RAG/"):] if rel.startswith("INTERNAL_RAG/") else rel
-        dst = RAG / rel_clean
-        if dst.exists() and not args.overwrite:
-            skipped += 1
-            continue
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        dst.write_text(m.get("content", ""), encoding="utf-8")
-        imported += 1
+    rejected = 0
+    # All memory writes run under the project write lock (no nested lock:
+    # ProjectWriteLock is re-entrant only by the same token, so we acquire
+    # ONCE here and reuse it for every entry).
+    with ProjectWriteLock(RAG / ".write.lock"):
+        for m in payload.get("memories", []):
+            rel = m.get("path", "")
+            dst = _safe_import_destination(RAG, rel)
+            if dst is None:
+                rejected += 1
+                continue
+            if dst.exists() and not args.overwrite:
+                skipped += 1
+                continue
+            atomic_write_text(dst, m.get("content", ""), encoding="utf-8")
+            imported += 1
     if payload.get("working_state") and not WORKING.exists():
         save_working(payload["working_state"])
     rebuild_index()
-    print(f"Imported {imported} memory file(s), skipped {skipped}.")
+    suffix = f" (rejected {rejected} unsafe path(s))" if rejected else ""
+    print(f"Imported {imported} memory file(s), skipped {skipped}.{suffix}")
     return 0
 
 
