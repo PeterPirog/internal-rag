@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-1.7.3-blue">
+  <img alt="version" src="https://img.shields.io/badge/version-1.8.0-blue">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-green">
   <img alt="python" src="https://img.shields.io/badge/python-3.8%2B-blue">
   <img alt="deps" src="https://img.shields.io/badge/dependencies-0-success">
@@ -59,7 +59,7 @@ When your agent starts a task, it calls `context` and gets back relevant past de
 - **Git** (the target project must be a git repo)
 - Optional: `pip install sentence-transformers numpy` for better semantic retrieval
 
-**Version:** 1.7.3  
+**Version:** 1.8.0  
 
 ### Install + register in one command
 
@@ -86,7 +86,7 @@ The installer:
 ### Verification
 
 ```powershell
-python .agents\skills\internal-rag\mlm.py --version   # expect: 1.7.3
+python .agents\skills\internal-rag\mlm.py --version   # expect: 1.8.0
 python .agents\skills\internal-rag\mlm.py status       # expect: INTERNAL_RAG ready
 python .agents\skills\internal-rag\mlm.py guard        # expect: GUARD OK
 ```
@@ -109,7 +109,7 @@ Steps:
    (if it exists: git -C ~/mcp-light-memory pull --ff-only)
 2. Install: python ~/mcp-light-memory/install.py . --client warp
    (use python3 on Linux/macOS)
-3. Verify: python .agents/skills/internal-rag/mlm.py --version  (expect 1.7.3)
+3. Verify: python .agents/skills/internal-rag/mlm.py --version  (expect 1.8.0)
            python .agents/skills/internal-rag/mlm.py guard      (expect GUARD OK)
 4. Report success or the exact error. Do not ask me anything.
 ```
@@ -190,7 +190,7 @@ Steps:
    (if it exists: git -C ~/mcp-light-memory pull --ff-only)
 2. Install: python ~/mcp-light-memory/install.py . --client opencode
    (use python3 on Linux/macOS)
-3. Verify: python .agents/skills/internal-rag/mlm.py --version  (expect 1.7.3)
+3. Verify: python .agents/skills/internal-rag/mlm.py --version  (expect 1.8.0)
            python .agents/skills/internal-rag/mlm.py guard      (expect GUARD OK)
 4. Report success or the exact error. Do not ask me anything.
 ```
@@ -273,7 +273,7 @@ Steps:
 3. In PyCharm: Settings (Ctrl+Alt+S) → Tools → AI Assistant → MCP → Add → STDIO
    Paste the JSON from step 2. Set Working Directory to the project path.
    Set Server level = Global or Project. OK → Apply.
-4. Verify: python .agents/skills/internal-rag/mlm.py --version  (expect 1.7.3)
+4. Verify: python .agents/skills/internal-rag/mlm.py --version  (expect 1.8.0)
            python .agents/skills/internal-rag/mlm.py guard      (expect GUARD OK)
 5. Report success or the exact error. Do not ask me anything.
 ```
@@ -463,7 +463,7 @@ Two retrieval profiles (see `docs/EMBEDDINGS.md`):
 
 ```bash
 python pack.py --with-embeddings --profile english-fast
-# -> mcp-light-memory-offline-1.7.3.zip
+# -> mcp-light-memory-offline-1.8.0.zip
 # On the air-gapped machine:
 unzip mcp-light-memory-offline-*.zip -d mcp-light-memory-offline
 pip install --no-index --find-links wheels/ -r requirements-optional.txt
@@ -537,7 +537,7 @@ MIT.
 
 ## Changelog
 
-### 1.7.3 — JetBrains manual setup
+### 1.8.0 — JetBrains manual setup
 
 - `--client jetbrains` no longer writes a fake config file (PyCharm ignores MCP config files). Prints ready-to-paste JSON + IDE menu instructions instead.
 - `--unregister --client jetbrains` prints a reminder to remove in the IDE UI.

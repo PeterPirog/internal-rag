@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-VERSION = "1.7.3"
+VERSION = "1.8.0"
 PRODUCT_NAME = "MCP Light Memory"
 PRODUCT_SLUG = "mcp-light-memory"
 LEGACY_NAME = "internal-rag"  # deprecated; kept for compatibility
@@ -640,6 +640,58 @@ def write_manifest(target: Path, backup_root: Path, agent_info: dict, mode: str,
     (d / 'manifest.json').write_text(json.dumps(data, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
 
 
+def integrate_compaction(client: str, project: Path, global_cfg: bool):
+    """Merge compaction settings into the OpenCode config.
+
+    For OpenCode 1 (stable): sets compaction.auto=true, compaction.prune=true
+    (if not already present — does NOT overwrite existing values).
+
+    For OpenCode 2 (beta): sets tool_output.max_lines and tool_output.max_bytes
+    (if not already present).
+
+    MCP Light Memory manages its own persistent/ephemeral memory; this
+    integration only configures the host's context compaction to work
+    alongside it. It does NOT pretend to control the host's conversation
+    history — only the compaction settings that help keep context manageable.
+    """
+    if client == "opencode":
+        cfg_path = client_config_path("opencode", project, global_cfg)
+    elif client == "opencode2":
+        cfg_path = client_config_path("opencode2", project, global_cfg)
+    else:
+        return
+    if not cfg_path.exists():
+        # Config was just created by register_client; read it
+        pass
+    try:
+        data = json.loads(cfg_path.read_text(encoding="utf-8"))
+    except Exception:
+        data = {}
+
+    if client == "opencode":
+        comp = data.setdefault("compaction", {})
+        # Only set if not already configured (respect user's explicit choices)
+        if "auto" not in comp:
+            comp["auto"] = True
+        if "prune" not in comp:
+            comp["prune"] = True
+        if "reserved" not in comp:
+            comp["reserved"] = 10000
+        print(f"  OpenCode 1 compaction: auto={comp['auto']}, prune={comp['prune']}, reserved={comp['reserved']}")
+    elif client == "opencode2":
+        # V2 uses tool_output limits instead of V1's compaction.auto/prune
+        to = data.setdefault("tool_output", {})
+        if "max_lines" not in to:
+            to["max_lines"] = 500
+        if "max_bytes" not in to:
+            to["max_bytes"] = 65536
+        print(f"  OpenCode 2 tool_output: max_lines={to['max_lines']}, max_bytes={to['max_bytes']}")
+
+    cfg_path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n",
+                        encoding="utf-8")
+    print(f"  Compaction settings merged into {cfg_path} (existing values preserved)")
+
+
 def main():
     ap = argparse.ArgumentParser(description=f'Install/update MCP Light Memory v{VERSION} in an existing Git repository.')
     ap.add_argument('repo', nargs='?', help='Target Git repository; default current directory.')
@@ -655,6 +707,10 @@ def main():
                     help='MCP server name in the client config (default: mcp-light-memory).')
     ap.add_argument('--unregister', action='store_true',
                     help='Remove the MCP server from the client config and exit (no install).')
+    ap.add_argument('--compaction', action='store_true',
+                    help='Integrate context compaction management for OpenCode '
+                         '(V1: compaction.auto+prune; V2: tool_output limits). '
+                         'Does NOT overwrite existing user settings — merges only.')
     args = ap.parse_args()
     target = ensure_repo(Path(args.repo) if args.repo else Path.cwd())
     if args.unregister:
@@ -682,6 +738,8 @@ def main():
     if args.client:
         script_rel = '.agents/skills/internal-rag/mlm.py'
         register_client(args.client, target, args.global_cfg, args.server_name, script_rel, ['mcp'])
+    if args.compaction and args.client in ("opencode", "opencode2"):
+        integrate_compaction(args.client, target, args.global_cfg)
     print('\nINSTALLATION COMPLETE')
     print('Existing INTERNAL_RAG memory was preserved.')
     print(f'Git local exclude: {exclude_path}')

@@ -20,8 +20,8 @@ PROMPTS_MD = PROJECT_ROOT / "docs" / "ZERO-SHOT-SETUP-PROMPTS.md"
 
 def _install_help() -> str:
     p = subprocess.run([sys.executable, str(INSTALL_PY), "--help"],
-                       stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                       text=True, encoding="utf-8", timeout=30)
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+    return p.stdout.decode("utf-8", errors="replace")
     return p.stdout
 
 
