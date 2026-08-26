@@ -1,12 +1,26 @@
+// OpenCode 1 (stable) plugin: MCP Light Memory resilience hooks.
+//
+// This plugin is compatible with OpenCode 1's plugin API:
+//   - Plugin<{ worktree }> async function
+//   - tool.execute.after / event / experimental.session.compacting hooks
+//
+// For OpenCode 2 (beta), see internal-rag-resilience-v2.ts which uses the
+// V2 plugin API (ctx.tool.hook etc.). OpenCode 2 is still beta and its
+// plugin API may change; the V2 plugin is a best-effort compatibility layer.
+//
+// Installation:
+//   - OpenCode 1: place in .opencode/plugins/ (auto-loaded)
+//   - OpenCode 2: use internal-rag-resilience-v2.ts instead
 import type { Plugin } from "@opencode-ai/plugin"
 import { readFile } from "node:fs/promises"
 import { join } from "node:path"
+
 const py = process.platform === "win32" ? "python" : "python3"
 
-export const InternalRagResilience: Plugin = async ({ worktree }) => {
+export const McpLightMemoryResilience: Plugin = async ({ worktree }) => {
   const script = join(worktree, ".agents", "skills", "internal-rag", "mlm.py")
 
-  // H3: debounce — at least 60s between auto-checkpoints, count skipped
+  // Debounce: at least 60s between auto-checkpoints, count skipped
   let lastAutoCheckpoint = 0
   let skippedCount = 0
 
