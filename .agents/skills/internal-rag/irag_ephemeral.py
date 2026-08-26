@@ -91,10 +91,11 @@ def add_observation(rag_dir: Path,
     Truncates content to max_record_bytes. Enforces max_records and max_bytes
     by evicting the oldest observations.
     """
-    # Truncate content
+    # Truncate content (byte-safe: decode the max bytes first, then slice)
     content_bytes = len(content.encode("utf-8"))
     if content_bytes > max_record_bytes:
-        content = content[:max_record_bytes // 2] + "\n... [truncated] ...\n"
+        content = content.encode("utf-8")[:max_record_bytes // 2].decode("utf-8", "ignore")
+        content = content.rstrip() + "\n... [truncated] ...\n"
         content_bytes = len(content.encode("utf-8"))
 
     # Never store secrets — basic check

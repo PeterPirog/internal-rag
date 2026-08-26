@@ -4126,7 +4126,7 @@ usage:
 def _validate_config(cfg: Dict[str, Any]) -> List[str]:
     """Validate config values, return list of issues (empty = valid)."""
     issues: List[str] = []
-    known_sections = {"retrieval", "tokens", "checkpoints", "privacy", "usage", "links"}
+    known_sections = {"retrieval", "tokens", "checkpoints", "privacy", "usage", "links", "ephemeral", "gc"}
     for key in cfg:
         if key not in known_sections:
             issues.append(f"unknown section: {key}")

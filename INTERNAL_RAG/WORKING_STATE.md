@@ -1,8 +1,8 @@
 # Current Working State
 
-updated: 2026-08-26T10:55:39+02:00
-branch: feat/v1.8-mcp-compliance-ephemeral
-base_commit: 84d0181
+updated: 2026-08-26T22:27:11+02:00
+branch: fix/v1.8.1-hardening
+base_commit: 56563ad
 
 ## Objective
 
@@ -10,15 +10,15 @@ v1.5.0: abstention gate + FTS5 prefilter + multi-project MCP router + CI/docs
 
 ## Current request
 
-v1.8.1 hardening: OpenCode V1/V2 config fix, MCP validation, ephemeral lifecycle, GC fixes, atomic writes, CI green
+v1.8.1 hardening P2/P3 plugin fix
 
 ## Current phase
 
-v1.6.0 complete
+v1.8.1-hardening
 
 ## Completed
 
-- All docs updated. 340 tests pass.
+- ProjectWriteLock ownership token + dead-PID reclaim + multiprocess tests
 
 ## In progress
 
@@ -34,23 +34,25 @@ v1.6.0 complete
 
 ## Relevant files
 
-- No project-code changes detected.
+- ` M` agents/skills/internal-rag/irag_ephemeral.py
+- `??` tests/test_e2e_lifecycle.py
 
 ## Next actions
 
-1. Merge PR #9 to main
+1. fix test_config_merge (add ephemeral+gc to known_sections) and finish test_e2e_lifecycle
 
 ## Checkpoint health
 
-- RECOVERY REQUIRED: project code differs from the last checkpoint.
-- Inspect `git status` and `git diff`, reconstruct state, checkpoint it, then run guard.
+- CHECKPOINT CURRENT at save time.
+- Run `irag.py guard` before final response.
 
 ## Recovery snapshot
 
-- Checkpoint reason: docs update complete for v1.8.0
-- Branch: feat/v1.8-mcp-compliance-ephemeral
-- HEAD: 84d0181
-- No project-code changes detected.
+- Checkpoint reason: lock fix committed 56563ad; e2e/config work in progress uncommitted
+- Branch: fix/v1.8.1-hardening
+- HEAD: 56563ad
+- ` M` agents/skills/internal-rag/irag_ephemeral.py
+- `??` tests/test_e2e_lifecycle.py
 
 ## Memory to retrieve if needed
 
