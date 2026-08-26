@@ -319,7 +319,16 @@ def client_config_path(client: str, project: Path, global_cfg: bool) -> Path:
             return home / ".warp" / ".mcp.json"
         return project / ".warp" / ".mcp.json"
     elif client == "opencode":
-        # OpenCode V2 reads opencode.json / opencode.jsonc in the project root
+        # OpenCode 1 (stable): reads opencode.json / opencode.jsonc in the project root
+        # or ~/.config/opencode/opencode.json (global)
+        if global_cfg:
+            return home / ".config" / "opencode" / "opencode.json"
+        return project / "opencode.json"
+    elif client == "opencode2":
+        # OpenCode 2 (beta): same config file paths as V1, but uses a different
+        # MCP server structure (mcp.servers.<name> with disabled instead of enabled)
+        if global_cfg:
+            return home / ".config" / "opencode" / "opencode.json"
         return project / "opencode.json"
     elif client == "jetbrains":
         # JetBrains AI Assistant reads ~/.config/jetbrains/mcp.json (Linux/macOS)
@@ -344,12 +353,19 @@ def register_client(client: str, project: Path, global_cfg: bool,
     py = detect_python()
     script_abs = str((project / script_rel).resolve())
     full_args = [py, script_abs] + extra_args
-    if client == "opencode":
+    if client in ("opencode", "opencode2"):
+        # Both OpenCode 1 and 2 use the mcp.servers.<name> shape with
+        # type: "local" and command as an array.
+        # OpenCode 1 uses "enabled": true; OpenCode 2 uses "disabled": false
+        # (i.e. absence of "disabled" = enabled in V2).
         server_entry = {
             "type": "local",
             "command": full_args,
             "cwd": str(project.resolve()),
         }
+        if client == "opencode":
+            server_entry["enabled"] = True
+        # opencode2: don't add "enabled"; V2 uses "disabled" (absent = enabled)
     else:
         server_entry = {
             "command": full_args[0],
@@ -379,7 +395,7 @@ def register_client(client: str, project: Path, global_cfg: bool,
     else:
         data = {}
     # Navigate to the servers container
-    if client == "opencode":
+    if client in ("opencode", "opencode2"):
         mcp = data.setdefault("mcp", {})
         servers = mcp.setdefault("servers", {})
     else:
@@ -481,14 +497,14 @@ def unregister_client(client: str, project: Path, global_cfg: bool,
     except Exception:
         print(f"Could not parse {cfg_path} — leaving unchanged.")
         return
-    if client == "opencode":
+    if client in ("opencode", "opencode2"):
         servers = data.get("mcp", {}).get("servers", {})
     else:
         servers = data.get("mcpServers", {})
     if server_name in servers:
         del servers[server_name]
         is_empty = False
-        if client == "opencode":
+        if client in ("opencode", "opencode2"):
             mcp_servers = data.get("mcp", {}).get("servers", {})
             is_empty = len(mcp_servers) == 0 and len(data.get("mcp", {})) <= 1
         else:
@@ -628,9 +644,11 @@ def main():
     ap = argparse.ArgumentParser(description=f'Install/update MCP Light Memory v{VERSION} in an existing Git repository.')
     ap.add_argument('repo', nargs='?', help='Target Git repository; default current directory.')
     ap.add_argument('--share-tools', action='store_true', help='Allow integration/tool files to be tracked. INTERNAL_RAG memory remains locally excluded.')
-    ap.add_argument('--client', choices=['warp', 'opencode', 'jetbrains'],
-                    help='Register the MCP server: warp/opencode write a config file; '
-                         'jetbrains prints manual IDE setup instructions (PyCharm does not auto-read config files).')
+    ap.add_argument('--client', choices=['warp', 'opencode', 'opencode2', 'jetbrains'],
+                    help='Register the MCP server: warp/opencode/opencode2 write a config file; '
+                         'opencode = stable OpenCode 1 (enabled: true); '
+                         'opencode2 = OpenCode 2 beta (disabled field, no enabled); '
+                         'jetbrains prints manual IDE setup instructions.')
     ap.add_argument('--global', dest='global_cfg', action='store_true',
                     help="Use the client's global config (default: project-local).")
     ap.add_argument('--server-name', default='mcp-light-memory',
@@ -667,14 +685,15 @@ def main():
     print('\nINSTALLATION COMPLETE')
     print('Existing INTERNAL_RAG memory was preserved.')
     print(f'Git local exclude: {exclude_path}')
-    if args.client and args.client != "jetbrains":
+    if args.client and args.client not in ("jetbrains",):
         print(f'MCP server registered for {args.client}.')
     elif args.client == "jetbrains":
         print('MCP setup instructions printed above (manual IDE step required).')
     # Client-specific restart instruction
     restart_msgs = {
         'warp': 'Restart Warp, then run context for the current task.',
-        'opencode': 'Restart OpenCode, then run context for the current task.',
+        'opencode': 'Restart OpenCode 1, then run context for the current task.',
+        'opencode2': 'Restart OpenCode 2, then run context for the current task.',
         'jetbrains': 'Add the server in Settings -> Tools -> AI Assistant -> MCP (see instructions above), then run context for the current task.',
     }
     print(restart_msgs.get(args.client, 'Restart Warp/OpenCode/PyCharm, then run context for the current task.'))
