@@ -107,7 +107,6 @@ UPDATE_PATHS = [
     Path('.opencode/tools/memory-guard.ts'),
     Path('.opencode/tools/memory-remember.ts'),
     Path('.opencode/tools/memory-status.ts'),
-    Path('.opencode/plugins/internal-rag-resilience.ts'),
     Path('.opencode/commands/memory.md'),
     Path('.opencode/commands/memory-check.md'),
     Path('.opencode/commands/checkpoint.md'),
@@ -125,6 +124,7 @@ LOCAL_EXCLUDES = [
     '/.opencode/tools/memory-remember.ts',
     '/.opencode/tools/memory-status.ts',
     '/.opencode/plugins/internal-rag-resilience.ts',
+    '/.opencode/plugins/internal-rag-resilience-v2.ts',
     '/.opencode/plugins/internal-rag-compaction.ts',
     '/.opencode/commands/memory.md',
     '/.opencode/commands/memory-check.md',
@@ -216,7 +216,7 @@ def backup_existing(target: Path, backup_root: Path, rel: Path):
         shutil.copy2(src, dst)
 
 
-def copy_update_files(target: Path, backup_root: Path):
+def copy_update_files(target: Path, backup_root: Path, client: str | None = None):
     for rel in UPDATE_PATHS:
         src = (HERE / rel).resolve()
         if not src.exists():
@@ -233,6 +233,28 @@ def copy_update_files(target: Path, backup_root: Path):
             shutil.copytree(src, dst, dirs_exist_ok=True)
         else:
             shutil.copy2(src, dst)
+    # OpenCode plugin: install the version matching the requested client.
+    # V1 and V2 register identical hook names, so co-installing both would
+    # double-fire hooks. Default (no client) installs the V1 plugin.
+    v1_plugin = Path('.opencode/plugins/internal-rag-resilience.ts')
+    v2_plugin = Path('.opencode/plugins/internal-rag-resilience-v2.ts')
+    for rel, want in ((v1_plugin, client != 'opencode2'),
+                      (v2_plugin, client == 'opencode2')):
+        if want:
+            src = (HERE / rel).resolve()
+            if not src.exists():
+                continue
+            backup_existing(target, backup_root, rel)
+            dst = (target / rel).resolve()
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            if src != dst:
+                shutil.copy2(src, dst)
+        else:
+            dst = target / rel
+            if dst.exists() and (HERE / rel).resolve() != dst.resolve():
+                backup_existing(target, backup_root, rel)
+                dst.unlink()
+                print(f'Removed non-matching plugin: {rel}')
     for rel in REMOVE_LEGACY_PATHS:
         dst = target / rel
         if dst.exists():
@@ -756,7 +778,7 @@ def main():
     print(f'MCP Light Memory v{VERSION} -> {target}')
     print(f'Install mode: {mode}')
     print(f'Backup: {backup_root}')
-    copy_update_files(target, backup_root)
+    copy_update_files(target, backup_root, client=args.client)
     memory_existed_before = (target / 'INTERNAL_RAG').exists()
     install_memory_skeleton(target)
     agent_info = merge_agents(target, backup_root)

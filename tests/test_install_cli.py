@@ -317,5 +317,96 @@ class TestOpenCodeV1V2Split(unittest.TestCase):
             self.fail(f"_verify_registered_server raised on opencode2 array command: {e}")
 
 
+class TestOpenCodePluginV1V2Select(unittest.TestCase):
+    """P2/P3: the installed plugin must match the client, and both plugins
+    must use the documented hooks-object API with no silent catch-swallowing."""
+
+    def setUp(self):
+        import tempfile
+        self._tmpdir = tempfile.TemporaryDirectory(prefix="irag-plugin-select-")
+        self.tmp = Path(self._tmpdir.name)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+        self._tmpdir.cleanup()
+
+    def _load(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("_install_mod_ps", str(INSTALL_PY))
+        assert spec is not None
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def _plugin_src(self, name):
+        return (HERE.parent / ".opencode" / "plugins" / name).read_text(encoding="utf-8")
+
+    def test_v1_plugin_uses_documented_hooks_object_api(self):
+        src = self._plugin_src("internal-rag-resilience.ts")
+        self.assertIn("@opencode-ai/plugin", src)
+        self.assertIn("return {", src)
+        self.assertIn('"tool.execute.after"', src)
+        self.assertIn('"experimental.session.compacting"', src)
+
+    def test_v2_plugin_uses_documented_hooks_object_api(self):
+        src = self._plugin_src("internal-rag-resilience-v2.ts")
+        self.assertIn("@opencode-ai/plugin", src)
+        self.assertIn("return {", src)
+        self.assertIn('"tool.execute.after"', src)
+        self.assertIn('"experimental.session.compacting"', src)
+
+    def test_v2_plugin_no_silent_empty_catch(self):
+        """V2 must not use empty `catch {}` blocks — failures must be logged."""
+        import re
+        src = self._plugin_src("internal-rag-resilience-v2.ts")
+        empty_catches = re.findall(r"catch\s*(?:\([^)]*\))?\s*\{\s*\}", src)
+        self.assertEqual([], empty_catches,
+                         "V2 plugin has silent empty catch blocks (failures swallowed)")
+
+    def test_v1_install_copies_v1_removes_v2(self):
+        mod = self._load()
+        import tempfile, shutil
+        # Prepare target with a stale V2 plugin file to prove removal
+        v2 = self.tmp / ".opencode" / "plugins" / "internal-rag-resilience-v2.ts"
+        v2.parent.mkdir(parents=True)
+        v2.write_text("// stale\n", encoding="utf-8")
+        backup = self.tmp / "backup"
+        backup.mkdir()
+        mod.copy_update_files(self.tmp, backup, client="opencode")
+        self.assertTrue((self.tmp / ".opencode/plugins/internal-rag-resilience.ts").exists())
+        self.assertFalse(v2.exists(), "V2 plugin must be removed for V1 install")
+
+    def test_v2_install_copies_v2_removes_v1(self):
+        mod = self._load()
+        v1 = self.tmp / ".opencode" / "plugins" / "internal-rag-resilience.ts"
+        v1.parent.mkdir(parents=True)
+        v1.write_text("// stale\n", encoding="utf-8")
+        backup = self.tmp / "backup"
+        backup.mkdir()
+        mod.copy_update_files(self.tmp, backup, client="opencode2")
+        self.assertTrue((self.tmp / ".opencode/plugins/internal-rag-resilience-v2.ts").exists())
+        self.assertFalse(v1.exists(), "V1 plugin must be removed for V2 install")
+
+    def test_default_install_copies_v1(self):
+        mod = self._load()
+        backup = self.tmp / "backup"
+        backup.mkdir()
+        mod.copy_update_files(self.tmp, backup, client=None)
+        self.assertTrue((self.tmp / ".opencode/plugins/internal-rag-resilience.ts").exists())
+
+    def test_self_install_does_not_remove_own_plugins(self):
+        """Copying the repo into itself must not delete the repo's own plugins."""
+        mod = self._load()
+        backup = self.tmp / "backup"
+        backup.mkdir()
+        here = INSTALL_PY.resolve().parent
+        v2 = here / ".opencode" / "plugins" / "internal-rag-resilience-v2.ts"
+        self.assertTrue(v2.exists(), "fixture precondition")
+        mod.copy_update_files(here, backup, client="opencode")
+        # The repo's own V2 file is source and destination — must survive.
+        self.assertTrue(v2.exists(), "self-install must not delete the repo's own plugin")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

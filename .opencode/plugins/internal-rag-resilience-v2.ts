@@ -1,51 +1,54 @@
 // OpenCode 2 (beta) plugin: MCP Light Memory resilience hooks.
 //
-// WARNING: OpenCode 2 is still in beta. Its plugin API may change without
-// notice. This file is a best-effort compatibility layer using the
-// documented V2 plugin patterns. If the V2 plugin API breaks, MCP Light
-// Memory will still work via MCP tools (context/search/remember/guard) —
-// the plugin only adds auto-checkpoint/compact convenience hooks.
+// Uses the documented hooks-object plugin API (verified against
+// https://opencode.ai/docs/plugins/ 2026-08-26):
+//   export const Plugin = async (ctx) => { return { "tool.execute.after", event, "experimental.session.compacting" } }
 //
-// Key differences from V1:
-//   - V2 uses ctx.tool.hook("execute.after", ...) instead of "tool.execute.after"
-//   - V2 uses ctx.event(...) instead of event({...})
-//   - V2 session compaction hook name may differ
+// Known beta limitations (documented, NOT silently swallowed):
+//   - GitHub issue #44788 (beta 18050): "event.subscribe delivers no events;
+//     context-hook and synthetic injections never reach the model prompt".
+//     If you are on that beta build, the event/compacting hooks below may
+//     not fire. MCP Light Memory core (MCP tools) is unaffected.
+//   - All hook failures are logged to stderr (visible in OpenCode logs);
+//     nothing is silently discarded.
 //
-// Installation for OpenCode 2:
-//   Place in .opencode/plugins/ (auto-loaded by V2 as well).
-//   The V1 plugin (internal-rag-resilience.ts) can coexist — V2 will ignore
-//   V1-style return shapes and V1 will ignore V2-style hooks.
-//
-// Limitations:
-//   - If V2 does not support the exact hook names used here, the hooks will
-//     be silently ignored. MCP Light Memory core functionality (MCP tools)
-//     is unaffected.
-//   - No auto-compaction in V2 if the session.compacting hook is unavailable.
+// Installation:
+//   install.py --client opencode2 copies ONLY this file (not the V1 plugin),
+//   or place manually in .opencode/plugins/.
+import type { Plugin } from "@opencode-ai/plugin"
+import { readFile } from "node:fs/promises"
+import { join } from "node:path"
 
 const py = process.platform === "win32" ? "python" : "python3"
 
-export default async (ctx: any) => {
-  // ctx is the V2 plugin context. We use optional chaining extensively
-  // because the V2 API is still beta and may not expose all methods.
+export const McpLightMemoryResilienceV2: Plugin = async ({ worktree }) => {
+  const script = join(worktree, ".agents", "skills", "internal-rag", "mlm.py")
 
-  const worktree = ctx?.worktree || ctx?.cwd || process.cwd()
-  const script = [worktree, ".agents", "skills", "internal-rag", "mlm.py"].join("/")
-
+  // Debounce: at least 60s between auto-checkpoints, count skipped
   let lastAutoCheckpoint = 0
   let skippedCount = 0
 
+  const log = (msg: string) => {
+    console.error(`[internal-rag-resilience-v2] ${msg}`)
+  }
+
   const cp = async (reason: string, phase?: string) => {
+    const args = [py, script, "checkpoint", "--reason", reason]
+    if (phase) args.push("--phase", phase)
     try {
-      const c = [py, script, "checkpoint", "--reason", reason]
-      if (phase) c.push("--phase", phase)
-      const p = Bun.spawn(c, { cwd: worktree, stdout: "ignore", stderr: "ignore" })
-      await p.exited
-    } catch {}
+      const p = Bun.spawn(args, { cwd: worktree, stdout: "ignore", stderr: "pipe" })
+      const err = await p.stderr?.text().catch(() => "")
+      const code = await p.exited
+      if (code !== 0) log(`checkpoint failed (exit ${code}): ${err.trim().slice(0, 200)}`)
+    } catch (e: any) {
+      log(`checkpoint spawn failed: ${e?.message ?? e}`)
+    }
   }
 
   const debouncedCp = async (reason: string, phase?: string) => {
     const now = Date.now()
-    if (now - lastAutoCheckpoint < 60_000) {
+    const minInterval = 60_000
+    if (now - lastAutoCheckpoint < minInterval) {
       skippedCount++
       return
     }
@@ -59,49 +62,52 @@ export default async (ctx: any) => {
 
   const compact = async () => {
     try {
-      const p = Bun.spawn([py, script, "compact"], { cwd: worktree, stdout: "ignore", stderr: "ignore" })
-      await p.exited
-    } catch {}
+      const p = Bun.spawn([py, script, "compact"], { cwd: worktree, stdout: "ignore", stderr: "pipe" })
+      const err = await p.stderr?.text().catch(() => "")
+      const code = await p.exited
+      if (code !== 0) log(`compact failed (exit ${code}): ${err.trim().slice(0, 200)}`)
+    } catch (e: any) {
+      log(`compact spawn failed: ${e?.message ?? e}`)
+    }
   }
 
-  // V2 hook registration (best-effort)
-  if (ctx?.tool?.hook) {
-    try {
-      ctx.tool.hook("execute.after", async (input: any, _output: any) => {
+  return {
+    "tool.execute.after": async (input: any) => {
+      try {
         if (["edit", "write", "apply_patch"].includes(input?.tool)) {
           await debouncedCp(`opencode2-auto-after-${input.tool}`)
         }
-      })
-    } catch {}
-  }
-
-  if (ctx?.event) {
-    try {
-      ctx.event(async (event: any) => {
+      } catch (e: any) {
+        log(`tool.execute.after hook failed: ${e?.message ?? e}`)
+      }
+    },
+    event: async ({ event }: any) => {
+      try {
         if (event?.type === "session.error") {
-          await cp("opencode2-session-error")
+          await cp("opencode2-session-error", "Session error; inspect prior output and Git state before continuing.")
         } else if (event?.type === "session.idle") {
           await cp("opencode2-session-idle")
         }
-      })
-    } catch {}
-  }
-
-  // V2 compaction hook (best-effort — name may differ in V2)
-  if (ctx?.session?.compacting) {
-    try {
-      ctx.session.compacting(async (_input: any, output: any) => {
+      } catch (e: any) {
+        log(`event hook failed: ${e?.message ?? e}`)
+      }
+    },
+    "experimental.session.compacting": async (_input: any, output: any) => {
+      try {
         await compact()
-        await cp("opencode2-before-compaction")
-        if (output?.context) {
-          try {
-            const state = await Bun.file([worktree, "INTERNAL_RAG", "WORKING_STATE.md"].join("/")).text()
-            output.context.push(`\n## Persistent project memory\n${state}\n`)
-          } catch {}
+        await cp("opencode2-before-compaction", "Context compaction; resume from persistent state.")
+        let state = "(unavailable)"
+        try {
+          state = await readFile(join(worktree, "INTERNAL_RAG", "WORKING_STATE.md"), "utf8")
+        } catch (e: any) {
+          log(`WORKING_STATE.md unavailable: ${e?.message ?? e}`)
         }
-      })
-    } catch {}
+        output?.context?.push(`\n## Persistent project memory\n${state}\nContinue using checkpoint/guard discipline.\n`)
+      } catch (e: any) {
+        log(`session.compacting hook failed: ${e?.message ?? e}`)
+      }
+    },
   }
-
-  return {}
 }
+
+export default McpLightMemoryResilienceV2

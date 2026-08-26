@@ -26,10 +26,24 @@ All tools support `--json` where relevant.
 
 ## Plugin (resilience)
 
-`internal-rag-resilience.ts`:
-- `tool.execute.after` — auto-checkpoint after `edit`/`write`/`apply_patch`.
+The installer copies exactly ONE plugin, matched to the client (installing
+both would double-fire identical hooks):
+
+- `--client opencode` → `internal-rag-resilience.ts` (V1)
+- `--client opencode2` → `internal-rag-resilience-v2.ts` (V2 beta)
+
+Both use the documented hooks-object API (`return { "tool.execute.after", event, "experimental.session.compacting" }`):
+- `tool.execute.after` — auto-checkpoint after `edit`/`write`/`apply_patch` (debounced 60s).
 - `session.error` — checkpoint + suggest inspection.
 - `session.idle` — checkpoint.
 - `experimental.session.compacting` — `compact` + checkpoint + inject WORKING_STATE into context.
+
+Hook failures are logged to stderr (visible in OpenCode logs); nothing is
+silently swallowed.
+
+Known OpenCode 2 beta limitation: GitHub issue anomalyco/opencode#44788
+(beta 18050) reports that `event` delivery does not work — on affected
+builds the `session.error`/`session.idle`/compacting hooks may not fire.
+MCP tools are unaffected.
 
 If a native tool fails, the agent can always call `irag.py` via the terminal.

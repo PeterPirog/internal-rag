@@ -9,7 +9,7 @@ EXCLUDE_START='# >>> MCP_LIGHT_MEMORY LOCAL-ONLY >>>'; EXCLUDE_END='# <<< MCP_LI
 MANAGED_PATHS=[
  Path('.agents/skills/internal-rag'),
  Path('.opencode/tools/memory-search.ts'),Path('.opencode/tools/memory-context.ts'),Path('.opencode/tools/memory-checkpoint.ts'),Path('.opencode/tools/memory-guard.ts'),Path('.opencode/tools/memory-remember.ts'),Path('.opencode/tools/memory-status.ts'),
- Path('.opencode/plugins/internal-rag-resilience.ts'),Path('.opencode/plugins/internal-rag-compaction.ts'),
+ Path('.opencode/plugins/internal-rag-resilience.ts'),Path('.opencode/plugins/internal-rag-resilience-v2.ts'),Path('.opencode/plugins/internal-rag-compaction.ts'),
  Path('.opencode/commands/memory.md'),Path('.opencode/commands/memory-check.md'),Path('.opencode/commands/checkpoint.md'),Path('.opencode/commands/memory-guard.md')]
 
 def die(msg): print(f'\nERROR: {msg}'); raise SystemExit(1)
