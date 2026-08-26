@@ -45,16 +45,21 @@ both would double-fire identical hooks):
 ### V2 — runtime API
 
 `internal-rag-resilience-v2.ts` uses the V2 runtime plugin API
-(`import { Plugin } from "@opencode-ai/plugin"`; `export default Plugin.define({ id, setup(ctx) { ... } })`):
+(`import { Plugin } from "@opencode-ai/plugin"`; `export default Plugin.define({ id, async setup(ctx) { ... } })`):
 
 - stable id `mcp-light-memory.resilience`;
-- `setup(ctx)` registers `ctx.tool.hook("execute.after", ...)` — auto-checkpoint
-  after `edit`/`write`/`apply_patch` (debounced 60s);
-- session events via `ctx.session.hook(...)` using only documented V2 event
-  names: `session.error`, `session.idle`, `session.compacted` (post-compaction
-  checkpoint + WORKING_STATE surfacing);
-- `setup` returns a cleanup that disposes every registration and aborts
-  in-flight checkpoint spawns.
+- `async setup(ctx)` **awaits** `ctx.tool.hook("execute.after", ...)` (the
+  registration returns `Promise<Registration>`) — auto-checkpoint after
+  `edit`/`write`/`apply_patch` (debounced 60s);
+- public server events (`session.error`, `session.idle`, `session.compacted`)
+  are received through the documented `ctx.event.subscribe({ signal })`
+  AsyncIterable — they are public events, NOT `SessionHook` names. The
+  documented V2 `SessionHooks` are `context`, `model.request`,
+  `http.request`, `http.response`; this plugin does not register any of them;
+- `setup` returns a cleanup that **disposes every awaited Registration** and
+  **aborts the event-stream `AbortController`**. There is no fake subprocess
+  cancellation — Bun subprocesses are awaited to completion (a checkpoint is
+  a short-lived `mlm.py` call).
 
 ### Common (both)
 
@@ -62,7 +67,8 @@ both would double-fire identical hooks):
   no empty `catch {}` blocks — nothing is silently swallowed.
 - Known V2 limitation: GitHub issue anomalyco/opencode#44788 reports that
   event delivery does not work on some V2 builds — on affected builds the
-  session hooks may not fire. The MCP PULL-based workflow
+  event stream may not yield any events. The MCP PULL-based workflow
   (`memory-checkpoint` / `memory-guard` tools) remains the primary
-  resilience path.
+  resilience path. The `tool.execute.after` hook is the primary
+  auto-checkpoint trigger and does not depend on event delivery.
 - If a native tool fails, the agent can always call `irag.py` via the terminal.

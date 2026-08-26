@@ -350,25 +350,48 @@ class TestOpenCodePluginV1V2Select(unittest.TestCase):
         self.assertIn('"experimental.session.compacting"', src)
 
     def test_v2_plugin_uses_v2_runtime_api(self):
-        """V2 uses Plugin.define({ id, setup(ctx) }) — NOT the V1 hooks-object API."""
+        """V2 uses Plugin.define({ id, async setup(ctx) }) — NOT the V1 hooks-object API."""
+        import re
         src = self._plugin_src("internal-rag-resilience-v2.ts")
         self.assertIn("Plugin.define", src, "V2 must use Plugin.define")
-        self.assertIn("setup", src, "V2 must define setup(ctx)")
-        self.assertIn("ctx.tool.hook(\"execute.after\"", src,
-                      "V2 must register ctx.tool.hook(\"execute.after\")")
-        # stable plugin id
-        self.assertIn("mcp-light-memory.resilience", src)
+        self.assertIn("mcp-light-memory.resilience", src, "stable plugin id")
         # must import the runtime Plugin (value import, not just the type)
         self.assertRegex(src, r"import\s*\{\s*Plugin\s*\}\s*from\s*\"@opencode-ai/plugin\"")
+        # setup must be async (awaited hook registrations)
+        self.assertRegex(src, r"async\s+setup\s*\(",
+                         "setup must be async to await hook registrations")
+        # must await ctx.tool.hook("execute.after", ...) — not fire-and-forget
+        self.assertRegex(
+            src,
+            r"await\s+ctx\.tool\.hook\s*\(\s*[\"']execute\.after[\"']",
+            "V2 must await ctx.tool.hook(\"execute.after\", ...)")
+        # must subscribe to the public event stream via ctx.event.subscribe({signal})
+        self.assertRegex(
+            src,
+            r"ctx\.event\.subscribe\s*\(\s*\{\s*signal\s*:",
+            "V2 must receive public events via ctx.event.subscribe({ signal })")
 
     def test_v2_plugin_is_not_v1_hooks_object(self):
-        """V2 must NOT be the V1 hooks-object shape (return { \"tool.execute.after\" ... })."""
+        """V2 must NOT be the V1 hooks-object shape; must NOT use the
+        undocumented V1 experimental hook; must NOT register the public event
+        names as SessionHooks (they are not in the documented SessionHooks)."""
+        import re
         src = self._plugin_src("internal-rag-resilience-v2.ts")
         # The V1 shape is a returned object keyed by the dotted hook name.
         self.assertNotIn('"tool.execute.after":', src,
-                         "V2 must not use the V1 hooks-object 'tool.execute.after' key")
+                          "V2 must not use the V1 hooks-object 'tool.execute.after' key")
         self.assertNotIn("experimental.session.compacting", src,
                          "V2 must not copy the undocumented-for-V2 experimental hook")
+        # session.error/session.idle/session.compacted are public EVENTS, not
+        # SessionHook names (documented SessionHooks: context, model.request,
+        # http.request, http.response). They MUST NOT be passed to
+        # ctx.session.hook(...).
+        for fake_session_hook in ("session.error", "session.idle", "session.compacted"):
+            pattern = r"ctx\.session\.hook\s*\(\s*[\"']" + re.escape(fake_session_hook)
+            self.assertNotRegex(
+                src, pattern,
+                f"V2 must not register '{fake_session_hook}' via ctx.session.hook "
+                "(it is a public event, not a SessionHook name)")
 
     def test_v2_plugin_no_silent_empty_catch(self):
         """V2 must not use empty `catch {}` blocks — failures must be logged."""
@@ -377,6 +400,36 @@ class TestOpenCodePluginV1V2Select(unittest.TestCase):
         empty_catches = re.findall(r"catch\s*(?:\([^)]*\))?\s*\{\s*\}", src)
         self.assertEqual([], empty_catches,
                          "V2 plugin has silent empty catch blocks (failures swallowed)")
+
+    def test_v2_plugin_cleanup_aborts_event_stream(self):
+        """The cleanup returned by setup must abort the event-stream
+        AbortController (not a fake subprocess cancellation)."""
+        import re
+        src = self._plugin_src("internal-rag-resilience-v2.ts")
+        # An AbortController must be created for the event stream and aborted
+        # in the cleanup closure.
+        self.assertRegex(src, r"new\s+AbortController\s*\(\s*\)",
+                         "V2 must create an AbortController for the event stream")
+        # The cleanup must call .abort() on it.
+        self.assertRegex(src, r"\.abort\s*\(\s*\)",
+                         "V2 cleanup must abort the event-stream AbortController")
+        # The event stream subscription must pass the controller's signal.
+        self.assertRegex(src, r"signal\s*:\s*\w+\.signal",
+                         "V2 must pass the AbortController signal to ctx.event.subscribe")
+
+    def test_v2_plugin_disposes_only_real_registrations(self):
+        """The cleanup must dispose only awaited Registration objects, not
+        Promise<Registration> (which would be a no-op)."""
+        import re
+        src = self._plugin_src("internal-rag-resilience-v2.ts")
+        # registrations must be typed/pushed as Registration, and the result of
+        # `await ctx.tool.hook(...)` must be pushed (not the Promise itself).
+        self.assertRegex(src, r"await\s+ctx\.tool\.hook",
+                         "V2 must await the tool hook before pushing to registrations")
+        # The dispose call must handle a Promise return (Registration.dispose
+        # returns Promise<void> per the docs).
+        self.assertRegex(src, r"\.dispose\s*\?\s*\.",
+                         "V2 cleanup must call dispose() on registrations")
 
     def test_v1_install_copies_v1_removes_v2(self):
         mod = self._load()
