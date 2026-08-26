@@ -4526,12 +4526,13 @@ def mcp_server() -> int:
         _send({"jsonrpc": "2.0", "id": rid, "error": err_obj})
 
     def _is_modern_req(params: Dict[str, Any]) -> bool:
-        """Check if this is a modern (2026-07-28) request via per-request _meta."""
+        """A request is 'modern' (MCP 2026-07-28 era) if its _meta declares
+        a protocolVersion. Any declared version must be in the supported
+        list — unsupported versions are rejected, not silently downgraded."""
         meta = params.get("_meta")
         if not isinstance(meta, dict):
             return False
-        pv = str(meta.get(_META_PV, ""))
-        return pv == MODERN
+        return _META_PV in meta
 
     def _validate_modern(params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Validate a modern request's _meta. Returns error dict or None.

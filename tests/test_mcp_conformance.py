@@ -358,6 +358,111 @@ class TestUnsupportedVersion(ConformanceBase):
         self.assertIn("requested", d["error"].get("data", {}))
 
 
+class TestUnsupportedVersionOnToolMethods(ConformanceBase):
+    """11b. P4/P6: unsupported version must be rejected on tools/list and
+    tools/call as well — validation applies to EVERY modern request."""
+
+    def test_tools_list_unsupported_version_returns_error_32022(self):
+        lines = [
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/list",
+             "params": {"_meta": _modern_meta("2099-01-01")}},
+            {"jsonrpc": "2.0", "id": 2, "method": "shutdown"},
+        ]
+        objs = self._run(lines)
+        d = _find(objs, 1)
+        self.assertIn("error", d, "tools/list with unsupported version must error")
+        self.assertEqual(d["error"]["code"], ERR_UNSUP)
+        data = d["error"].get("data", {})
+        self.assertIn("supported", data)
+        self.assertIn("requested", data)
+        self.assertNotIn(MODERN_VERSION, [data.get("requested")])
+
+    def test_tools_call_unsupported_version_returns_error_32022(self):
+        lines = [
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"_meta": _modern_meta("2099-01-01"),
+                        "name": "status", "arguments": {}}},
+            {"jsonrpc": "2.0", "id": 2, "method": "shutdown"},
+        ]
+        objs = self._run(lines)
+        d = _find(objs, 1)
+        self.assertIn("error", d, "tools/call with unsupported version must error")
+        self.assertEqual(d["error"]["code"], ERR_UNSUP)
+        self.assertIn("supported", d["error"].get("data", {}))
+
+    def test_tools_list_valid_version_still_works_after_reject(self):
+        """A rejected request must not poison the connection."""
+        lines = [
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/list",
+             "params": {"_meta": _modern_meta("2099-01-01")}},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/list",
+             "params": {"_meta": _modern_meta()}},
+            {"jsonrpc": "2.0", "id": 3, "method": "shutdown"},
+        ]
+        objs = self._run(lines)
+        self.assertIn("error", _find(objs, 1))
+        r = _find(objs, 2)["result"]
+        self.assertEqual(r.get("resultType"), "complete")
+        self.assertIn("tools", r)
+
+    def test_tools_list_without_meta_is_legacy_and_works(self):
+        """No _meta at all = legacy request — must NOT be rejected as modern."""
+        lines = [
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+            {"jsonrpc": "2.0", "id": 2, "method": "shutdown"},
+        ]
+        objs = self._run(lines)
+        d = _find(objs, 1)
+        self.assertNotIn("error", d, "legacy tools/list must not be rejected")
+        self.assertIn("tools", d["result"])
+
+
+class TestRouterUnsupportedVersion(unittest.TestCase):
+    """11c. P6: the router must reject unsupported versions on tool methods."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="mcp-conf-roun-"))
+        root = self.tmp / "proj"
+        rag = root / "INTERNAL_RAG"
+        for d in ("decisions", "knowledge", "gotchas", "failures",
+                  "hypotheses", "sessions", "sessions/.snapshots", "archive"):
+            (rag / d).mkdir(parents=True, exist_ok=True)
+        (rag / "WORKING_STATE.md").write_text("# ws\n", encoding="utf-8")
+        self.reg = self.tmp / "reg.json"
+        self.reg.write_text(json.dumps({"projects": {
+            "p": {"root": str(root), "write": False}}}), encoding="utf-8")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _run(self, lines: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        stdout = _run_stdio([sys.executable, str(ROUTER_PATH),
+                             "--registry", str(self.reg)], lines, self.tmp)
+        return _objs(stdout)
+
+    def test_router_tools_list_unsupported_version(self):
+        lines = [
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/list",
+             "params": {"_meta": _modern_meta("2099-01-01")}},
+            {"jsonrpc": "2.0", "id": 2, "method": "shutdown"},
+        ]
+        d = _find(self._run(lines), 1)
+        self.assertIn("error", d)
+        self.assertEqual(d["error"]["code"], ERR_UNSUP)
+        self.assertIn("supported", d["error"].get("data", {}))
+
+    def test_router_tools_call_unsupported_version(self):
+        lines = [
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"_meta": _modern_meta("2099-01-01"),
+                        "name": "status", "arguments": {"project": "p"}}},
+            {"jsonrpc": "2.0", "id": 2, "method": "shutdown"},
+        ]
+        d = _find(self._run(lines), 1)
+        self.assertIn("error", d)
+        self.assertEqual(d["error"]["code"], ERR_UNSUP)
+
+
 class TestLegacyInitializeRegression(ConformanceBase):
     """12. Legacy initialize regression."""
 

@@ -273,11 +273,13 @@ def serve(registry: Dict[str, Dict[str, Any]], irag_path: str, timeout: float) -
         _send({"jsonrpc": "2.0", "id": rid, "error": err_obj})
 
     def _is_modern_req(params: Dict[str, Any]) -> bool:
+        """A request is 'modern' if its _meta declares a protocolVersion.
+        Any declared version must be supported — unsupported versions are
+        rejected, not silently downgraded."""
         meta = params.get("_meta")
         if not isinstance(meta, dict):
             return False
-        pv = str(meta.get(_META_PV, ""))
-        return pv == "2026-07-28"
+        return _META_PV in meta
 
     def _validate_modern(params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         meta = params.get("_meta")
