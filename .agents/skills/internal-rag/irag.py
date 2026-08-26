@@ -4581,7 +4581,11 @@ def promote_cmd(args) -> int:
     d = dist.distill_output(
         obs.get("source", "tool"), obs.get("content", ""),
         command=obs.get("command"), exit_code=obs.get("exit_code"))
-    result = dist.distill_to_memory_body(d)
+    # --verified is an EXPLICIT user assertion that the fix has been verified.
+    # The distillation layer never auto-heuristics "verified" — it labels
+    # extracted remediation as "Suggested remediation" by default.
+    verified = bool(getattr(args, "verified", False))
+    result = dist.distill_to_memory_body(d, verified=verified)
 
     if result is None:
         msg = {"promoted": False,
@@ -5254,6 +5258,10 @@ def main() -> None:
     p.add_argument("--scope", default="")
     p.add_argument("--force", action="store_true", help="Bypass duplicate/conflict blocks.")
     p.add_argument("--allow-secret", action="store_true")
+    p.add_argument("--verified", action="store_true",
+                   help="Explicit user assertion that the fix has been verified. "
+                        "Labels the remediation 'Verified fix' instead of "
+                        "'Suggested remediation'. No automatic heuristics.")
     p.add_argument("--json", action="store_true")
 
     p = sub.add_parser("gc", help="Retention/GC: non-aggressive lifecycle management.")

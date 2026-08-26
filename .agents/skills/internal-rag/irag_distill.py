@@ -34,12 +34,20 @@ DISTILL_CONFIDENCE_HIGH = 0.8
 DISTILL_CONFIDENCE_MEDIUM = 0.5
 DISTILL_CONFIDENCE_LOW = 0.2
 
-# Patterns for extracting diagnostic information
+# Patterns for extracting diagnostic information.
+#
+# All patterns are normalized so that re.findall returns a flat list of
+# STRINGS (not tuples). For multi-group patterns we use a non-capturing
+# inner group so findall yields the whole matched line, then we strip the
+# prefix in post-processing. This keeps result["errors"]/result["warnings"]
+# a List[str] — no tuple/TypeErrors downstream.
 _ERROR_PATTERNS = [
     re.compile(r"^(?:ERROR|FAILED|FATAL|CRITICAL)\b[:\s]*(.+)$", re.IGNORECASE | re.MULTILINE),
     re.compile(r"^Traceback \(most recent call last\):$", re.MULTILINE),
     re.compile(r"^E\s+(.+)$", re.MULTILINE),  # pytest errors
-    re.compile(r"^(.+\.py):(\d+):\s+(.+Error):(.+)$", re.MULTILINE),
+    # Python traceback line: "src/foo.py:42: ValueError: bad input"
+    # Use one capture group over the whole diagnostic line (file:line: Type: msg)
+    re.compile(r"^(\S+\.py:\d+:\s+\w*(?:Error|Exception|Warning|Failure):.+)$", re.MULTILINE),
     re.compile(r"Error:\s+(.+)", re.IGNORECASE),
     re.compile(r"FAILED\s+(.+)", re.IGNORECASE),
 ]
@@ -61,6 +69,12 @@ _PASSED_PATTERN = re.compile(r"(\d+)\s+passed", re.IGNORECASE)
 _FAILED_PATTERN = re.compile(r"(\d+)\s+failed", re.IGNORECASE)
 _PASSED_PATTERN_OK = re.compile(r"^OK\b", re.MULTILINE)
 
+# Remediation extraction patterns.
+#
+# These extract a SUGGESTED remediation — the presence of "fix:"/"to fix:"/
+# "resolved:" in tool output is a *suggestion*, never a *verification*. The
+# distillation layer labels it "Suggested remediation" unless the caller
+# explicitly asserts verification (see distill_to_memory_body(verified=True)).
 _FIX_PATTERNS = [
     re.compile(r"(?:fix|fixed|resolve|resolved|resolved by)\s*[:\s]+(.+)", re.IGNORECASE),
     re.compile(r"(?:to fix|to resolve)\s*[:\s]+(.+)", re.IGNORECASE),
@@ -108,17 +122,26 @@ def distill_output(source: str, content: str,
         "should_promote": False,
     }
 
-    # Extract errors
+    # Extract errors. Normalize to List[str]: if a pattern's findall returns
+    # tuples (multi-group), join them; if it returns a list of strings, keep
+    # them. We guarantee result["errors"] is always List[str].
     for pat in _ERROR_PATTERNS:
         matches = pat.findall(content)
-        if matches:
-            result["errors"].extend(matches[:10])  # cap at 10
+        for m in matches[:10]:
+            if isinstance(m, tuple):
+                # Multi-group pattern: join groups with the natural separator.
+                result["errors"].append(": ".join(str(g) for g in m if g))
+            else:
+                result["errors"].append(str(m))
 
-    # Extract warnings
+    # Extract warnings (same normalization).
     for pat in _WARNING_PATTERNS:
         matches = pat.findall(content)
-        if matches:
-            result["warnings"].extend(matches[:5])
+        for m in matches[:5]:
+            if isinstance(m, tuple):
+                result["warnings"].append(": ".join(str(g) for g in m if g))
+            else:
+                result["warnings"].append(str(m))
 
     # Extract exception type and message
     exc_match = _EXCEPTION_PATTERN.search(content)
@@ -215,10 +238,21 @@ def distill_output(source: str, content: str,
     return result
 
 
-def distill_to_memory_body(distilled: Dict[str, Any]) -> Optional[Tuple[str, str]]:
+def distill_to_memory_body(distilled: Dict[str, Any],
+                            verified: bool = False) -> Optional[Tuple[str, str]]:
     """Convert a distilled result into a (title, body) pair for durable memory.
 
     Returns None if the distillation is not confident enough to promote.
+
+    Remediation labeling:
+      - ``verified=False`` (default): the body records the remediation as
+        ``"Suggested remediation: ..."``. Distillation is a deterministic
+        extraction, NOT a verification — "fix:"/"to fix:"/"resolved:" in
+        the output is a *suggested* remediation, not a verified one.
+      - ``verified=True``: the caller (e.g. ``promote --verified``) asserts
+        that they have manually verified the fix works. The body then records
+        ``"Verified fix: ..."``. This is an explicit user assertion, never an
+        automatic heuristic.
     """
     if not distilled.get("should_promote"):
         return None
@@ -234,7 +268,10 @@ def distill_to_memory_body(distilled: Dict[str, Any]) -> Optional[Tuple[str, str
 
     body_parts = [f"Root cause: {root}"]
     if remediation:
-        body_parts.append(f"Verified fix: {remediation}")
+        if verified:
+            body_parts.append(f"Verified fix: {remediation}")
+        else:
+            body_parts.append(f"Suggested remediation: {remediation}")
     if evidence:
         body_parts.append(f"Evidence: {evidence}")
     body_parts.append(f"Source: {source}")

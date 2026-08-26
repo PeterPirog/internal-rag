@@ -197,6 +197,137 @@ class TestDistillation(unittest.TestCase):
         self.assertEqual(len(d["stack_frames"]), 3)
         self.assertEqual(d["stack_frames"][-1]["function"], "func_c")
 
+    # ------------------------------------------------------------------ #
+    # BUG 1: multi-group regex must not produce tuple errors             #
+    # ------------------------------------------------------------------ #
+
+    def test_python_traceback_line_distilled_without_typeerror(self):
+        """A Python traceback line 'src/foo.py:42: ValueError: bad input'
+        must be distilled without a TypeError (multi-group regex returned
+        tuples, but errors was treated as List[str])."""
+        content = (
+            "src/foo.py:42: ValueError: bad input\n"
+            "1 failed in 0.1s\n"
+        )
+        d = self.distill.distill_output("pytest", content, command="pytest", exit_code=1)
+        # errors must be a flat list of STRINGS (no tuples).
+        self.assertIsInstance(d["errors"], list)
+        for e in d["errors"]:
+            self.assertIsInstance(e, str, f"error must be str, got {type(e)}: {e!r}")
+        # The traceback line must appear (normalized) somewhere.
+        self.assertTrue(any("ValueError" in e for e in d["errors"]),
+                        f"ValueError line must be extracted; errors={d['errors']}")
+        # Distillation must not raise; conclusion should be built.
+        self.assertGreater(d["confidence"], 0.0)
+        self.assertIn("ValueError", d["conclusion"])
+
+    def test_errors_are_always_strings(self):
+        """result['errors'] must always be List[str] regardless of pattern."""
+        content = (
+            "ERROR: something broke\n"
+            "src/foo.py:42: ValueError: bad input\n"
+            "FAILED test_x\n"
+            "Traceback (most recent call last):\n"
+            '  File "x.py", line 10, in test_x\n'
+            "AssertionError: boom\n"
+        )
+        d = self.distill.distill_output("pytest", content, command="pytest", exit_code=1)
+        self.assertIsInstance(d["errors"], list)
+        for e in d["errors"]:
+            self.assertIsInstance(e, str, f"errors must be str, got {type(e)}: {e!r}")
+        # The conclusion must build without a TypeError from tuple-joining.
+        self.assertGreater(d["confidence"], 0.0)
+        self.assertIsInstance(d["conclusion"], str)
+        self.assertIsInstance(d["evidence_excerpt"], str)
+
+    # ------------------------------------------------------------------ #
+    # BUG 2: suggested_remediation vs verified_fix semantics              #
+    # ------------------------------------------------------------------ #
+
+    def test_to_fix_is_suggested_remediation_not_verified_fix(self):
+        """'To fix: increase timeout' must be labeled 'Suggested remediation',
+        NOT 'Verified fix'. The distillation layer never auto-heuristics
+        'verified' — it is a deterministic extraction, not a verification."""
+        content = (
+            "FAILED test_timeout\n"
+            "AssertionError: timed out\n"
+            "To fix: increase timeout\n"
+        )
+        d = self.distill.distill_output("pytest", content, command="pytest", exit_code=1)
+        self.assertTrue(d["should_promote"], f"expected promotion: {d}")
+        result = self.distill.distill_to_memory_body(d)
+        self.assertIsNotNone(result, f"expected a body: {d}")
+        title, body = result
+        self.assertIn("Suggested remediation", body)
+        self.assertIn("increase timeout", body)
+        self.assertNotIn("Verified fix", body,
+                         "unverified distillation must NOT use 'Verified fix'")
+
+    def test_fix_colon_is_suggested_remediation(self):
+        """'fix: ...' is also a suggestion, not a verification."""
+        content = (
+            "ERROR: connection refused\n"
+            "fix: check the firewall rules\n"
+        )
+        d = self.distill.distill_output("ssh", content, command="ssh", exit_code=1)
+        if d["should_promote"]:
+            result = self.distill.distill_to_memory_body(d)
+            self.assertIsNotNone(result)
+            _, body = result
+            self.assertIn("Suggested remediation", body)
+            self.assertNotIn("Verified fix", body)
+
+    def test_resolved_is_suggested_remediation(self):
+        """'resolved: ...' is also a suggestion, not a verification."""
+        content = (
+            "FAILED test_x\n"
+            "resolved: restart the service\n"
+        )
+        d = self.distill.distill_output("pytest", content, command="pytest", exit_code=1)
+        if d["should_promote"]:
+            result = self.distill.distill_to_memory_body(d)
+            self.assertIsNotNone(result)
+            _, body = result
+            self.assertIn("Suggested remediation", body)
+            self.assertNotIn("Verified fix", body)
+
+    def test_explicit_verified_flag_labels_verified_fix(self):
+        """promote --verified is an explicit user assertion: the body must
+        then label 'Verified fix' (not 'Suggested remediation')."""
+        content = (
+            "FAILED test_x\n"
+            "AssertionError: bad value\n"
+            "To fix: increase timeout\n"
+        )
+        d = self.distill.distill_output("pytest", content, command="pytest", exit_code=1)
+        self.assertTrue(d["should_promote"])
+        # Default (no --verified): suggested
+        result_default = self.distill.distill_to_memory_body(d, verified=False)
+        self.assertIsNotNone(result_default)
+        _, body_default = result_default
+        self.assertIn("Suggested remediation", body_default)
+        self.assertNotIn("Verified fix", body_default)
+        # Explicit --verified: verified
+        result_verified = self.distill.distill_to_memory_body(d, verified=True)
+        self.assertIsNotNone(result_verified)
+        _, body_verified = result_verified
+        self.assertIn("Verified fix", body_verified)
+        self.assertIn("increase timeout", body_verified)
+
+    def test_no_remediation_no_label(self):
+        """If no remediation is extracted, neither label appears in the body."""
+        content = (
+            "FAILED test_x\n"
+            "AssertionError: bad value\n"
+        )
+        d = self.distill.distill_output("pytest", content, command="pytest", exit_code=1)
+        self.assertTrue(d["should_promote"])
+        result = self.distill.distill_to_memory_body(d)
+        self.assertIsNotNone(result)
+        _, body = result
+        self.assertNotIn("Suggested remediation", body)
+        self.assertNotIn("Verified fix", body)
+
 
 class TestAtomicWrites(unittest.TestCase):
     def setUp(self):
