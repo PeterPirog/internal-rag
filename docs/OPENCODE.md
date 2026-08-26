@@ -30,20 +30,39 @@ The installer copies exactly ONE plugin, matched to the client (installing
 both would double-fire identical hooks):
 
 - `--client opencode` → `internal-rag-resilience.ts` (V1)
-- `--client opencode2` → `internal-rag-resilience-v2.ts` (V2 beta)
+- `--client opencode2` → `internal-rag-resilience-v2.ts` (V2)
 
-Both use the documented hooks-object API (`return { "tool.execute.after", event, "experimental.session.compacting" }`):
+### V1 (stable) — hooks-object API
+
+`internal-rag-resilience.ts` uses the documented hooks-object API
+(`return { "tool.execute.after", event, "experimental.session.compacting" }`):
+
 - `tool.execute.after` — auto-checkpoint after `edit`/`write`/`apply_patch` (debounced 60s).
 - `session.error` — checkpoint + suggest inspection.
 - `session.idle` — checkpoint.
 - `experimental.session.compacting` — `compact` + checkpoint + inject WORKING_STATE into context.
 
-Hook failures are logged to stderr (visible in OpenCode logs); nothing is
-silently swallowed.
+### V2 — runtime API
 
-Known OpenCode 2 beta limitation: GitHub issue anomalyco/opencode#44788
-(beta 18050) reports that `event` delivery does not work — on affected
-builds the `session.error`/`session.idle`/compacting hooks may not fire.
-MCP tools are unaffected.
+`internal-rag-resilience-v2.ts` uses the V2 runtime plugin API
+(`import { Plugin } from "@opencode-ai/plugin"`; `export default Plugin.define({ id, setup(ctx) { ... } })`):
 
-If a native tool fails, the agent can always call `irag.py` via the terminal.
+- stable id `mcp-light-memory.resilience`;
+- `setup(ctx)` registers `ctx.tool.hook("execute.after", ...)` — auto-checkpoint
+  after `edit`/`write`/`apply_patch` (debounced 60s);
+- session events via `ctx.session.hook(...)` using only documented V2 event
+  names: `session.error`, `session.idle`, `session.compacted` (post-compaction
+  checkpoint + WORKING_STATE surfacing);
+- `setup` returns a cleanup that disposes every registration and aborts
+  in-flight checkpoint spawns.
+
+### Common (both)
+
+- All hook failures are logged to stderr (visible in OpenCode logs);
+  no empty `catch {}` blocks — nothing is silently swallowed.
+- Known V2 limitation: GitHub issue anomalyco/opencode#44788 reports that
+  event delivery does not work on some V2 builds — on affected builds the
+  session hooks may not fire. The MCP PULL-based workflow
+  (`memory-checkpoint` / `memory-guard` tools) remains the primary
+  resilience path.
+- If a native tool fails, the agent can always call `irag.py` via the terminal.

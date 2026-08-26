@@ -349,12 +349,26 @@ class TestOpenCodePluginV1V2Select(unittest.TestCase):
         self.assertIn('"tool.execute.after"', src)
         self.assertIn('"experimental.session.compacting"', src)
 
-    def test_v2_plugin_uses_documented_hooks_object_api(self):
+    def test_v2_plugin_uses_v2_runtime_api(self):
+        """V2 uses Plugin.define({ id, setup(ctx) }) — NOT the V1 hooks-object API."""
         src = self._plugin_src("internal-rag-resilience-v2.ts")
-        self.assertIn("@opencode-ai/plugin", src)
-        self.assertIn("return {", src)
-        self.assertIn('"tool.execute.after"', src)
-        self.assertIn('"experimental.session.compacting"', src)
+        self.assertIn("Plugin.define", src, "V2 must use Plugin.define")
+        self.assertIn("setup", src, "V2 must define setup(ctx)")
+        self.assertIn("ctx.tool.hook(\"execute.after\"", src,
+                      "V2 must register ctx.tool.hook(\"execute.after\")")
+        # stable plugin id
+        self.assertIn("mcp-light-memory.resilience", src)
+        # must import the runtime Plugin (value import, not just the type)
+        self.assertRegex(src, r"import\s*\{\s*Plugin\s*\}\s*from\s*\"@opencode-ai/plugin\"")
+
+    def test_v2_plugin_is_not_v1_hooks_object(self):
+        """V2 must NOT be the V1 hooks-object shape (return { \"tool.execute.after\" ... })."""
+        src = self._plugin_src("internal-rag-resilience-v2.ts")
+        # The V1 shape is a returned object keyed by the dotted hook name.
+        self.assertNotIn('"tool.execute.after":', src,
+                         "V2 must not use the V1 hooks-object 'tool.execute.after' key")
+        self.assertNotIn("experimental.session.compacting", src,
+                         "V2 must not copy the undocumented-for-V2 experimental hook")
 
     def test_v2_plugin_no_silent_empty_catch(self):
         """V2 must not use empty `catch {}` blocks — failures must be logged."""
