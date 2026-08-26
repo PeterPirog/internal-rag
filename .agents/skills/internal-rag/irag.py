@@ -26,6 +26,19 @@ import json
 import math
 import os
 import re
+try:
+    from irag_atomic import atomic_write_text, atomic_write_bytes, ProjectWriteLock
+except ImportError:
+    def atomic_write_text(path, content, encoding="utf-8"):
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_text(content, encoding=encoding)
+    def atomic_write_bytes(path, content):
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_bytes(content)
+    class ProjectWriteLock:
+        def __init__(self, *a, **kw): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
 import subprocess
 import sys
 import time
@@ -660,7 +673,7 @@ def set_header(text: str, key: str, value: str) -> str:
 
 def save_working(text: str) -> None:
     RAG.mkdir(exist_ok=True)
-    WORKING.write_text(text.rstrip() + "\n", encoding="utf-8")
+    atomic_write_text(WORKING, text.rstrip() + "\n")
 
 
 CHECKPOINT_SCHEMA = 2
@@ -676,7 +689,7 @@ def _append_history(entry: Dict[str, Any]) -> None:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
         lines = HISTORY_FILE.read_text(encoding="utf-8", errors="replace").splitlines()
         if len(lines) > _HISTORY_MAX:
-            HISTORY_FILE.write_text("\n".join(lines[-_HISTORY_MAX:]) + "\n", encoding="utf-8")
+            atomic_write_text(HISTORY_FILE, "\n".join(lines[-_HISTORY_MAX:]) + "\n")
     except Exception:
         pass
 
@@ -695,7 +708,7 @@ def save_checkpoint(reason: str) -> Dict[str, Any]:
         "fingerprint": project_fingerprint(), "branch": git_text("branch", "--show-current"),
         "head": git_text("rev-parse", "--short", "HEAD"),
     }
-    CHECKPOINT.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    atomic_write_text(CHECKPOINT, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
     _append_history({"at": data["at"], "reason": reason, "head": data["head"],
                      "fingerprint": data["fingerprint"][:16], "branch": data["branch"]})
     return data
@@ -3574,7 +3587,7 @@ def save_tasks(data: Dict[str, Any]) -> None:
     max_stack = int(cfg.get("checkpoints", {}).get("max_task_stack", 16))
     data["schema"] = TASKS_SCHEMA
     data["stack"] = data.get("stack", [])[-max_stack:]
-    TASKS.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    atomic_write_text(TASKS, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
 
 
 def push_task(task: str, reason: str = "user") -> None:
