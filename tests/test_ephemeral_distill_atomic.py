@@ -125,6 +125,164 @@ class TestEphemeralStore(unittest.TestCase):
         self.assertLess(len(obs["content"]), 200 * 1024)
         self.assertIn("truncated", obs["content"])
 
+    # ------------------------------------------------------------------ #
+    # Store identity: stable .ephemeral.db (not .index.sqlite3)          #
+    # ------------------------------------------------------------------ #
+
+    def test_observe_before_index_then_index_rebuild(self):
+        """observe before .index exists -> create index -> observation still
+        get/promote-able (stable .ephemeral.db, not the retrieval index)."""
+        oid = self.eph.add_observation(self.rag, "pytest", "stable identity test")
+        self.assertIsNotNone(oid)
+        # No .index.sqlite3 should exist yet.
+        self.assertFalse((self.rag / ".index.sqlite3").exists(),
+                         "ephemeral must NOT use .index.sqlite3")
+        self.assertTrue((self.rag / ".ephemeral.db").exists(),
+                        "ephemeral must use .ephemeral.db")
+        # Simulate `index --rebuild` creating the retrieval index.
+        (self.rag / ".index.sqlite3").write_bytes(b"")
+        # The observation must still be get-able from .ephemeral.db.
+        obs = self.eph.get_observation(self.rag, oid)
+        self.assertIsNotNone(obs, "observation must survive index --rebuild")
+        self.assertEqual(obs["source"], "pytest")
+        self.assertIn("stable identity", obs["content"])
+
+    def test_ephemeral_db_path_is_stable(self):
+        """_ephemeral_db_path always returns .ephemeral.db, regardless of
+        whether .index.sqlite3 exists."""
+        p_no_index = self.eph._ephemeral_db_path(self.rag)
+        self.assertEqual(p_no_index.name, ".ephemeral.db")
+        (self.rag / ".index.sqlite3").write_bytes(b"")
+        p_with_index = self.eph._ephemeral_db_path(self.rag)
+        self.assertEqual(p_with_index.name, ".ephemeral.db",
+                         "must NOT switch to .index.sqlite3 when it appears")
+
+    # ------------------------------------------------------------------ #
+    # Hard max_bytes: evict oldest until SUM <= max_bytes                #
+    # ------------------------------------------------------------------ #
+
+    def test_max_bytes_hard_cap_evicts_more_than_50(self):
+        """Over 50 records requiring eviction -> total bytes <= max_bytes.
+        The old fixed-50 eviction would leave bytes > max_bytes when many
+        small records exceeded the cap. The hard cap must evict ALL oldest
+        rows until SUM(content_bytes) <= max_bytes."""
+        # 100 records of ~200 bytes each = ~20KB total. Set max_bytes=2000
+        # so most must be evicted (far more than 50).
+        for i in range(100):
+            self.eph.add_observation(self.rag, "test",
+                                      f"obs number {i} with some padding content here",
+                                      max_bytes=2000, max_records=200)
+        stats = self.eph.ephemeral_stats(self.rag)
+        self.assertLessEqual(stats["total_bytes"], 2000,
+                             f"hard cap must hold: {stats['total_bytes']} > 2000")
+        self.assertGreater(stats["count"], 0,
+                           "at least the newest record must survive")
+
+    def test_max_bytes_single_record_exceeding_cap(self):
+        """A single record larger than max_bytes must be evicted (table ends
+        empty or with only the redaction marker)."""
+        self.eph.add_observation(self.rag, "test", "x" * 5000,
+                                  max_bytes=100, max_records=10)
+        stats = self.eph.ephemeral_stats(self.rag)
+        self.assertLessEqual(stats["total_bytes"], 100,
+                             f"single oversized record must be evicted: {stats}")
+
+    # ------------------------------------------------------------------ #
+    # Byte-safe UTF-8 truncation                                          #
+    # ------------------------------------------------------------------ #
+
+    def test_multibyte_utf8_truncation(self):
+        """Truncation must not split a multibyte UTF-8 sequence (no
+        UnicodeDecodeError / mojibake)."""
+        # Japanese: each char is 3 bytes in UTF-8. 200 chars = 600 bytes.
+        big = "あ" * 200  # 600 bytes
+        oid = self.eph.add_observation(self.rag, "test", big,
+                                        max_record_bytes=100)
+        obs = self.eph.get_observation(self.rag, oid)
+        self.assertIsNotNone(obs)
+        # Content must be valid UTF-8 (no mojibake) and truncated.
+        self.assertLess(len(obs["content"].encode("utf-8")), 100 + 100)
+        self.assertIn("truncated", obs["content"])
+        # Decoding the stored content must not raise.
+        obs["content"].encode("utf-8").decode("utf-8")
+
+    # ------------------------------------------------------------------ #
+    # Privacy: secrets redacted BEFORE storage                            #
+    # ------------------------------------------------------------------ #
+
+    def test_bearer_secret_in_command_redacted(self):
+        """A Bearer token in the command field must be redacted BEFORE
+        storage — it must never appear in the SQLite DB."""
+        secret = "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+        oid = self.eph.add_observation(self.rag, "curl", "ok content",
+                                        command=f"curl -H 'Authorization: {secret}'")
+        obs = self.eph.get_observation(self.rag, oid)
+        self.assertIsNotNone(obs)
+        self.assertNotIn(secret, obs.get("command") or "",
+                         "Bearer token must NOT be in the stored command")
+        self.assertIn("REDACTED", obs.get("command") or "")
+
+    def test_api_token_in_metadata_redacted(self):
+        """An API token in metadata must be redacted BEFORE storage."""
+        secret = "sk-abcdefghijklmnopqrstuvwxyz1234567890"
+        oid = self.eph.add_observation(self.rag, "tool", "ok content",
+                                        metadata={"api_key": secret})
+        obs = self.eph.get_observation(self.rag, oid)
+        self.assertIsNotNone(obs)
+        meta = obs.get("metadata") or {}
+        # The raw secret must NOT appear in the stored metadata.
+        meta_str = json.dumps(meta) if not isinstance(meta, str) else meta
+        self.assertNotIn(secret, meta_str,
+                         "API token must NOT be in stored metadata")
+        # Redaction marker must be present.
+        self.assertTrue(
+            any("redacted" in str(k).lower() or "redacted" in str(v).lower()
+                for k, v in meta.items()) if isinstance(meta, dict)
+            else "redacted" in str(meta).lower(),
+            f"metadata must contain a redaction marker: {meta}")
+
+    def test_raw_secret_not_in_sqlite(self):
+        """The raw secret must not appear ANYWHERE in the .ephemeral.db file
+        (binary scan). This is a defense-in-depth check beyond the API level."""
+        secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJ"
+        self.eph.add_observation(self.rag, "tool", "ok content",
+                                  command=f"git push {secret}",
+                                  metadata={"token": secret})
+        db_path = self.rag / ".ephemeral.db"
+        raw = db_path.read_bytes()
+        self.assertNotIn(secret.encode("utf-8"), raw,
+                         "raw GitHub token must NOT appear in the SQLite file")
+
+    def test_github_token_in_content_redacted(self):
+        """A GitHub PAT (ghp_...) in content must be redacted."""
+        secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJ"
+        oid = self.eph.add_observation(self.rag, "tool",
+                                        f"using token {secret} for auth")
+        obs = self.eph.get_observation(self.rag, oid)
+        self.assertIsNotNone(obs)
+        self.assertNotIn(secret, obs["content"])
+        self.assertIn("REDACTED", obs["content"])
+
+    def test_jwt_in_content_redacted(self):
+        """A JWT in content must be redacted."""
+        jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+        oid = self.eph.add_observation(self.rag, "tool",
+                                        f"auth token: {jwt}")
+        obs = self.eph.get_observation(self.rag, oid)
+        self.assertIsNotNone(obs)
+        self.assertNotIn(jwt, obs["content"])
+        self.assertIn("REDACTED", obs["content"])
+
+    def test_openai_key_in_content_redacted(self):
+        """An OpenAI-style key (sk-...) in content must be redacted."""
+        secret = "sk-proj-abcdefghijklmnopqrstuvwxyz1234567890ABCDEFGHIJ"
+        oid = self.eph.add_observation(self.rag, "tool",
+                                        f"openai key: {secret}")
+        obs = self.eph.get_observation(self.rag, oid)
+        self.assertIsNotNone(obs)
+        self.assertNotIn(secret, obs["content"])
+        self.assertIn("REDACTED", obs["content"])
+
 
 class TestDistillation(unittest.TestCase):
     def setUp(self):
