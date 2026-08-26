@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-VERSION = "1.7.2"
+VERSION = "1.7.3"
 PRODUCT_NAME = "MCP Light Memory"
 PRODUCT_SLUG = "mcp-light-memory"
 LEGACY_NAME = "internal-rag"  # deprecated; kept for compatibility
@@ -333,9 +333,14 @@ def client_config_path(client: str, project: Path, global_cfg: bool) -> Path:
 
 def register_client(client: str, project: Path, global_cfg: bool,
                     server_name: str, script_rel: str, extra_args: list[str]):
-    """Register the MCP server in the client's config file (merge, preserve existing)."""
-    cfg_path = client_config_path(client, project, global_cfg)
-    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    """Register the MCP server in the client's config file (merge, preserve existing).
+
+    For warp/opencode this writes a real config file that the client reads.
+    For jetbrains the config file is NOT auto-read by the IDE — PyCharm
+    manages MCP servers through Settings → Tools → AI Assistant → MCP in
+    the UI. So for jetbrains we print the ready-to-paste JSON block + the
+    exact menu path, and do NOT claim the server is "registered".
+    """
     py = detect_python()
     script_abs = str((project / script_rel).resolve())
     full_args = [py, script_abs] + extra_args
@@ -353,12 +358,18 @@ def register_client(client: str, project: Path, global_cfg: bool,
         if client == "warp":
             server_entry["working_directory"] = str(project.resolve())
         elif client == "jetbrains":
-            # JetBrains MCP config does not support a cwd/working_directory field
-            # in the JSON file. The Working Directory must be set in the IDE UI:
-            # Settings → Tools → AI Assistant → MCP. We write it anyway as a
-            # hint (some JetBrains versions may read it), but also print a
-            # prominent warning below.
             server_entry["working_directory"] = str(project.resolve())
+
+    if client == "jetbrains":
+        # PyCharm/JetBrains does NOT auto-read any MCP config file.
+        # Do NOT write a file and do NOT claim "Registered".
+        # Print the ready-to-paste JSON + the exact IDE menu path instead.
+        _print_jetbrains_manual_instructions(server_name, server_entry, project)
+        return None
+
+    # warp / opencode: write the real config file
+    cfg_path = client_config_path(client, project, global_cfg)
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
     # Read existing config (merge)
     if cfg_path.exists():
         try:
@@ -378,15 +389,49 @@ def register_client(client: str, project: Path, global_cfg: bool,
                         encoding="utf-8")
     print(f"Registered MCP server '{server_name}' in {cfg_path}")
     _verify_registered_server(server_entry, client)
-    # JetBrains does not reliably read working_directory from the config file;
-    # the user must set it in Settings → Tools → AI Assistant → MCP.
-    if client == "jetbrains":
-        wd = server_entry.get("working_directory", str(project.resolve()))
-        print(f"\n  WARNING: JetBrains MCP config does not reliably set cwd from the JSON file.")
-        print(f"  Set Working Directory in: Settings -> Tools -> AI Assistant -> MCP")
-        print(f"  to: {wd}")
-        print(f"  Otherwise the memory store will be created in the IDE's default cwd.\n")
     return cfg_path
+
+
+def _print_jetbrains_manual_instructions(server_name: str, server_entry: dict,
+                                          project: Path):
+    """Print the ready-to-paste JSON + IDE menu path for JetBrains/PyCharm.
+
+    PyCharm does NOT auto-read any MCP config file — the user must add the
+    server manually in Settings → Tools → AI Assistant → MCP.
+    """
+    wd = server_entry.get("working_directory", str(project.resolve()))
+    # Build the JSON block the user will paste into the IDE dialog
+    paste_entry = {
+        "command": server_entry["command"],
+        "args": server_entry["args"],
+    }
+    paste_json = json.dumps(paste_entry, indent=2, ensure_ascii=False)
+    print()
+    print("=" * 72)
+    print("  JETBRAINS / PyCharm — MANUAL MCP SETUP REQUIRED")
+    print("=" * 72)
+    print()
+    print("  PyCharm does NOT auto-read MCP config files. You must add the")
+    print("  server manually in the IDE UI:")
+    print()
+    print("  1. Settings (Ctrl+Alt+S) -> Tools -> AI Assistant -> MCP")
+    print("  2. Click Add -> STDIO")
+    print("  3. Paste this JSON:")
+    print()
+    print(paste_json)
+    print()
+    print(f"  4. Working directory (in the same dialog): {wd}")
+    print("     Without this, the memory store will be created in the")
+    print("     IDE's default cwd, not in your project.")
+    print()
+    print("  5. Server level = Global (all projects) or Project.")
+    print("  6. OK -> Apply. The server should start; green status = connected.")
+    print()
+    print("  7. If it does not start, click Reconnect in Status. Logs:")
+    print("     Help -> Show Log in Explorer -> mcp/ folder.")
+    print()
+    print("=" * 72)
+    _verify_registered_server(server_entry, "jetbrains")
 
 
 def _verify_registered_server(server_entry: dict, client: str):
@@ -417,9 +462,16 @@ def unregister_client(client: str, project: Path, global_cfg: bool,
                       server_name: str):
     """Remove the MCP server from the client's config file (if present).
 
-    If the config becomes empty after removal, delete the file (and its parent
-    dir if also empty) to avoid leaving dead skeletons that trigger GUARD STALE.
+    For jetbrains there is no config file to remove (the IDE manages MCP via UI).
+    We just print a reminder to remove it manually in Settings.
+
+    For warp/opencode: if the config becomes empty after removal, delete the
+    file (and its parent dir if also empty) to avoid leaving dead skeletons.
     """
+    if client == "jetbrains":
+        print(f"JetBrains/PyCharm manages MCP servers in the IDE UI.")
+        print(f"To remove '{server_name}': Settings -> Tools -> AI Assistant -> MCP -> Remove.")
+        return
     cfg_path = client_config_path(client, project, global_cfg)
     if not cfg_path.exists():
         print(f"No config at {cfg_path} — nothing to unregister.")
@@ -577,7 +629,8 @@ def main():
     ap.add_argument('repo', nargs='?', help='Target Git repository; default current directory.')
     ap.add_argument('--share-tools', action='store_true', help='Allow integration/tool files to be tracked. INTERNAL_RAG memory remains locally excluded.')
     ap.add_argument('--client', choices=['warp', 'opencode', 'jetbrains'],
-                    help='Register the MCP server in the given client config after install.')
+                    help='Register the MCP server: warp/opencode write a config file; '
+                         'jetbrains prints manual IDE setup instructions (PyCharm does not auto-read config files).')
     ap.add_argument('--global', dest='global_cfg', action='store_true',
                     help="Use the client's global config (default: project-local).")
     ap.add_argument('--server-name', default='mcp-light-memory',
@@ -614,13 +667,15 @@ def main():
     print('\nINSTALLATION COMPLETE')
     print('Existing INTERNAL_RAG memory was preserved.')
     print(f'Git local exclude: {exclude_path}')
-    if args.client:
+    if args.client and args.client != "jetbrains":
         print(f'MCP server registered for {args.client}.')
+    elif args.client == "jetbrains":
+        print('MCP setup instructions printed above (manual IDE step required).')
     # Client-specific restart instruction
     restart_msgs = {
         'warp': 'Restart Warp, then run context for the current task.',
         'opencode': 'Restart OpenCode, then run context for the current task.',
-        'jetbrains': 'Restart PyCharm/JetBrains IDE (or reload MCP servers in Settings), then run context for the current task.',
+        'jetbrains': 'Add the server in Settings -> Tools -> AI Assistant -> MCP (see instructions above), then run context for the current task.',
     }
     print(restart_msgs.get(args.client, 'Restart Warp/OpenCode/PyCharm, then run context for the current task.'))
     # Show the memory store path so the user can verify it landed in the right place

@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.7.3 — 2026-08-26
+
+Critical fix for JetBrains/PyCharm: `--client jetbrains` no longer claims to "register" a server, because PyCharm does NOT auto-read any MCP config file.
+
+### Fixes
+- **`--client jetbrains` no longer writes a fake config file**: PyCharm manages MCP servers exclusively through `Settings → Tools → AI Assistant → MCP` in the IDE UI. The installer now:
+  - does NOT write `~/.jetbrains/mcp.json` (which the IDE ignores),
+  - prints a prominent `MANUAL MCP SETUP REQUIRED` block with the ready-to-paste JSON (`command` + `args`), the exact Working Directory path, and step-by-step IDE menu instructions,
+  - runs `--version` verification on the Python interpreter (so the user knows the path works before pasting it).
+- **`--unregister --client jetbrains`**: now prints a reminder to remove the server manually in the IDE UI (instead of trying to delete a non-existent config file).
+- **Final install message**: for jetbrains, prints `MCP setup instructions printed above (manual IDE step required)` instead of the misleading `MCP server registered`.
+- **`--client` argparse help**: clarifies that jetbrains prints manual instructions, not a config file.
+- Version bumped to **1.7.3**.
+
 ## 1.7.2 — 2026-08-25
 
 Hotfix for JetBrains/PyCharm installation (feedback from real deployment).
