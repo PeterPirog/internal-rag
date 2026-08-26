@@ -2632,7 +2632,7 @@ def scan_secrets(text: str) -> List[str]:
 
 
 def remember(args) -> None:
-    # G4: privacy scan at write-time
+    # G4: privacy scan at write-time (pure, no durable-store dependency).
     scan_text = f"{args.title}\n{args.body}\n{args.consequence or ''}\n{args.evidence or ''}"
     secrets = scan_secrets(scan_text)
     allow_secret = getattr(args, "allow_secret", False)
@@ -2645,132 +2645,144 @@ def remember(args) -> None:
                 print(f"  pattern: {s}", file=sys.stderr)
             print("If this is a false positive, re-run with --allow-secret.", file=sys.stderr)
         return "refused"
-    # Content-based duplicate detection (SimHash + exact fingerprint)
-    dup_check = _check_duplicates(args.title, args.body, args.consequence or "",
-                                   args.type, args.tags, args.scope)
+    # Pure argument validation (no durable-store reads) stays outside the lock.
     force = getattr(args, "force", False)
     want_json = getattr(args, "json", False)
-    active_near = [d for d in dup_check["near"] if "archived" not in d]
-    if dup_check["exact"] and not force:
-        if want_json:
-            print(json.dumps({"status": "blocked", "duplicate": dup_check,
-                              "recommended_action": dup_check.get("recommended_action")}, ensure_ascii=False, indent=2))
-        else:
-            print("BLOCKED: exact duplicate detected:", file=sys.stderr)
-            for d in dup_check["near"]:
-                print(f"  {d}", file=sys.stderr)
-            print("Use --force to create anyway, or `update` the existing memory.", file=sys.stderr)
-        return "blocked"
-    if active_near and not force:
-        if want_json:
-            print(json.dumps({"status": "blocked", "duplicate": dup_check,
-                              "recommended_action": dup_check.get("recommended_action")}, ensure_ascii=False, indent=2))
-        else:
-            print("WARNING: near duplicate detected:", file=sys.stderr)
-            for d in dup_check["near"]:
-                if "exact" not in d:
-                    print(f"  {d}", file=sys.stderr)
-            action = dup_check.get("recommended_action")
-            if action:
-                print(f"Recommended action: {action} (or --force to create anyway)", file=sys.stderr)
-        return "blocked"
-    # Title-Jaccard as additional signal
-    title_dupes = _find_duplicates(args.title, args.type)
-    if title_dupes and not force:
-        if want_json:
-            print(json.dumps({"status": "blocked",
-                              "duplicate": dict(dup_check, title_similar=title_dupes),
-                              "recommended_action": "force"}, ensure_ascii=False, indent=2))
-        else:
-            print(f"WARNING: similar title already exists:", file=sys.stderr)
-            for d in title_dupes:
-                print(f"  {d}", file=sys.stderr)
-            print("Use --force to create anyway, or `update` the existing memory.", file=sys.stderr)
-        return "blocked"
-    # H2: conflict detection (separate from duplicate detection)
-    conflicts = _find_conflicts(args.type, args.body, args.scope)
-    if conflicts and not force:
-        if want_json:
-            print(json.dumps({"status": "blocked", "conflict": conflicts,
-                              "duplicate": dup_check, "recommended_action": "supersede"},
-                             ensure_ascii=False, indent=2))
-        else:
-            print("WARNING: potential conflict with active memory of same type/scope:", file=sys.stderr)
-            for c in conflicts:
-                print(f"  {c}", file=sys.stderr)
-            print("Consider `supersede` instead. Use --force to create anyway.", file=sys.stderr)
-        return "blocked"
     status = "tentative" if args.type == "hypothesis" and args.status == "active" else args.status
     folder = RAG / TYPE_DIR[args.type]
     folder.mkdir(parents=True, exist_ok=True)
     d = dt.date.today().strftime("%Y%m%d")
-    path = folder / f"{d}-{slugify(args.title)}.md"
-    n = 2
-    while path.exists():
-        path = folder / f"{d}-{slugify(args.title)}-{n}.md"
-        n += 1
 
     def yl(name: str, val: str) -> str:
         xs = [x.strip() for x in val.split(",") if x.strip()]
         return f"{name}: []\n" if not xs else f"{name}:\n" + "".join(f"  - {x}\n" for x in xs)
 
-    content = (
-        "---\n"
-        "schema: 2\n"
-        f"id: mem-{d}-{slugify(args.title)[:40]}\n"
-        f"type: {args.type}\n"
-        f"status: {status}\n"
-        f"created: {today()}\n"
-        f"verified: {today() if args.type != 'hypothesis' else 'unverified'}\n"
-        f"{yl('scope', args.scope)}"
-        f"{yl('tags', args.tags)}"
-        f"{yl('sources', args.evidence)}"
-    )
-    if args.links:
-        links = [x.strip() for x in args.links.split(",") if x.strip()]
-        if links:
-            content += "links:\n" + "".join(f"  - {x}\n" for x in links)
+    # ---------------------------------------------------------------- #
+    # CRITICAL: duplicate/conflict checks AND filename selection AND   #
+    # the final durable write must all run inside ONE lock window.     #
+    # Otherwise two concurrent remember() calls can both pass the     #
+    # duplicate check, pick the same filename, and the second silently #
+    # overwrites the first (TOCTOU race).                              #
+    # ---------------------------------------------------------------- #
+    with ProjectWriteLock(RAG / ".write.lock"):
+        # Content-based duplicate detection (SimHash + exact fingerprint)
+        dup_check = _check_duplicates(args.title, args.body, args.consequence or "",
+                                       args.type, args.tags, args.scope)
+        active_near = [d for d in dup_check["near"] if "archived" not in d]
+        if dup_check["exact"] and not force:
+            if want_json:
+                print(json.dumps({"status": "blocked", "duplicate": dup_check,
+                                  "recommended_action": dup_check.get("recommended_action")}, ensure_ascii=False, indent=2))
+            else:
+                print("BLOCKED: exact duplicate detected:", file=sys.stderr)
+                for d in dup_check["near"]:
+                    print(f"  {d}", file=sys.stderr)
+                print("Use --force to create anyway, or `update` the existing memory.", file=sys.stderr)
+            return "blocked"
+        if active_near and not force:
+            if want_json:
+                print(json.dumps({"status": "blocked", "duplicate": dup_check,
+                                  "recommended_action": dup_check.get("recommended_action")}, ensure_ascii=False, indent=2))
+            else:
+                print("WARNING: near duplicate detected:", file=sys.stderr)
+                for d in dup_check["near"]:
+                    if "exact" not in d:
+                        print(f"  {d}", file=sys.stderr)
+                action = dup_check.get("recommended_action")
+                if action:
+                    print(f"Recommended action: {action} (or --force to create anyway)", file=sys.stderr)
+            return "blocked"
+        # Title-Jaccard as additional signal
+        title_dupes = _find_duplicates(args.title, args.type)
+        if title_dupes and not force:
+            if want_json:
+                print(json.dumps({"status": "blocked",
+                                  "duplicate": dict(dup_check, title_similar=title_dupes),
+                                  "recommended_action": "force"}, ensure_ascii=False, indent=2))
+            else:
+                print(f"WARNING: similar title already exists:", file=sys.stderr)
+                for d in title_dupes:
+                    print(f"  {d}", file=sys.stderr)
+                print("Use --force to create anyway, or `update` the existing memory.", file=sys.stderr)
+            return "blocked"
+        # H2: conflict detection (separate from duplicate detection)
+        conflicts = _find_conflicts(args.type, args.body, args.scope)
+        if conflicts and not force:
+            if want_json:
+                print(json.dumps({"status": "blocked", "conflict": conflicts,
+                                  "duplicate": dup_check, "recommended_action": "supersede"},
+                                 ensure_ascii=False, indent=2))
+            else:
+                print("WARNING: potential conflict with active memory of same type/scope:", file=sys.stderr)
+                for c in conflicts:
+                    print(f"  {c}", file=sys.stderr)
+                print("Consider `supersede` instead. Use --force to create anyway.", file=sys.stderr)
+            return "blocked"
+        # Filename collision selection — must be inside the lock so two
+        # concurrent calls never pick the same path.
+        path = folder / f"{d}-{slugify(args.title)}.md"
+        n = 2
+        while path.exists():
+            path = folder / f"{d}-{slugify(args.title)}-{n}.md"
+            n += 1
+
+        content = (
+            "---\n"
+            "schema: 2\n"
+            f"id: mem-{d}-{slugify(args.title)[:40]}\n"
+            f"type: {args.type}\n"
+            f"status: {status}\n"
+            f"created: {today()}\n"
+            f"verified: {today() if args.type != 'hypothesis' else 'unverified'}\n"
+            f"{yl('scope', args.scope)}"
+            f"{yl('tags', args.tags)}"
+            f"{yl('sources', args.evidence)}"
+        )
+        if args.links:
+            links = [x.strip() for x in args.links.split(",") if x.strip()]
+            if links:
+                content += "links:\n" + "".join(f"  - {x}\n" for x in links)
+            else:
+                content += "links: []\n"
         else:
             content += "links: []\n"
-    else:
-        content += "links: []\n"
-    # schema-2 optional lifecycle fields (only written when supplied)
-    schema2 = []
-    if getattr(args, "confidence", None):
-        schema2.append(f"confidence: {args.confidence}")
-    if getattr(args, "valid_from", None):
-        schema2.append(f"valid_from: {args.valid_from}")
-    if getattr(args, "valid_to", None):
-        schema2.append(f"valid_to: {args.valid_to}")
-    sup = [x.strip() for x in (getattr(args, "supersedes", "") or "").split(",") if x.strip()]
-    der = [x.strip() for x in (getattr(args, "derived_from", "") or "").split(",") if x.strip()]
-    if sup:
-        schema2.append("supersedes:\n" + "".join(f"  - {x}\n" for x in sup))
-    else:
-        schema2.append("supersedes: []")
-    if der:
-        schema2.append("derived_from:\n" + "".join(f"  - {x}\n" for x in der))
-    else:
-        schema2.append("derived_from: []")
-    # Provenance: which ephemeral observation this memory was distilled from
-    src_obs = str(getattr(args, "source_observation", "") or "").strip()
-    src_obs_hash = str(getattr(args, "source_observation_hash", "") or "").strip()
-    if src_obs:
-        schema2.append(f"source_observation: {src_obs}")
-        if src_obs_hash:
-            schema2.append(f"obs_content_hash: {src_obs_hash}")
-    if schema2:
-        content += "".join(x if x.endswith("\n") else x + "\n" for x in schema2)
-    content += (
-        "---\n\n"
-        f"# {args.title}\n\n"
-        "## Knowledge\n\n"
-        f"{args.body.strip()}\n\n"
-        "## Consequence\n\n"
-        f"{(args.consequence or 'To be determined.').strip()}\n"
-    )
-    with ProjectWriteLock(RAG / ".write.lock"):
+        # schema-2 optional lifecycle fields (only written when supplied)
+        schema2 = []
+        if getattr(args, "confidence", None):
+            schema2.append(f"confidence: {args.confidence}")
+        if getattr(args, "valid_from", None):
+            schema2.append(f"valid_from: {args.valid_from}")
+        if getattr(args, "valid_to", None):
+            schema2.append(f"valid_to: {args.valid_to}")
+        sup = [x.strip() for x in (getattr(args, "supersedes", "") or "").split(",") if x.strip()]
+        der = [x.strip() for x in (getattr(args, "derived_from", "") or "").split(",") if x.strip()]
+        if sup:
+            schema2.append("supersedes:\n" + "".join(f"  - {x}\n" for x in sup))
+        else:
+            schema2.append("supersedes: []")
+        if der:
+            schema2.append("derived_from:\n" + "".join(f"  - {x}\n" for x in der))
+        else:
+            schema2.append("derived_from: []")
+        # Provenance: which ephemeral observation this memory was distilled from
+        src_obs = str(getattr(args, "source_observation", "") or "").strip()
+        src_obs_hash = str(getattr(args, "source_observation_hash", "") or "").strip()
+        if src_obs:
+            schema2.append(f"source_observation: {src_obs}")
+            if src_obs_hash:
+                schema2.append(f"obs_content_hash: {src_obs_hash}")
+        if schema2:
+            content += "".join(x if x.endswith("\n") else x + "\n" for x in schema2)
+        content += (
+            "---\n\n"
+            f"# {args.title}\n\n"
+            "## Knowledge\n\n"
+            f"{args.body.strip()}\n\n"
+            "## Consequence\n\n"
+            f"{(args.consequence or 'To be determined.').strip()}\n"
+        )
         atomic_write_text(path, content, encoding="utf-8")
+    # rebuild_index reads the already-committed file; safe outside the lock.
     rebuild_index()
     if want_json:
         print(json.dumps({"status": "created", "path": str(path.relative_to(ROOT)),
@@ -3108,56 +3120,63 @@ def update_memory(args) -> int:
     if p is None:
         print(f"Memory not found: {args.ref}", file=sys.stderr)
         return 1
-    text = p.read_text(encoding="utf-8", errors="replace")
-    fm = parse_fm(text)
-    if args.status:
-        fm["status"] = args.status
-    if args.verified:
-        fm["verified"] = args.verified
-    if args.add_tags:
-        tags = fm.get("tags", [])
-        if isinstance(tags, str):
-            tags = [tags]
-        for t in args.add_tags.split(","):
-            t = t.strip()
-            if t and t not in tags:
-                tags.append(t)
-        fm["tags"] = tags
-    if args.remove_tags:
-        tags = fm.get("tags", [])
-        if isinstance(tags, str):
-            tags = [tags]
-        rm = {x.strip() for x in args.remove_tags.split(",")}
-        fm["tags"] = [t for t in tags if t not in rm]
-    # schema-2 lifecycle fields (never deleted on update; history preserved)
-    if getattr(args, "confidence", None):
-        fm["confidence"] = args.confidence
-    if getattr(args, "valid_from", None) is not None:
-        if args.valid_from:
-            fm["valid_from"] = args.valid_from
-        else:
-            fm.pop("valid_from", None)
-    if getattr(args, "valid_to", None) is not None:
-        if args.valid_to:
-            fm["valid_to"] = args.valid_to
-        else:
-            fm.pop("valid_to", None)
-    if getattr(args, "supersedes", None) is not None:
-        xs = [x.strip() for x in args.supersedes.split(",") if x.strip()]
-        fm["supersedes"] = xs
-    # promote to schema-2 marker when lifecycle fields are touched
-    if any(getattr(args, k, None) is not None for k in ("confidence", "valid_from", "valid_to", "supersedes")):
-        if fm.get("schema") not in ("2", 2):
-            fm["schema"] = "2"
-    fm["updated"] = today()
-    body_start = text.find("---\n", 4)
-    body = text[body_start + 4:] if body_start >= 0 else text
-    if body.startswith("\n"):
-        body = body[1:]
-    new_text = write_fm(fm) + "\n" + body
-    if args.append:
-        new_text = new_text.rstrip() + "\n\n## Update " + today() + "\n\n" + args.append.strip() + "\n"
+    # ---------------------------------------------------------------- #
+    # Read-modify-write must run under the lock: the file is read,      #
+    # modified in memory, and written back atomically. Without the     #
+    # lock, two concurrent updates would race and one's changes would  #
+    # be silently lost (last-writer-wins, but the last writer based     #
+    # its modification on a stale read).                                #
+    # ---------------------------------------------------------------- #
     with ProjectWriteLock(RAG / ".write.lock"):
+        text = p.read_text(encoding="utf-8", errors="replace")
+        fm = parse_fm(text)
+        if args.status:
+            fm["status"] = args.status
+        if args.verified:
+            fm["verified"] = args.verified
+        if args.add_tags:
+            tags = fm.get("tags", [])
+            if isinstance(tags, str):
+                tags = [tags]
+            for t in args.add_tags.split(","):
+                t = t.strip()
+                if t and t not in tags:
+                    tags.append(t)
+            fm["tags"] = tags
+        if args.remove_tags:
+            tags = fm.get("tags", [])
+            if isinstance(tags, str):
+                tags = [tags]
+            rm = {x.strip() for x in args.remove_tags.split(",")}
+            fm["tags"] = [t for t in tags if t not in rm]
+        # schema-2 lifecycle fields (never deleted on update; history preserved)
+        if getattr(args, "confidence", None):
+            fm["confidence"] = args.confidence
+        if getattr(args, "valid_from", None) is not None:
+            if args.valid_from:
+                fm["valid_from"] = args.valid_from
+            else:
+                fm.pop("valid_from", None)
+        if getattr(args, "valid_to", None) is not None:
+            if args.valid_to:
+                fm["valid_to"] = args.valid_to
+            else:
+                fm.pop("valid_to", None)
+        if getattr(args, "supersedes", None) is not None:
+            xs = [x.strip() for x in args.supersedes.split(",") if x.strip()]
+            fm["supersedes"] = xs
+        # promote to schema-2 marker when lifecycle fields are touched
+        if any(getattr(args, k, None) is not None for k in ("confidence", "valid_from", "valid_to", "supersedes")):
+            if fm.get("schema") not in ("2", 2):
+                fm["schema"] = "2"
+        fm["updated"] = today()
+        body_start = text.find("---\n", 4)
+        body = text[body_start + 4:] if body_start >= 0 else text
+        if body.startswith("\n"):
+            body = body[1:]
+        new_text = write_fm(fm) + "\n" + body
+        if args.append:
+            new_text = new_text.rstrip() + "\n\n## Update " + today() + "\n\n" + args.append.strip() + "\n"
         atomic_write_text(p, new_text, encoding="utf-8")
     rebuild_index()
     print(f"Updated: {p.relative_to(ROOT)}")
@@ -3170,58 +3189,61 @@ def supersede(args) -> int:
     - valid_to -> today (if not already set)
     - superseded_by -> id/path of the replacement (if provided)
     - the replacement gains `supersedes: [old_id]` (if it exists)
-    History is never deleted."""
+    History is never deleted.
+
+    The two-file read-modify-write (old + replacement) is TOCTOU-unsafe unless
+    both reads and both writes run in one lock window."""
     p = find_memory_by_id_or_path(args.ref)
     if p is None:
         print(f"Memory not found: {args.ref}", file=sys.stderr)
         return 1
-    text, fm = _read_memory(p)
-    old_id = str(fm.get("id", str(p)))
-    valid_to = str(getattr(args, "valid_to", "") or "") or today()
-    fm["status"] = "superseded"
-    fm["superseded_at"] = today()
-    if not str(fm.get("valid_to") or ""):
-        fm["valid_to"] = valid_to
-    elif valid_to != today():
-        # explicit --valid-to overrides a previous valid_to
-        fm["valid_to"] = valid_to
-    fm["updated"] = today()
-    if args.reason:
-        fm["supersede_reason"] = args.reason
-    # Resolve the replacement memory id, if provided
-    new_id = ""
-    new_p = None
-    if args.by:
-        new_p = find_memory_by_id_or_path(args.by)
-        if new_p is not None:
-            _, new_fm = _read_memory(new_p)
-            new_id = str(new_fm.get("id", args.by))
-        elif getattr(args, "force", False):
-            new_id = str(args.by)  # record the reference even if not resolvable
-    if new_id:
-        fm["superseded_by"] = new_id
-    else:
-        # keep a prior value if present; do not overwrite with junk
-        if not str(fm.get("superseded_by") or ""):
-            fm.pop("superseded_by", None)
-    body_start = text.find("---\n", 4)
-    body = text[body_start + 4:].lstrip("\n") if body_start >= 0 else text
-    # Link the replacement: supersedes -> [old_id]
-    new_content = None
-    if new_p is not None:
-        new_text, new_fm = _read_memory(new_p)
-        supersedes = new_fm.get("supersedes", [])
-        if isinstance(supersedes, str):
-            supersedes = [supersedes] if supersedes else []
-        if not isinstance(supersedes, list):
-            supersedes = []
-        if old_id not in supersedes:
-            supersedes.append(old_id)
-        new_fm["supersedes"] = supersedes
-        new_body_start = new_text.find("---\n", 4)
-        new_body = new_text[new_body_start + 4:].lstrip("\n") if new_body_start >= 0 else new_text
-        new_content = write_fm(new_fm) + "\n" + new_body
     with ProjectWriteLock(RAG / ".write.lock"):
+        text, fm = _read_memory(p)
+        old_id = str(fm.get("id", str(p)))
+        valid_to = str(getattr(args, "valid_to", "") or "") or today()
+        fm["status"] = "superseded"
+        fm["superseded_at"] = today()
+        if not str(fm.get("valid_to") or ""):
+            fm["valid_to"] = valid_to
+        elif valid_to != today():
+            # explicit --valid-to overrides a previous valid_to
+            fm["valid_to"] = valid_to
+        fm["updated"] = today()
+        if args.reason:
+            fm["supersede_reason"] = args.reason
+        # Resolve the replacement memory id, if provided
+        new_id = ""
+        new_p = None
+        if args.by:
+            new_p = find_memory_by_id_or_path(args.by)
+            if new_p is not None:
+                _, new_fm = _read_memory(new_p)
+                new_id = str(new_fm.get("id", args.by))
+            elif getattr(args, "force", False):
+                new_id = str(args.by)  # record the reference even if not resolvable
+        if new_id:
+            fm["superseded_by"] = new_id
+        else:
+            # keep a prior value if present; do not overwrite with junk
+            if not str(fm.get("superseded_by") or ""):
+                fm.pop("superseded_by", None)
+        body_start = text.find("---\n", 4)
+        body = text[body_start + 4:].lstrip("\n") if body_start >= 0 else text
+        # Link the replacement: supersedes -> [old_id]
+        new_content = None
+        if new_p is not None:
+            new_text, new_fm = _read_memory(new_p)
+            supersedes = new_fm.get("supersedes", [])
+            if isinstance(supersedes, str):
+                supersedes = [supersedes] if supersedes else []
+            if not isinstance(supersedes, list):
+                supersedes = []
+            if old_id not in supersedes:
+                supersedes.append(old_id)
+            new_fm["supersedes"] = supersedes
+            new_body_start = new_text.find("---\n", 4)
+            new_body = new_text[new_body_start + 4:].lstrip("\n") if new_body_start >= 0 else new_text
+            new_content = write_fm(new_fm) + "\n" + new_body
         atomic_write_text(p, write_fm(fm) + "\n" + body, encoding="utf-8")
         if new_content is not None:
             atomic_write_text(new_p, new_content, encoding="utf-8")
@@ -3238,14 +3260,20 @@ def forget(args) -> int:
         return 1
     archive = RAG / "archive"
     archive.mkdir(exist_ok=True)
-    target = archive / p.name
-    n = 1
-    while target.exists():
-        target = archive / f"{p.stem}-{n}.md"
-        n += 1
-    # Stamp archive metadata BEFORE moving (crash-safe; GC grace period
-    # depends on archived_at being set).
-    def _stamp_and_move():
+    # ---------------------------------------------------------------- #
+    # The archive-target collision check (archive/<name>.md, then       #
+    # stem-N.md) AND the metadata stamp AND the rename must run in one #
+    # lock window; otherwise two concurrent forget() calls could pick  #
+    # the same archive target and one rename would clobber the other.  #
+    # ---------------------------------------------------------------- #
+    with ProjectWriteLock(RAG / ".write.lock"):
+        target = archive / p.name
+        n = 1
+        while target.exists():
+            target = archive / f"{p.stem}-{n}.md"
+            n += 1
+        # Stamp archive metadata BEFORE moving (crash-safe; GC grace period
+        # depends on archived_at being set).
         try:
             text, fm = _read_memory(p)
             if not str(fm.get("archived_at") or ""):
@@ -3259,8 +3287,6 @@ def forget(args) -> int:
         except Exception:
             pass  # metadata stamping is best-effort; move is the real action
         p.rename(target)
-    with ProjectWriteLock(RAG / ".write.lock"):
-        _stamp_and_move()
     rebuild_index()
     print(f"Archived: {p.relative_to(ROOT)} -> {target.relative_to(ROOT)}")
     return 0
@@ -3290,24 +3316,33 @@ def clean_cmd(args) -> int:
 
 
 def link_memories(args) -> int:
+    # Resolve both refs outside the lock (pure path lookup; safe even if a
+    # concurrent supersede moves a file, because the returned Path either
+    # exists at write time or the write below fails visibly).
     p1 = find_memory_by_id_or_path(args.from_ref)
     p2 = find_memory_by_id_or_path(args.to_ref)
     if p1 is None or p2 is None:
         print(f"Memory not found: {args.from_ref} or {args.to_ref}", file=sys.stderr)
         return 1
-    text, fm = _read_memory(p1)
-    links = fm.get("links", [])
-    if isinstance(links, str):
-        links = [links]
-    rel2 = str(p2.relative_to(ROOT)).replace("\\", "/")
-    if rel2 not in links:
-        links.append(rel2)
-    fm["links"] = links
-    fm["updated"] = today()
-    body_start = text.find("---\n", 4)
-    body = text[body_start + 4:].lstrip("\n") if body_start >= 0 else text
+    # Read-modify-write on p1 runs under the lock (TOCTOU-safe): the links
+    # list is read from disk, the new link appended, and the file written
+    # atomically. Without the lock, two concurrent links appending the
+    # same target would both read the original list and the second would
+    # silently drop the first's addition.
     with ProjectWriteLock(RAG / ".write.lock"):
+        text, fm = _read_memory(p1)
+        links = fm.get("links", [])
+        if isinstance(links, str):
+            links = [links]
+        rel2 = str(p2.relative_to(ROOT)).replace("\\", "/")
+        if rel2 not in links:
+            links.append(rel2)
+        fm["links"] = links
+        fm["updated"] = today()
+        body_start = text.find("---\n", 4)
+        body = text[body_start + 4:].lstrip("\n") if body_start >= 0 else text
         atomic_write_text(p1, write_fm(fm) + "\n" + body, encoding="utf-8")
+    rebuild_index()
     print(f"Linked: {p1.relative_to(ROOT)} -> {p2.relative_to(ROOT)}")
     return 0
 
