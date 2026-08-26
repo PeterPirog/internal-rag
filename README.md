@@ -23,145 +23,52 @@
 
 ---
 
-**MCP Light Memory** (package `mcp-light-memory`, CLI `mlm`) is a lightweight, local-first, persistent memory system for coding agents and MCP clients. It keeps the minimum state needed to resume complex work without keeping the full session history in the model's context window — a checkpoint + retrieval layer for your agent.
+## What is this?
 
-- **Local-first / offline-first** — no server, no cloud, no daemon. Markdown is the durable source of truth; SQLite is a rebuildable cache.
-- **Zero required runtime dependencies** — pure Python 3.8+ stdlib. Optional `sentence-transformers`/`numpy` for better semantic retrieval.
-- **MCP stdio server** — dual-era protocol support: modern `2026-07-28` (`server/discover`, `_meta`, `structuredContent`, `outputSchema`) + legacy `2024-11-05`…`2025-11-25`.
-- **Multi-project router** — one MCP server in front of many projects with registry allowlist, `write:false` hard boundary, and per-call subprocess isolation.
-- **Retrieved memory is untrusted evidence** — explicit trust boundary + prompt-injection warning heuristic (ADR-015).
-- **Works with** Warp, OpenCode, Claude Code, Cursor, JetBrains AI Assistant / PyCharm.
-- **Zero-shot setup** — paste one prompt from [`docs/ZERO-SHOT-SETUP-PROMPTS.md`](docs/ZERO-SHOT-SETUP-PROMPTS.md) into your agent and it installs + configures everything automatically.
+**MCP Light Memory** is a lightweight, local-first, persistent memory system for coding agents and MCP clients (Warp, OpenCode, JetBrains AI Assistant / PyCharm, Claude Code, Cursor). It acts as a **checkpoint + retrieval layer** — it stores the minimum durable state needed to resume complex work across sessions, without keeping the full conversation in the model's context window.
+
+When your agent starts a task, it calls `context` and gets back relevant past decisions, gotchas, constraints, and hypotheses — ranked, deduplicated, and trust-bounded. When it finishes, it checkpoints the working state. Next session, even after a restart, the memory is there.
+
+## Why use it?
+
+| Problem | How MCP Light Memory solves it |
+|---|---|
+| Agents forget everything between sessions | Markdown files persist on disk; the agent retrieves them via BM25 + optional embeddings |
+| Full session history is too large for context | Only relevant memories are retrieved (token-budgeted, MMR-diversified) |
+| Cloud dependency / privacy concerns | 100% local, offline, zero network calls, no daemon |
+| Heavy setup / dependencies | Zero required runtime deps (pure Python 3.8+ stdlib); optional `sentence-transformers` for better semantic retrieval |
+| Prompt injection via stored memory | Every retrieved memory is explicitly `trust: untrusted` evidence with an injection-warning heuristic (ADR-015) |
+| Multi-project isolation | Router with registry allowlist, `write:false` hard boundary, per-call subprocess isolation |
+| MCP protocol drift | Dual-era support: modern `2026-07-28` + legacy `2024-11-05`…`2025-11-25` |
+
+## How it works (mechanisms)
+
+- **Markdown is the source of truth.** Every memory is a `.md` file with YAML frontmatter (`id`, `type`, `status`, `tags`, `sources`, `links`, `valid_from`, `valid_to`, `supersedes`). Human-readable, diffable, durable.
+- **SQLite is a rebuildable cache.** BM25/FTS5 index + optional embedding vectors + usage tracking. Delete it and everything rebuilds from Markdown.
+- **Retrieval:** pure-Python BM25 + optional dense embeddings → RRF fusion → MMR diversification → policy boosts (type/status/temporal) → token-budget cut. Adaptive mode: sparse first, dense only if weak.
+- **Lifecycle:** `remember` → `update` → `supersede` (links both directions, never deletes history) → `forget` (archives, never deletes) → `timeline` (temporal view). `search --at YYYY-MM-DD` for historical queries.
+- **Trust boundary:** retrieved content is wrapped in `=== BEGIN/END INTERNAL_RAG MEMORY ===` with a `SECURITY NOTICE` header. Structured JSON/MCP carries `trust: untrusted` + optional `security_flags: ["instruction_like_content"]`.
+- **Evidence freshness:** each result includes `evidence_state` (`present`/`missing`/`unverifiable`) for local path-like evidence — derived at retrieval time, never persisted.
+- **Multi-project router:** one MCP stdio server in front of many projects via a JSON registry. `write:false` blocks mutating tools before spawning a child. Per-call subprocess isolation (no shared state).
+
+## Setup
+
+### Prerequisites
+
+- **Python 3.8+** (uses `py` launcher, `python`, or `python3` — the installer auto-detects the real interpreter and rejects the WindowsApps stub)
+- **Git** (the target project must be a git repo)
+- Optional: `pip install sentence-transformers numpy` for better semantic retrieval
 
 **Version:** 1.7.3  
-**Verified:** 2026-08-25  
-**Integrations:** Warp, OpenCode, MCP (Claude Code / Cursor), JetBrains  
-**Requirements:** Python 3.8+, Git  
-**Optional:** `sentence-transformers`, `numpy` (better semantic retrieval)  
-**Offline:** Fully functional without internet (BM25 core, optional pre-packaged embeddings)
 
-> **Migration:** This project was formerly named `internal-rag`. Existing installs keep working — the `irag.py` module, `INTERNAL_RAG/` storage folder, and old MCP server names are preserved as deprecated aliases. The new primary CLI is `mlm` (`mlm.py`). See [docs/MIGRATION-TO-MCP-LIGHT-MEMORY.md](docs/MIGRATION-TO-MCP-LIGHT-MEMORY.md).
+### Install + register in one command
 
-## What's new in 1.7.0 (rebrand to MCP Light Memory)
-
-- **Total rebrand** from `internal-rag` to **MCP Light Memory** (`mcp-light-memory`). New product name, new CLI alias `mlm` (`mlm.py`), updated MCP server display name (`mcp-light-memory`), updated router display name (`mcp-light-memory-router`), refreshed README/docs/examples, new logo/icon assets (`docs/assets/`), branding note (`docs/BRANDING.md`), GitHub rebrand checklist (`docs/GITHUB-REBRAND-CHECKLIST.md`), and a dedicated migration document (`docs/MIGRATION-TO-MCP-LIGHT-MEMORY.md`).
-- **Backward compatibility preserved**: the `irag.py` module filename, the `INTERNAL_RAG/` storage folder, and old MCP server names continue to work as deprecated aliases. No data migration required. Existing installs, scripts, and stored memories are unaffected.
-- **New CLI shim `mlm.py`** — primary entrypoint that forwards to the canonical `irag.py` core. `irag.py` remains a supported legacy alias.
-- **New router examples**: `examples/warp-router.example.json`, `examples/opencode-v2-router.example.jsonc`, `examples/jetbrains-router.example.json` for the multi-project router under the new name.
-- **Tests extended** with a rebrand consistency suite (`tests/test_rebrand.py`) validating: `mlm.py` shim forwards correctly, MCP `serverInfo.name` is `mcp-light-memory` / `mcp-light-memory-router`, examples use the new server names, docs reference `MCP Light Memory`, legacy aliases still work.
-
-## What's new in 1.6.1 (post-v1.6 hardening)
-
-- **Memory mutation/lifecycle benchmark**: `tests/memory_mutation_benchmark.py` — deterministic, zero-dependency, 11 scenarios covering write/update/supersede/temporal/archive/export-import/index-rebuild/duplicate-protection. Asserts invariants: superseded memory not current truth, history never deleted, archived/invalid do not leak, export/import preserves lifecycle metadata, index deletion does not change durable semantics. `--smoke` canary for CI.
-- **Trust boundary for retrieved memory (ADR-015)**: every retrieved memory is wrapped as `trust: untrusted` evidence. The `context` packet prints a `SECURITY NOTICE` header and delimits each memory with `=== BEGIN/END INTERNAL_RAG MEMORY ===`. Structured JSON / MCP `structuredContent` carries `"trust": "untrusted"`. An optional deterministic regex heuristic exposes `security_flags: ["instruction_like_content"]` for high-signal injection-like phrases (`SYSTEM:`, `ignore previous instructions`, `you are now`, …). WARNING only — never blocks, rewrites, or removes the original text; absence of the flag does NOT mean trusted. Adversarial tests in `tests/test_trust_boundary.py`.
-- **Evidence freshness (ADR-016)**: retrieval/context exposes `evidence_state` (`present`/`missing`/`unverifiable`) for local path-like evidence. Derived at retrieval time, never persisted, no schema migration, no ranking change. Path-traversal-safe; symlinks tested.
-- **Scale benchmark**: `tests/scale_benchmark.py` — synthetic corpora of 100 / 1,000 / 10,000 memories; measures index build, incremental update, pure-Python BM25, FTS5 path, hybrid (when embeddings available), context generation, DB size, p50/p95. `--smoke` skips the 10k case in CI.
-- **MCP/router security regression suite**: extended `tests/test_mcp_router.py` — unknown/malformed project ids, missing root, root without INTERNAL_RAG, `write: "false"`/`0`/`1`, cross-project search/write isolation, path traversal, symlinked roots, malformed MCP args, modern + legacy protocol behavior after errors.
-- **Docs consistency test**: `tests/test_docs_consistency.py` — validates documented project version, MCP protocol version sets, JSON examples parse, JSONC examples validate, example filenames referenced by docs exist. Canonical `SUPPORTED_VERSIONS` constant in `irag_mcp_protocol.py` is the single source of truth.
-- **Docs drift fix**: `ARCHITECTURE.md`, `MEMORY-LIFECYCLE.md`, `CONFIG.md`, `MCP-MULTI-PROJECT.md`, `FILE-MAP.md` bumped to v1.6.x; MCP protocol-version lists aligned with the canonical constant; `CLI.md`/`README.md` document the new `trust`/`security_flags`/`evidence_state` fields.
-- **ADR-015** (trust boundary) and **ADR-016** (evidence freshness) added.
-- 249 tests pass (was 187); 0 required runtime dependencies; no retrieval-quality regression.
-
-## What's new in 1.6.0
-
-- **Memory-quality benchmark**: `tests/memory_quality_benchmark.py` — deterministic, zero-dependency, 37 cases over a realistic coding-memory fixture corpus (identifiers, paths, paraphrase, PL/EN/mixed, superseded, temporal, contradictions, failures, abstention). Reports Recall@1/3/5, MRR, abstention P/R/F1, temporal accuracy, leakage, latency, tokens. `--smoke` canary for CI.
-- **Memory mutation/lifecycle benchmark**: `tests/memory_mutation_benchmark.py` — deterministic, zero-dependency, 11 scenarios covering write/update/supersede/temporal/archive/export-import/index-rebuild/duplicate-protection. Asserts invariants: superseded memory not current truth, history never deleted, archived/invalid do not leak, export/import preserves lifecycle metadata, index deletion does not change durable semantics. `--smoke` canary for CI.
-- **Trust boundary for retrieved memory (ADR-015)**: every retrieved memory is wrapped as `trust: untrusted` evidence. The `context` packet prints a `SECURITY NOTICE` header and delimits each memory with `=== BEGIN/END INTERNAL_RAG MEMORY ===`. Structured JSON / MCP `structuredContent` carries `"trust": "untrusted"`. An optional deterministic regex heuristic exposes `security_flags: ["instruction_like_content"]` for high-signal injection-like phrases (`SYSTEM:`, `ignore previous instructions`, `you are now`, …). WARNING only — never blocks, rewrites, or removes the original text; absence of the flag does NOT mean trusted. Adversarial tests in `tests/test_trust_boundary.py`.
-- **Evidence freshness (ADR-016)**: retrieval/context exposes `evidence_state` (`present`/`missing`/`unverifiable`) for local path-like evidence. Derived at retrieval time, never persisted, no schema migration, no ranking change. Path-traversal-safe; symlinks tested.
-- **Scale benchmark**: `tests/scale_benchmark.py` — synthetic corpora of 100 / 1,000 / 10,000 memories; measures index build, incremental update, pure-Python BM25, FTS5 path, hybrid (when embeddings available), context generation, DB size, p50/p95. `--smoke` skips the 10k case in CI.
-- **MCP/router security regression suite**: extended `tests/test_mcp_router.py` — unknown/malformed project ids, missing root, root without INTERNAL_RAG, `write: "false"`/`0`/`1`, cross-project search/write isolation, path traversal, symlinked roots, malformed MCP args, modern + legacy protocol behavior after errors.
-- **Docs consistency test**: `tests/test_docs_consistency.py` — validates documented project version, MCP protocol version sets, JSON examples parse, JSONC examples validate, example filenames referenced by docs exist. Canonical `SUPPORTED_VERSIONS` constant in `irag_mcp_protocol.py` is the single source of truth.
-- **MCP 2026-07-28 (dual-era)**: `server/discover` (no `initialize` required), per-request `_meta`, `resultType`, `structuredContent`, `outputSchema`, `ttlMs`/`cacheScope`. Legacy lifecycle unchanged. Shared `irag_mcp_protocol.py`.
-- **Better MCP schema**: precise `inputSchema` (types, enums, `required`, `minimum`, `additionalProperties: false`), tool `annotations` (`openWorldHint: false`), `outputSchema`+`structuredContent` for search/status/tasks/projects/guard. MCP `search` accepts `at` + `explain`.
-- **Registry strict `write`**: must be a JSON boolean — `"false"`/`0`/`1` rejected.
-- **Sources in chunk prefix**: file paths and symbol names in `sources`/`evidence` are searchable via the sparse channel (bounded, deterministic chunk IDs).
-- **Adaptive retrieval** (`mode: adaptive`, opt-in): sparse first, dense only if weak — benchmark-gated, not default.
-- **Bounded link-aware context**: `context` expands 1-hop over `links`/`supersedes`/`derived_from`/`superseded_by` (budget-capped, provenance, archived isolation, cycle guard).
-- **`consolidate --prepare`**: deterministic JSON segment packet (no LLM, no auto-write).
-- **Router latency benchmark**: ~64ms overhead → no persistent child pool (ADR-014).
-- **Client docs**: `docs/MCP.md` rewritten + `examples/` for Warp, OpenCode V2/legacy, JetBrains, router.
-- **ADR-010…016** for the architectural decisions.
-- `confidence_kind: "heuristic"` labels abstention confidence honestly.
-
-## What's new in 1.5.0
-
-- **Relevance / abstention gate**: retrieval separates raw evidence from policy ranking. `search --json --meta` wraps results with `abstained`, `retrieval_confidence` (0–1), `reason`, `admitted`, `rejected`, `rejected_detail` — the agent can detect "no usable answer" instead of trusting a low-relevance hit. Plain `--json` stays a bare list (backward compatible).
-- **FTS5 candidate prefilter** (`retrieval.fts_prefilter.*`): optional accelerator — FTS5 top-n ∪ Python BM25 top-k narrows the scoring pool without changing the ranking and never drops a hit the full scan returns. Automatic fallback (stale/missing index, tiny corpus, FTS5 unavailable) keeps zero-dependency behavior.
-- **Multi-project MCP router** (`irag_mcp_router.py`): one MCP server in front of many projects — registry allowlist, `write:false` blocks mutating tools, per-call subprocess isolation, `projects` tool. Zero required dependencies. See [docs/MCP-MULTI-PROJECT.md](docs/MCP-MULTI-PROJECT.md).
-- **MCP protocol hardening**: pure-stdout JSON-RPC 2.0, `initialize` version negotiation (`2025-11-25` / `2025-06-18` / `2025-03-26` / `2024-11-05`), `ping`, deterministic `tools/list`; verified against the official `mcp` Python SDK client.
-- **Config correctness**: recursive `deep_merge` (overriding one leaf never drops sibling defaults), deeper YAML-subset parser (block lists), `config --validate` covers `abstention` + `fts_prefilter`.
-- **CI**: `.github/workflows/ci.yml` — tests matrix (Ubuntu py3.8 / py3.12, Windows py3.12): compile gate, `self_test.py`, full `unittest` suite, retrieval benchmarks; separate `mcp-compat` job with the official `mcp` SDK in its own venv.
-- **Regression tests** (168 total): fingerprint cache (tracked-change detection despite cache), admission gate, MCP server protocol/stdout-purity, config deep-merge, MCP SDK handshake.
-- **ADR**: [docs/ADR.md](docs/ADR.md) records the key architectural decisions (why no vector DB / background daemon / mandatory SDK).
-
-## What's new in 1.4.0
-
-- **Section-aware chunking**: memories split by Markdown headings; chunk-level retrieval with parent merge + MMR (`retrieval.chunking.*`, schema v3).
-- **Read-only search**: usage tracking lives in the SQLite usage store; `migrate-usage` with backups; rebuilds preserve usage.
-- **SimHash dedup**: exact (SHA-256) + near (64-bit SimHash, stdlib); conflict detection kept separate; `remember --json` duplicate/conflict shape.
-- **Multilingual PL/EN profile**: `retrieval.profile: english-fast | multilingual` (intfloat/multilingual-e5-small, `query:`/`passage:` prefixes); cache keys include model identity; benchmark-justified PL stopword list.
-- **Temporal knowledge lifecycle**: optional `confidence`/`valid_from`/`valid_to`/`supersedes`/`derived_from` (schema-1 compatible); `supersede` links both directions without deleting history; `search --at YYYY-MM-DD`; `timeline` by effective validity; `context` HISTORY & CONFLICTS section.
-- **`consolidate --dry-run --json`**: deterministic read-only report (duplicates, superseded, archived, never-accessed old, old snapshots, conflicting active) + `plan` for the agent; no deletion, no LLM summarization.
-
-## What's new in 1.3.0
-
-- **Persistent embedding cache** in SQLite (schema v2): chunk-level float32 BLOBs, multiple models coexist, `index --vacuum`/`--embed-missing`.
-
-## What's new in 1.0.2
-
-- **Token budget enforcement**: `context` cuts memories to fit `context_budget` (sorted by score).
-- **Stale memory detection**: `validate` warns when evidence paths no longer exist.
-- **Duplicate detection**: `remember` blocks duplicates (use `--force` to override).
-- **Privacy scan at write-time**: `remember` refuses secrets (use `--allow-secret` to bypass).
-- **Auto-checkpoint timer**: `guard`/`context` warn if checkpoint is too old (`max_age_minutes`).
-- **Recent commits in context**: `context` shows last 5 git commits for recovery.
-- **Offline / air-gapped**: `pack.py` creates self-contained ZIP with wheels + model.
-
-- Full English documentation.
-- `search --json` now returns `matched_tokens`.
-- `remember --links` stored in frontmatter.
-- MCP server handles `notifications/initialized` and `shutdown`.
-- `compact` preserves sections (trims long lists, not the structure).
-- `privacy_check.py` now audits `.irag.yml`.
-- `requirements-optional.txt` for embeddings.
-- `--quiet` / `--verbose` global flags.
-- `history` command (checkpoint history).
-- `forget-task <id>` (drop a specific task, not just clear-all).
-- `resume` updates WORKING_STATE sections.
-- `config --init` generates a `.irag.yml` template.
-- `--embeddings on|off|auto` CLI override.
-- `show --section <name>` extracts a single section.
-- Schema versioning in `.checkpoint.json` / `.tasks.json`.
-- `.gitignore` covers `.tasks.json`, `.fpcache.json`, `exports/`.
-- New docs: `docs/CLI.md`, `docs/GIT-HOOKS.md`.
-- README badges.
-- Extended `self_test.py` (CRUD, MCP, hooks).
-
-## What's new in 1.0.0
-
-- **BM25 + MMR retrieval** with optional embeddings (zero-dep fallback).
-- **Full memory CRUD**: `show`, `update`, `supersede`, `forget`, `link`, `status`, `diff`, `timeline`.
-- **Task stack**: `push` / `tasks` / `resume` / `forget-task` for interrupts.
-- **Compaction**: `compact` before context compaction.
-- **MCP server**: `irag.py mcp` (JSON-RPC stdio) for Claude Code / Cursor.
-- **Git hooks** (optional): auto-checkpoint after commit, pre-push warning.
-- **Diagnostics**: `doctor`, `embeddings-info`, `config`.
-- **Memory transfer**: `export` / `import` (JSON).
-- **Token budget**: token estimation in `context`.
-- **`--json`** for all structured commands.
-
-## Quick start
-
-### One-command install + client registration (recommended)
-
-Clone this repo once, then install into any project and auto-register the MCP
-server in your client:
+Clone this repo once, then install into any project:
 
 ```powershell
 # Windows (PowerShell)
 git clone https://github.com/PeterPirog/mcp-light-memory.git ~/mcp-light-memory
-python ~/mcp-light-memory/install.py . --client warp          # project-local config
-# or --global for ~/.warp/.mcp.json; or --client opencode / --client jetbrains
+python ~/mcp-light-memory/install.py . --client warp
 ```
 
 ```bash
@@ -173,55 +80,289 @@ python3 ~/mcp-light-memory/install.py . --client warp
 The installer:
 - copies skill files + creates `INTERNAL_RAG/` + `AGENTS.md`
 - runs `init` + `checkpoint` + `validate` (so `guard` is `OK` immediately)
-- **auto-registers** the MCP server in the correct client config file
-- writes the **absolute path** to the Python interpreter (survives Windows PATH issues)
+- auto-registers the MCP server in the client config (or prints manual instructions for JetBrains)
+- writes the **absolute path** to the verified Python interpreter (survives Windows PATH issues)
 
-Restart Warp/OpenCode/PyCharm, then:
-
-```powershell
-python .agents\skills\internal-rag\mlm.py context --task "current task"
-```
-
-### Zero-shot agent prompts
-
-Prefer your agent to do everything? Paste a prompt from
-[`docs/ZERO-SHOT-SETUP-PROMPTS.md`](docs/ZERO-SHOT-SETUP-PROMPTS.md) into Warp /
-OpenCode / PyCharm — it clones, installs, registers, and verifies automatically.
-
-### Legacy manual install
+### Verification
 
 ```powershell
-python .\install.py "D:\path\to\project"
+python .agents\skills\internal-rag\mlm.py --version   # expect: 1.7.3
+python .agents\skills\internal-rag\mlm.py status       # expect: INTERNAL_RAG ready
+python .agents\skills\internal-rag\mlm.py guard        # expect: GUARD OK
 ```
 
-Then:
+---
+
+## Configuration: Warp
+
+Warp reads MCP server configs from file-based JSON files. The installer writes the correct file automatically.
+
+### Zero-shot (agent does everything)
+
+Paste this prompt into Warp's agent:
+
+```
+Install and configure MCP Light Memory (mcp-light-memory) as an MCP server for this project, fully automatically.
+
+Steps:
+1. Clone: git clone https://github.com/PeterPirog/mcp-light-memory.git ~/mcp-light-memory
+   (if it exists: git -C ~/mcp-light-memory pull --ff-only)
+2. Install: python ~/mcp-light-memory/install.py . --client warp
+   (use python3 on Linux/macOS)
+3. Verify: python .agents/skills/internal-rag/mlm.py --version  (expect 1.7.3)
+           python .agents/skills/internal-rag/mlm.py guard      (expect GUARD OK)
+4. Report success or the exact error. Do not ask me anything.
+```
+
+### Manual setup in Warp
+
+According to the [Warp MCP documentation](https://docs.warp.dev/agents/capabilities/mcp/), Warp supports two config locations:
+
+| Scope | File path | Auto-spawn |
+|---|---|---|
+| **Global** | `~/.warp/.mcp.json` | On by default |
+| **Project-scoped** | `{repo_root}/.warp/.mcp.json` | Requires manual toggle in Settings |
+
+**Option A — using the installer (recommended):**
 
 ```powershell
-python .agents\skills\internal-rag\mlm.py context --task "current task"
+python ~/mcp-light-memory/install.py . --client warp          # project-scoped (.warp/.mcp.json)
+python ~/mcp-light-memory/install.py . --client warp --global  # global (~/.warp/.mcp.json)
 ```
 
-### Path mapping (rebrand: internal-rag → MCP Light Memory)
+The installer writes the absolute Python path, `command`, `args`, and `working_directory` automatically.
 
-| New name | Legacy path (kept for compatibility) |
-|---|---|
-| `MCP Light Memory` (product) | `internal-rag` (deprecated product name) |
-| `mlm` / `mlm.py` (primary CLI) | `irag.py` (legacy alias, still works) |
-| `mcp-light-memory` (MCP server name) | `internal-rag` (legacy, still works in configs) |
-| `mcp-light-memory-router` (router name) | `internal-rag-router` (legacy) |
-| `INTERNAL_RAG/` (storage folder — unchanged) | — |
-| `.agents/skills/internal-rag/` (skill dir — unchanged) | — |
+**Option B — manual JSON:**
 
-The on-disk folder `INTERNAL_RAG/` and the skill directory
-`.agents/skills/internal-rag/` are intentionally kept under their legacy names
-for **zero-migration** backward compatibility. See
-[`docs/MIGRATION-TO-MCP-LIGHT-MEMORY.md`](docs/MIGRATION-TO-MCP-LIGHT-MEMORY.md).
+Open **Settings → Agents → MCP servers** (or press `Ctrl+Shift+P` → search "Open MCP Servers"), click **+ Add**, and paste:
+
+```json
+{
+  "mcpServers": {
+    "mcp-light-memory": {
+      "command": "C:\\Python312\\python.exe",
+      "args": ["C:\\path\\to\\project\\.agents\\skills\\internal-rag\\mlm.py", "mcp"],
+      "working_directory": "C:\\path\\to\\project"
+    }
+  }
+}
+```
+
+> **Important:** Always set `working_directory` explicitly (per [Warp docs](https://docs.warp.dev/agents/capabilities/mcp/)) — the server resolves the memory store root from it. Use the absolute path to your real Python (not the WindowsApps stub).
+
+On Linux/macOS:
+
+```json
+{
+  "mcpServers": {
+    "mcp-light-memory": {
+      "command": "python3",
+      "args": ["/path/to/project/.agents/skills/internal-rag/mlm.py", "mcp"],
+      "working_directory": "/path/to/project"
+    }
+  }
+}
+```
+
+After adding, Warp auto-spawns global servers. Project-scoped servers require a manual toggle in **Settings → Agents → MCP servers**. The server should show a green status. MCP logs: `Help → Show Log in Explorer → mcp/` folder.
+
+**To unregister:**
+
+```powershell
+python ~/mcp-light-memory/install.py . --client warp --unregister
+```
+
+---
+
+## Configuration: OpenCode
+
+OpenCode reads MCP server configs from `opencode.json` (or `.jsonc`) in the project root, or `~/.config/opencode/opencode.json` globally. See the [OpenCode MCP docs](https://opencode.ai/docs/mcp-servers/).
+
+### Zero-shot (agent does everything)
+
+Paste this prompt into OpenCode:
+
+```
+Install and configure MCP Light Memory (mcp-light-memory) as an MCP server for this project, fully automatically.
+
+Steps:
+1. Clone: git clone https://github.com/PeterPirog/mcp-light-memory.git ~/mcp-light-memory
+   (if it exists: git -C ~/mcp-light-memory pull --ff-only)
+2. Install: python ~/mcp-light-memory/install.py . --client opencode
+   (use python3 on Linux/macOS)
+3. Verify: python .agents/skills/internal-rag/mlm.py --version  (expect 1.7.3)
+           python .agents/skills/internal-rag/mlm.py guard      (expect GUARD OK)
+4. Report success or the exact error. Do not ask me anything.
+```
+
+### Manual setup in OpenCode
+
+**Option A — using the installer (recommended):**
+
+```powershell
+python ~/mcp-light-memory/install.py . --client opencode
+```
+
+This writes `opencode.json` in the project root with the `mcp.servers` shape.
+
+**Option B — manual JSON:**
+
+Create or edit `opencode.json` (or `opencode.jsonc`) in your project root:
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "servers": {
+      "mcp-light-memory": {
+        "type": "local",
+        "command": ["C:\\Python312\\python.exe", "C:\\path\\to\\project\\.agents\\skills\\internal-rag\\mlm.py", "mcp"],
+        "cwd": "C:\\path\\to\\project",
+        "enabled": true
+      }
+    }
+  }
+}
+```
+
+On Linux/macOS:
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "servers": {
+      "mcp-light-memory": {
+        "type": "local",
+        "command": ["python3", "/path/to/project/.agents/skills/internal-rag/mlm.py", "mcp"],
+        "cwd": "/path/to/project",
+        "enabled": true
+      }
+    }
+  }
+}
+```
+
+Per the [OpenCode config docs](https://opencode.ai/docs/config/), the `command` field is an array of `[executable, ...args]`, `cwd` sets the working directory, and `enabled` controls whether the server starts on launch. Config files are merged (global + project).
+
+**To unregister:**
+
+```powershell
+python ~/mcp-light-memory/install.py . --client opencode --unregister
+```
+
+---
+
+## Configuration: JetBrains AI Assistant / PyCharm
+
+PyCharm does **NOT** auto-read any MCP config file from disk. MCP servers are managed exclusively through the IDE UI. The installer prints ready-to-paste instructions instead of writing a file.
+
+### Zero-shot (agent does everything)
+
+Paste this prompt into PyCharm's AI Assistant chat:
+
+```
+Install and configure MCP Light Memory (mcp-light-memory) as an MCP server for this project, fully automatically.
+
+Steps:
+1. Clone: git clone https://github.com/PeterPirog/mcp-light-memory.git ~/mcp-light-memory
+   (if it exists: git -C ~/mcp-light-memory pull --ff-only)
+2. Install: python ~/mcp-light-memory/install.py . --client jetbrains --global
+   (use python3 on Linux/macOS)
+   The installer will print a JSON block + Working Directory to paste into the IDE.
+3. In PyCharm: Settings (Ctrl+Alt+S) → Tools → AI Assistant → MCP → Add → STDIO
+   Paste the JSON from step 2. Set Working Directory to the project path.
+   Set Server level = Global or Project. OK → Apply.
+4. Verify: python .agents/skills/internal-rag/mlm.py --version  (expect 1.7.3)
+           python .agents/skills/internal-rag/mlm.py guard      (expect GUARD OK)
+5. Report success or the exact error. Do not ask me anything.
+```
+
+### Manual setup in PyCharm
+
+According to the [JetBrains AI Assistant MCP documentation](https://www.jetbrains.com/help/ai-assistant/mcp.html):
+
+1. Go to **Settings** (`Ctrl+Alt+S`) → **Tools** → **AI Assistant** → **Model Context Protocol (MCP)**.
+2. Click **+ Add**.
+3. Select **STDIO** as the connection type.
+4. Paste this JSON configuration:
+
+```json
+{
+  "mcpServers": {
+    "mcp-light-memory": {
+      "command": "C:\\Python312\\python.exe",
+      "args": ["C:\\path\\to\\project\\.agents\\skills\\internal-rag\\mlm.py", "mcp"]
+    }
+  }
+}
+```
+
+On Linux/macOS:
+
+```json
+{
+  "mcpServers": {
+    "mcp-light-memory": {
+      "command": "python3",
+      "args": ["/path/to/project/.agents/skills/internal-rag/mlm.py", "mcp"]
+    }
+  }
+}
+```
+
+5. **Working directory** (in the same dialog): set to your project root (e.g. `C:\path\to\project`). **This is critical** — without it, the memory store will be created in the IDE's default cwd, not your project.
+6. **Server level**: Global (all projects) or Project (current only).
+7. Click **OK → Apply**. The server should start — green status = connected. If not, click **Reconnect** in the Status column.
+8. To verify tools: click the icon in the Status column to see available tools (`context`, `search`, `remember`, `guard`, etc.).
+
+**MCP logs**: `Help → Show Log in Explorer` → open the `mcp/` folder.
+
+> **Note:** PyCharm also supports importing from Claude Desktop (Settings → MCP → Import from Claude). If you already have the server configured there, you can reuse it.
+
+**To remove**: go to **Settings → Tools → AI Assistant → MCP** and remove the server from the list.
+
+---
+
+## Multi-project router
+
+One MCP connection in front of many projects — registry allowlist, `write:false` hard boundary, per-call subprocess isolation.
+
+### Registry file (`projects.json`)
+
+```json
+{
+  "projects": {
+    "backend": { "root": "/abs/path/backend", "write": true },
+    "shared-lib": { "root": "/abs/path/shared-lib", "write": false }
+  }
+}
+```
+
+### Warp config for the router
+
+```json
+{
+  "mcpServers": {
+    "mcp-light-memory-router": {
+      "command": "python3",
+      "args": ["/abs/path/mcp-light-memory/.agents/skills/internal-rag/irag_mcp_router.py", "--registry", "/abs/path/projects.json"],
+      "working_directory": "/abs/path/mcp-light-memory"
+    }
+  }
+}
+```
+
+See [docs/MCP-MULTI-PROJECT.md](docs/MCP-MULTI-PROJECT.md) for details.
+
+---
 
 ## Workflow
 
 ```text
-context
+context --task "current task"
   ↓
-recovery, if required
+recovery, if required (RECOVERY REQUIRED)
   ↓
 checkpoint before first change
   ↓
@@ -232,20 +373,33 @@ checkpoint after each milestone
 guard before finishing
 ```
 
-Core commands:
+Core commands (CLI alias: `mlm.py` or legacy `irag.py`):
 
 ```text
-irag.py context --task "..."
-irag.py checkpoint --reason "..."
-irag.py search --query "..." --limit 8
-irag.py remember --type decision --title "..." --body "..."
-irag.py show <ref>
-irag.py update <ref> --status superseded
-irag.py status
-irag.py guard
-irag.py validate
-irag.py doctor
+mlm.py context --task "..."
+mlm.py checkpoint --reason "..."
+mlm.py search --query "..." --limit 8
+mlm.py remember --type decision --title "..." --body "..."
+mlm.py show <ref>
+mlm.py update <ref> --status superseded
+mlm.py status
+mlm.py guard
+mlm.py validate
+mlm.py doctor
 ```
+
+## Path mapping (rebrand: internal-rag → MCP Light Memory)
+
+| New name | Legacy path (kept for compatibility) |
+|---|---|
+| `MCP Light Memory` (product) | `internal-rag` (deprecated product name) |
+| `mlm` / `mlm.py` (primary CLI) | `irag.py` (legacy alias, still works) |
+| `mcp-light-memory` (MCP server name) | `internal-rag` (legacy, still works in configs) |
+| `mcp-light-memory-router` (router name) | `internal-rag-router` (legacy) |
+| `INTERNAL_RAG/` (storage folder — unchanged) | — |
+| `.agents/skills/internal-rag/` (skill dir — unchanged) | — |
+
+The on-disk folder `INTERNAL_RAG/` and the skill directory `.agents/skills/internal-rag/` are intentionally kept under their legacy names for **zero-migration** backward compatibility. See [docs/MIGRATION-TO-MCP-LIGHT-MEMORY.md](docs/MIGRATION-TO-MCP-LIGHT-MEMORY.md).
 
 ## Durable memory (CRUD)
 
@@ -267,38 +421,12 @@ Types: `decision`, `knowledge`, `constraint`, `gotcha`, `failure`, `hypothesis`,
 ## Task stack (interrupts)
 
 ```text
-irag.py push --task "interrupted work" --reason "user-priority"
-irag.py tasks
-irag.py resume
-irag.py forget-task <id>   # drop a specific task
-irag.py forget-task         # clear the whole stack
+mlm.py push --task "interrupted work" --reason "user-priority"
+mlm.py tasks
+mlm.py resume
+mlm.py forget-task <id>   # drop a specific task
+mlm.py forget-task         # clear the whole stack
 ```
-
-## MCP server (Claude Code / Cursor)
-
-```bash
-python3 .agents/skills/internal-rag/irag.py mcp
-```
-
-Minimal JSON-RPC stdio: `context`, `search`, `checkpoint`, `guard`, `remember`, `status`, `tasks`, `resume`.
-
-**Multi-project router (v1.5.0):**
-
-```bash
-python3 .agents/skills/internal-rag/irag_mcp_router.py --registry projects.json
-```
-
-One MCP connection in front of many projects — registry allowlist, `write:false` blocks mutating tools, per-call isolation. See [docs/MCP-MULTI-PROJECT.md](docs/MCP-MULTI-PROJECT.md).
-
-## Git hooks (optional, auto-checkpoint)
-
-```bash
-python3 .agents/skills/internal-rag/irag_hooks.py install
-python3 .agents/skills/internal-rag/irag_hooks.py status
-python3 .agents/skills/internal-rag/irag_hooks.py uninstall
-```
-
-Hooks never block git operations.
 
 ## Configuration (`.irag.yml`, optional)
 
@@ -317,18 +445,7 @@ checkpoints:
   max_task_stack: 24
 ```
 
-`irag.py config` shows the effective configuration. `irag.py config --init` writes a template.
-
-## Diagnostics & transfer
-
-```text
-irag.py doctor
-irag.py embeddings-info
-irag.py export                  # -> INTERNAL_RAG/exports/
-irag.py import <file.json> --overwrite
-irag.py config
-irag.py history
-```
+`mlm.py config` shows the effective configuration. `mlm.py config --init` writes a template.
 
 ## Optional embeddings (better retrieval)
 
@@ -338,24 +455,17 @@ pip install -r requirements-optional.txt
 
 When the package is available and `.irag.yml` has `embeddings: auto` (default), retrieval uses embeddings with fallback to BM25. Override at runtime with `--embeddings on|off|auto`.
 
-Two retrieval profiles are supported (see `docs/EMBEDDINGS.md`):
-- `english-fast` (default, `all-MiniLM-L6-v2`) — unchanged for existing users.
-- `multilingual` (`intfloat/multilingual-e5-small`, `query:`/`passage:` prefixes) — the officially supported choice for Polish-English projects; not the default until your benchmark justifies it.
+Two retrieval profiles (see `docs/EMBEDDINGS.md`):
+- `english-fast` (default, `all-MiniLM-L6-v2`)
+- `multilingual` (`intfloat/multilingual-e5-small`) — for Polish-English projects
 
 ## Offline / air-gapped
 
-INTERNAL_RAG works fully offline (BM25 core, zero dependencies). For embeddings on air-gapped machines:
-
 ```bash
-# On a machine with internet (pick your profile):
 python pack.py --with-embeddings --profile english-fast
-# for a PL/EN project:
-python pack.py --with-embeddings --profile multilingual
-# -> internal-rag-offline-1.5.0.zip
-
+# -> mcp-light-memory-offline-1.7.3.zip
 # On the air-gapped machine:
-unzip internal-rag-offline-*.zip -d internal-rag-offline
-cd internal-rag-offline
+unzip mcp-light-memory-offline-*.zip -d mcp-light-memory-offline
 pip install --no-index --find-links wheels/ -r requirements-optional.txt
 python install.py "/path/to/project"
 ```
@@ -372,11 +482,7 @@ Before publishing a project:
 python .\privacy_check.py "D:\path\to\project"
 ```
 
-Expected result:
-
-```text
-RESULT: PASS
-```
+Expected: `RESULT: PASS`
 
 ## Full removal from a project
 
@@ -384,31 +490,17 @@ RESULT: PASS
 python .\uninstall.py "D:\path\to\project"
 ```
 
-The uninstaller creates a backup outside the repository, then removes INTERNAL_RAG and its integrations. To keep the memory, use `--keep-memory`.
+The uninstaller creates a backup outside the repository, then removes INTERNAL_RAG and its integrations. Use `--keep-memory` to preserve the memory data.
 
 ## Documentation
 
-- [Installation](docs/INSTALLATION.md)
-- [Daily usage](docs/DAILY-USAGE.md)
-- [CLI reference](docs/CLI.md)
-- [Architecture](docs/ARCHITECTURE.md)
-- [Memory lifecycle](docs/MEMORY-LIFECYCLE.md)
-- [Recovery](docs/RECOVERY.md)
-- [Warp](docs/WARP.md)
-- [OpenCode](docs/OPENCODE.md)
-- [MCP](docs/MCP.md)
-- [Multi-project MCP](docs/MCP-MULTI-PROJECT.md)
-- [Architecture decisions (ADR)](docs/ADR.md)
-- [Configuration](docs/CONFIG.md)
-- [Embeddings](docs/EMBEDDINGS.md)
-- [Offline / air-gapped](docs/OFFLINE.md)
-- [Git hooks](docs/GIT-HOOKS.md)
-- [Privacy & Git](docs/PRIVACY-AND-GIT.md)
-- [Uninstall](docs/UNINSTALL.md)
-- [Troubleshooting](docs/TROUBLESHOOTING.md)
-- [File map](docs/FILE-MAP.md)
-- [Compatibility](docs/COMPATIBILITY.md)
-- [GitHub publishing](docs/GITHUB-PUBLISHING.md)
+- [Installation](docs/INSTALLATION.md) · [Daily usage](docs/DAILY-USAGE.md) · [CLI reference](docs/CLI.md)
+- [Architecture](docs/ARCHITECTURE.md) · [Memory lifecycle](docs/MEMORY-LIFECYCLE.md) · [Recovery](docs/RECOVERY.md)
+- [MCP](docs/MCP.md) · [Multi-project MCP](docs/MCP-MULTI-PROJECT.md)
+- [Architecture decisions (ADR)](docs/ADR.md) · [Configuration](docs/CONFIG.md)
+- [Embeddings](docs/EMBEDDINGS.md) · [Offline](docs/OFFLINE.md) · [Git hooks](docs/GIT-HOOKS.md)
+- [Privacy & Git](docs/PRIVACY-AND-GIT.md) · [Uninstall](docs/UNINSTALL.md) · [Troubleshooting](docs/TROUBLESHOOTING.md)
+- [Zero-shot setup prompts](docs/ZERO-SHOT-SETUP-PROMPTS.md) · [Migration](docs/MIGRATION-TO-MCP-LIGHT-MEMORY.md) · [Branding](docs/BRANDING.md)
 
 ## Structure in a target project
 
@@ -420,39 +512,78 @@ project/
 │   ├── WORKING_STATE.md
 │   ├── INDEX.md
 │   ├── .checkpoint.json
-│   ├── .tasks.json
-│   ├── .fpcache.json
-│   ├── exports/
-│   ├── decisions/
-│   ├── knowledge/
-│   ├── gotchas/
-│   ├── failures/
-│   ├── hypotheses/
-│   ├── sessions/
-│   │   └── .snapshots/
-│   └── archive/
+│   ├── decisions/  knowledge/  gotchas/  failures/  hypotheses/  sessions/  archive/
+│   └── exports/
 ├── .agents/skills/internal-rag/
 │   ├── SKILL.md
-│   ├── irag.py
+│   ├── mlm.py                   # primary CLI (forwards to irag.py)
+│   ├── irag.py                  # core (legacy alias, still the canonical module)
 │   ├── irag_embeddings.py       # optional plugin
 │   └── irag_hooks.py            # optional git hooks
-└── .opencode/
-    ├── tools/
-    ├── commands/
-    └── plugins/
+└── .opencode/                   # OpenCode integration (optional)
 ```
 
 ## Source of truth
 
-1. current user instructions,
-2. current code/tests/configuration,
-3. specifications/ADRs,
-4. verified memory,
-5. session notes,
-6. hypotheses.
+1. current user instructions, 2. current code/tests/configuration, 3. specifications/ADRs, 4. verified memory, 5. session notes, 6. hypotheses.
 
 Memory can be stale. Code takes precedence.
 
 ## License
 
 MIT.
+
+---
+
+## Changelog
+
+### 1.7.3 — JetBrains manual setup
+
+- `--client jetbrains` no longer writes a fake config file (PyCharm ignores MCP config files). Prints ready-to-paste JSON + IDE menu instructions instead.
+- `--unregister --client jetbrains` prints a reminder to remove in the IDE UI.
+
+### 1.7.2 — JetBrains cwd + client-specific messages
+
+- JetBrains: writes `working_directory` as a hint + prints `WARNING` with exact path to set in `Settings → Tools → AI Assistant → MCP`.
+- Client-specific restart messages (Restart PyCharm / Restart Warp / Restart OpenCode).
+- `Memory store: <path>` printed in install output for immediate verification.
+
+### 1.7.1 — Windows Python stub fix
+
+- `detect_python()` rejects the WindowsApps 0-byte stub; prefers `py -0p`; verifies each candidate with `--version`.
+- Post-register verification: runs `--version` immediately after writing the config and reports `PASS`/`FAIL`.
+- `--unregister` deletes empty config files + parent dirs (fixes dead `.warp/.mcp.json` skeleton → `GUARD STALE`).
+
+### 1.7.0 — Rebrand to MCP Light Memory
+
+- Total rebrand from `internal-rag` to **MCP Light Memory** (`mcp-light-memory`). New CLI alias `mlm` (`mlm.py`). Logo/icon assets. Migration doc. GitHub rebrand checklist.
+- Backward-compatible: `irag.py`, `INTERNAL_RAG/`, old MCP server names preserved as deprecated aliases.
+- 18 rebrand consistency tests.
+
+### 1.6.1 — Post-v1.6 hardening
+
+- Mutation/lifecycle benchmark (11 scenarios). Trust boundary (ADR-015): `trust: untrusted` + `security_flags`. Evidence freshness (ADR-016): `evidence_state`. Scale benchmark (100/1k/10k). Router security regressions (+12 tests). Docs consistency test. 249 tests pass.
+
+### 1.6.0 — Retrieval quality + MCP 2026-07-28
+
+- Memory-quality benchmark (37 cases). MCP `2026-07-28` dual-era (`server/discover`, `_meta`, `structuredContent`, `outputSchema`). Registry strict `write`. Sources in chunk prefix. Adaptive retrieval. Link-aware context. `consolidate --prepare`. Router latency benchmark. ADR-010…016.
+
+### 1.5.0 — Abstention gate + multi-project router
+
+- Relevance/abstention gate (`--meta`). FTS5 candidate prefilter. Multi-project MCP router. MCP protocol hardening (pure stdout, SDK-verified). 168 tests.
+
+### 1.4.0 — Chunking + dedup + temporal lifecycle
+
+- Section-aware chunking (schema v3). SimHash dedup. Multilingual PL/EN profile. Temporal lifecycle (`valid_from`/`valid_to`/`supersedes`/`--at`). `consolidate --dry-run`.
+
+### 1.3.0 — Persistent embedding cache
+
+- Chunk-level float32 BLOBs in SQLite. Multiple models coexist. `index --vacuum`/`--embed-missing`.
+
+### 1.0.2 — Token budget + privacy
+
+- Token budget enforcement. Stale memory detection. Duplicate detection. Privacy scan at write-time. Auto-checkpoint timer. Offline/air-gapped pack.
+
+### 1.0.0 — Initial release
+
+- BM25 + MMR retrieval. Full memory CRUD. Task stack. MCP server (JSON-RPC stdio). Git hooks. Diagnostics. Export/import. Token budget.
