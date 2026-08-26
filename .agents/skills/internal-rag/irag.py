@@ -4470,11 +4470,15 @@ def _mcp_dispatch(name: str, args_d: Dict[str, Any]
 def mcp_server() -> int:
     """MCP stdio server (newline-delimited JSON-RPC 2.0).
 
-    Dual-era (CEL B):
+    Dual-era (MCP 2026-07-28 final + legacy):
+    - Modern (2026-07-28): stateless, self-describing per-request metadata in
+      `_meta["io.modelcontextprotocol/protocolVersion"]`. No `conn_version` needed.
+      `server/discover` (no initialize required), `resultType` mandatory,
+      `ttlMs`/`cacheScope` as top-level result fields, `serverInfo` in response
+      `_meta["io.modelcontextprotocol/serverInfo"]`, `outputSchema` in tool
+      definitions (not in tool/call results).
     - Legacy (2024-11-05 … 2025-11-25): initialize / notifications/initialized /
       tools/list / tools/call / ping / shutdown. Backward compatible.
-    - Modern (2026-07-28): server/discover (no initialize required), per-request
-      `_meta`, resultType envelopes, structuredContent, outputSchema, ttlMs/cacheScope.
 
     - stdout: ONLY protocol messages (guarantee).
     - stderr: logs and handler output.
@@ -4491,6 +4495,9 @@ def mcp_server() -> int:
     SUPPORTED = (getattr(_proto, "SUPPORTED_VERSIONS", None) or
                  ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"])
     MODERN = getattr(_proto, "MODERN_VERSION", "2026-07-28")
+    _META_PV = getattr(_proto, "META_PROTOCOL_VERSION", "io.modelcontextprotocol/protocolVersion")
+    _META_SI = getattr(_proto, "META_SERVER_INFO", "io.modelcontextprotocol/serverInfo")
+    _ERR_UNSUP = getattr(_proto, "ERR_UNSUPPORTED_PROTOCOL_VERSION", -32022)
     # Redirect any module-level print() leakage to stderr for the server lifetime
     real_stdout = sys.stdout
     sys.stdout = sys.stderr
@@ -4499,13 +4506,24 @@ def mcp_server() -> int:
         real_stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
         real_stdout.flush()
 
-    def _err(rid, code: int, message: str) -> None:
-        _send({"jsonrpc": "2.0", "id": rid, "error": {"code": code, "message": message}})
+    def _err(rid, code: int, message: str, data: Optional[Dict[str, Any]] = None) -> None:
+        err_obj: Dict[str, Any] = {"code": code, "message": message}
+        if data is not None:
+            err_obj["data"] = data
+        _send({"jsonrpc": "2.0", "id": rid, "error": err_obj})
+
+    def _is_modern_req(params: Dict[str, Any]) -> bool:
+        """Check if this is a modern (2026-07-28) request via per-request _meta."""
+        meta = params.get("_meta")
+        if not isinstance(meta, dict):
+            return False
+        pv = str(meta.get(_META_PV, ""))
+        return pv == MODERN
 
     server_version_legacy = "2025-11-25"
     initialized = False
-    # Track the negotiated protocol version for this connection.
-    conn_version = ""  # set by initialize or discover
+    # Legacy-only connection state (modern is stateless per-request)
+    conn_version = ""
 
     for line in sys.stdin:
         line = line.strip()
@@ -4520,46 +4538,59 @@ def mcp_server() -> int:
         rid = req.get("id")
         is_notification = rid is None and "id" not in req
         params = req.get("params", {}) or {}
-        is_modern_req = (conn_version == MODERN) or (method in ("server/discover",))
+        modern = _is_modern_req(params)
 
         # ---- Modern: server/discover (no initialize required) ----
         if method == "server/discover":
-            client_v = str(params.get("protocolVersion", ""))
+            # Read protocol version from _meta (not params.protocolVersion)
+            meta = params.get("_meta", {})
+            client_v = str(meta.get(_META_PV, ""))
+            # Validate requested version
+            if client_v and client_v not in SUPPORTED:
+                _err(rid, _ERR_UNSUP, f"Unsupported protocol version: {client_v}",
+                     {"supported": SUPPORTED, "requested": client_v})
+                continue
             if _proto:
-                negotiated = _proto.negotiate_version(client_v)
                 result = _proto.discover_result(
                     "mcp-light-memory", VERSION,
                     "MCP Light Memory - persistent project memory. "
                     "Use context before edits; checkpoint at milestones; guard before finishing.",
                     {"tools": {}})
             else:
-                negotiated = client_v if client_v in SUPPORTED else server_version_legacy
-                result = {"supportedVersions": SUPPORTED, "capabilities": {"tools": {}},
-                          "serverInfo": {"name": "mcp-light-memory", "version": VERSION},
-                          "instructions": "MCP Light Memory - persistent project memory."}
-            # Validate requested version: if client asks for a version we don't support, error.
-            if client_v and client_v not in SUPPORTED:
-                _err(rid, -32602, f"Unsupported protocol version: {client_v}. "
-                                  f"Supported: {', '.join(SUPPORTED)}")
-                continue
-            conn_version = negotiated
+                result = {
+                    "resultType": "complete",
+                    "supportedVersions": SUPPORTED,
+                    "capabilities": {"tools": {}},
+                    "instructions": "MCP Light Memory - persistent project memory.",
+                    "_meta": {_META_SI: {"name": "mcp-light-memory", "version": VERSION}},
+                    "ttlMs": 300000,
+                    "cacheScope": "public",
+                }
             _send({"jsonrpc": "2.0", "id": rid, "result": result})
             continue
 
         if method == "initialize":
+            # Legacy initialize handshake
             client_v = str(params.get("protocolVersion", ""))
             if _proto:
                 negotiated = _proto.negotiate_version(client_v)
             else:
                 negotiated = client_v if client_v in SUPPORTED else server_version_legacy
             conn_version = negotiated
-            _send({"jsonrpc": "2.0", "id": rid, "result": {
-                "protocolVersion": negotiated,
-                "serverInfo": {"name": "mcp-light-memory", "version": VERSION},
-                "capabilities": {"tools": {}},
-                "instructions": "INTERNAL_RAG persistent project memory. "
-                               "Use context before edits; checkpoint at milestones; guard before finishing.",
-            }})
+            if _proto:
+                result = _proto.legacy_initialize_result(
+                    "mcp-light-memory", VERSION,
+                    "MCP Light Memory - persistent project memory. "
+                    "Use context before edits; checkpoint at milestones; guard before finishing.",
+                    negotiated)
+            else:
+                result = {
+                    "protocolVersion": negotiated,
+                    "serverInfo": {"name": "mcp-light-memory", "version": VERSION},
+                    "capabilities": {"tools": {}},
+                    "instructions": "MCP Light Memory - persistent project memory.",
+                }
+            _send({"jsonrpc": "2.0", "id": rid, "result": result})
             initialized = False
             continue
         if method == "notifications/initialized":
@@ -4573,7 +4604,12 @@ def mcp_server() -> int:
             if _proto:
                 result = _proto.tools_list_result(MCP_TOOLS)
             else:
-                result = {"tools": sorted(MCP_TOOLS, key=lambda t: t.get("name", ""))}
+                result = {
+                    "resultType": "complete",
+                    "tools": sorted(MCP_TOOLS, key=lambda t: t.get("name", "")),
+                    "ttlMs": 60000,
+                    "cacheScope": "public",
+                }
             _send({"jsonrpc": "2.0", "id": rid, "result": result})
             continue
         if method == "tools/call":
@@ -4582,16 +4618,20 @@ def mcp_server() -> int:
             if not isinstance(args_d, dict):
                 _err(rid, -32602, "invalid arguments")
                 continue
-            text, is_error, structured, schema = _mcp_dispatch(str(name), args_d)
+            text, is_error, structured, _schema = _mcp_dispatch(str(name), args_d)
+            # Per MCP 2026-07-28: outputSchema is in the tool definition,
+            # NOT in the tool/call result. The _schema return from dispatch
+            # is ignored for the result envelope.
             if _proto:
-                result = _proto.tool_call_result(text, is_error, structured, schema)
+                result = _proto.tool_call_result(text, is_error, structured)
             else:
-                result = {"content": [{"type": "text", "text": text}], "isError": bool(is_error)}
+                result = {
+                    "resultType": "complete",
+                    "content": [{"type": "text", "text": text}],
+                    "isError": bool(is_error),
+                }
                 if structured is not None:
                     result["structuredContent"] = structured
-                if schema is not None:
-                    result["outputSchema"] = schema
-                result["resultType"] = "complete"
             _send({"jsonrpc": "2.0", "id": rid, "result": result})
             continue
         if method == "shutdown":

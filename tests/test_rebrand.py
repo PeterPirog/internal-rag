@@ -126,7 +126,7 @@ class TestMcpServerName(unittest.TestCase):
         stdout = _run_stdio([sys.executable, str(IRAG_PATH), "mcp"], lines, self.tmp)
         objs = _objs(stdout)
         d = next(o for o in objs if o.get("id") == 1)
-        self.assertEqual(d["result"]["serverInfo"]["name"], "mcp-light-memory")
+        self.assertEqual(d["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"], "mcp-light-memory")
 
 
 class TestRouterServerName(unittest.TestCase):

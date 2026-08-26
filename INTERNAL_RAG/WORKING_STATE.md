@@ -1,6 +1,6 @@
 # Current Working State
 
-updated: 2026-08-25T13:59:26+02:00
+updated: 2026-08-26T08:50:13+02:00
 branch: main
 base_commit: 579b0dd
 
@@ -10,7 +10,7 @@ v1.5.0: abstention gate + FTS5 prefilter + multi-project MCP router + CI/docs
 
 ## Current request
 
-v1.6.0: CEL A-L memory quality benchmark, MCP 2026-07-28, schema, MCP search at/explain, registry strict, sources index key, adaptive retrieval, link-aware context, consolidate --prepare, router latency bench, MCP client docs, MCP tests
+MCP/OpenCode compatibility and ephemeral-memory lifecycle modernization
 
 ## Current phase
 
@@ -107,8 +107,8 @@ v1.6.0 complete
 
 ## Checkpoint health
 
-- CHECKPOINT CURRENT at save time.
-- Run `irag.py guard` before final response.
+- RECOVERY REQUIRED: project code differs from the last checkpoint.
+- Inspect `git status` and `git diff`, reconstruct state, checkpoint it, then run guard.
 
 ## Recovery snapshot
 
