@@ -344,29 +344,36 @@ def register_client(client: str, project: Path, global_cfg: bool,
                     server_name: str, script_rel: str, extra_args: list[str]):
     """Register the MCP server in the client's config file (merge, preserve existing).
 
-    For warp/opencode this writes a real config file that the client reads.
-    For jetbrains the config file is NOT auto-read by the IDE — PyCharm
-    manages MCP servers through Settings → Tools → AI Assistant → MCP in
-    the UI. So for jetbrains we print the ready-to-paste JSON block + the
-    exact menu path, and do NOT claim the server is "registered".
+    Config structures per client (verified against official docs 2026-08-26):
+      - warp: { "mcpServers": { <name>: { command, args, working_directory } } }
+      - opencode (stable V1): { "mcp": { <name>: { type, command, cwd, enabled } } }
+        — servers are directly under mcp.<name> (FLAT, no "servers" sub-key)
+        — uses "enabled": true/false
+      - opencode2 (beta V2): { "mcp": { "servers": { <name>: { type, command, cwd } } } }
+        — uses "disabled": true (absent = enabled)
+      - jetbrains: NO config file (IDE UI only); prints manual instructions
     """
     py = detect_python()
     script_abs = str((project / script_rel).resolve())
     full_args = [py, script_abs] + extra_args
-    if client in ("opencode", "opencode2"):
-        # Both OpenCode 1 and 2 use the mcp.servers.<name> shape with
-        # type: "local" and command as an array.
-        # OpenCode 1 uses "enabled": true; OpenCode 2 uses "disabled": false
-        # (i.e. absence of "disabled" = enabled in V2).
+
+    if client == "opencode":
+        # OpenCode 1 (stable): mcp.<name> flat, with enabled: true
+        server_entry = {
+            "type": "local",
+            "command": full_args,
+            "cwd": str(project.resolve()),
+            "enabled": True,
+        }
+    elif client == "opencode2":
+        # OpenCode 2 (beta): mcp.servers.<name>, no enabled field
         server_entry = {
             "type": "local",
             "command": full_args,
             "cwd": str(project.resolve()),
         }
-        if client == "opencode":
-            server_entry["enabled"] = True
-        # opencode2: don't add "enabled"; V2 uses "disabled" (absent = enabled)
     else:
+        # warp / jetbrains: command + args split
         server_entry = {
             "command": full_args[0],
             "args": full_args[1:],
@@ -377,16 +384,12 @@ def register_client(client: str, project: Path, global_cfg: bool,
             server_entry["working_directory"] = str(project.resolve())
 
     if client == "jetbrains":
-        # PyCharm/JetBrains does NOT auto-read any MCP config file.
-        # Do NOT write a file and do NOT claim "Registered".
-        # Print the ready-to-paste JSON + the exact IDE menu path instead.
         _print_jetbrains_manual_instructions(server_name, server_entry, project)
         return None
 
-    # warp / opencode: write the real config file
+    # warp / opencode / opencode2: write the real config file
     cfg_path = client_config_path(client, project, global_cfg)
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
-    # Read existing config (merge)
     if cfg_path.exists():
         try:
             data = json.loads(cfg_path.read_text(encoding="utf-8"))
@@ -394,13 +397,22 @@ def register_client(client: str, project: Path, global_cfg: bool,
             data = {}
     else:
         data = {}
-    # Navigate to the servers container
-    if client in ("opencode", "opencode2"):
+
+    # Navigate to the correct servers container per client
+    if client == "opencode":
+        # V1: mcp.<name> flat (NO "servers" sub-key)
+        mcp = data.setdefault("mcp", {})
+        mcp[server_name] = server_entry
+    elif client == "opencode2":
+        # V2: mcp.servers.<name>
         mcp = data.setdefault("mcp", {})
         servers = mcp.setdefault("servers", {})
+        servers[server_name] = server_entry
     else:
+        # warp: mcpServers.<name>
         servers = data.setdefault("mcpServers", {})
-    servers[server_name] = server_entry
+        servers[server_name] = server_entry
+
     cfg_path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n",
                         encoding="utf-8")
     print(f"Registered MCP server '{server_name}' in {cfg_path}")
@@ -452,13 +464,19 @@ def _print_jetbrains_manual_instructions(server_name: str, server_entry: dict,
 
 def _verify_registered_server(server_entry: dict, client: str):
     """Run the registered command's interpreter with --version to confirm it works."""
-    if client == "opencode":
+    if client in ("opencode", "opencode2"):
+        # V1 and V2 both use "command" as an array: [python, script, ...args]
         cmd_list = server_entry.get("command", [])
+        if isinstance(cmd_list, list) and cmd_list:
+            py = cmd_list[0]
+        else:
+            return
     else:
+        # warp / jetbrains: command is a string, args is a list
         cmd_list = [server_entry.get("command", "")] + server_entry.get("args", [])
-    if not cmd_list or not cmd_list[0]:
+        py = cmd_list[0] if cmd_list else ""
+    if not py:
         return
-    py = cmd_list[0]
     try:
         r = subprocess.run([py, "--version"],
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -497,34 +515,48 @@ def unregister_client(client: str, project: Path, global_cfg: bool,
     except Exception:
         print(f"Could not parse {cfg_path} — leaving unchanged.")
         return
-    if client in ("opencode", "opencode2"):
+    if client == "opencode":
+        # V1: mcp.<name> flat (NO "servers" sub-key)
+        mcp = data.get("mcp", {})
+        if server_name in mcp:
+            del mcp[server_name]
+            # Check if mcp is now empty
+            is_empty = len(mcp) == 0
+        else:
+            print(f"Server '{server_name}' not found in {cfg_path} — nothing to unregister.")
+            return
+    elif client == "opencode2":
+        # V2: mcp.servers.<name>
         servers = data.get("mcp", {}).get("servers", {})
+        if server_name in servers:
+            del servers[server_name]
+            is_empty = len(servers) == 0 and len(data.get("mcp", {})) <= 1
+        else:
+            print(f"Server '{server_name}' not found in {cfg_path} — nothing to unregister.")
+            return
     else:
         servers = data.get("mcpServers", {})
-    if server_name in servers:
-        del servers[server_name]
-        is_empty = False
-        if client in ("opencode", "opencode2"):
-            mcp_servers = data.get("mcp", {}).get("servers", {})
-            is_empty = len(mcp_servers) == 0 and len(data.get("mcp", {})) <= 1
-        else:
+        if server_name in servers:
+            del servers[server_name]
             is_empty = len(data.get("mcpServers", {})) == 0 and len(data) <= 1
-        if is_empty:
-            cfg_path.unlink(missing_ok=True)
-            print(f"Unregistered MCP server '{server_name}' and removed empty config {cfg_path}")
-            parent = cfg_path.parent
-            try:
-                if parent != project and parent != Path.home() and not any(parent.iterdir()):
-                    parent.rmdir()
-                    print(f"Removed empty directory {parent}")
-            except OSError:
-                pass
         else:
-            cfg_path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n",
-                                encoding="utf-8")
-            print(f"Unregistered MCP server '{server_name}' from {cfg_path}")
+            print(f"Server '{server_name}' not found in {cfg_path} — nothing to unregister.")
+            return
+
+    if is_empty:
+        cfg_path.unlink(missing_ok=True)
+        print(f"Unregistered MCP server '{server_name}' and removed empty config {cfg_path}")
+        parent = cfg_path.parent
+        try:
+            if parent != project and parent != Path.home() and not any(parent.iterdir()):
+                parent.rmdir()
+                print(f"Removed empty directory {parent}")
+        except OSError:
+            pass
     else:
-        print(f"Server '{server_name}' not found in {cfg_path} — nothing to unregister.")
+        cfg_path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n",
+                            encoding="utf-8")
+        print(f"Unregistered MCP server '{server_name}' from {cfg_path}")
 
 
 def install_memory_skeleton(target: Path):

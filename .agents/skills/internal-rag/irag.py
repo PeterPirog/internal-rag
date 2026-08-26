@@ -4533,9 +4533,32 @@ def mcp_server() -> int:
         pv = str(meta.get(_META_PV, ""))
         return pv == MODERN
 
+    def _validate_modern(params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Validate a modern request's _meta. Returns error dict or None.
+
+        Per MCP 2026-07-28, every modern request MUST include:
+          - _meta["io.modelcontextprotocol/protocolVersion"] (required)
+          - _meta["io.modelcontextprotocol/clientCapabilities"] (required)
+
+        Unsupported protocol versions return -32022.
+        """
+        meta = params.get("_meta")
+        if not isinstance(meta, dict):
+            return None  # legacy request — no validation needed
+        pv = meta.get(_META_PV)
+        if pv is None:
+            return None  # no _meta or no PV -> legacy dispatch
+        # Check supported version
+        if pv not in SUPPORTED:
+            return {
+                "code": _ERR_UNSUP,
+                "message": f"Unsupported protocol version: {pv}",
+                "data": {"supported": SUPPORTED, "requested": pv},
+            }
+        return None
+
     server_version_legacy = "2025-11-25"
     initialized = False
-    # Legacy-only connection state (modern is stateless per-request)
     conn_version = ""
 
     for line in sys.stdin:
@@ -4552,6 +4575,13 @@ def mcp_server() -> int:
         is_notification = rid is None and "id" not in req
         params = req.get("params", {}) or {}
         modern = _is_modern_req(params)
+
+        # ---- Validate modern requests (all methods, not just discover) ----
+        if modern:
+            verr = _validate_modern(params)
+            if verr:
+                _err(rid, verr["code"], verr["message"], verr.get("data"))
+                continue
 
         # ---- Modern: server/discover (no initialize required) ----
         if method == "server/discover":

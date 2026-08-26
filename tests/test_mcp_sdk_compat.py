@@ -88,7 +88,7 @@ class TestMcpSdkServer(unittest.TestCase):
                 async with stdio_client(params) as (r, w):
                     async with ClientSession(r, w) as s:
                         init = await s.initialize()
-                        self.assertEqual(init.server_info.name, "internal-rag-router")
+                        self.assertEqual(init.server_info.name, "mcp-light-memory-router")
                         tools = await s.list_tools()
                         names = sorted(t.name for t in tools.tools)
                         self.assertIn("projects", names)

@@ -266,8 +266,33 @@ def serve(registry: Dict[str, Dict[str, Any]], irag_path: str, timeout: float) -
         real_stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
         real_stdout.flush()
 
-    def _err(rid, code: int, message: str) -> None:
-        _send({"jsonrpc": "2.0", "id": rid, "error": {"code": code, "message": message}})
+    def _err(rid, code: int, message: str, data: Optional[Dict[str, Any]] = None) -> None:
+        err_obj: Dict[str, Any] = {"code": code, "message": message}
+        if data is not None:
+            err_obj["data"] = data
+        _send({"jsonrpc": "2.0", "id": rid, "error": err_obj})
+
+    def _is_modern_req(params: Dict[str, Any]) -> bool:
+        meta = params.get("_meta")
+        if not isinstance(meta, dict):
+            return False
+        pv = str(meta.get(_META_PV, ""))
+        return pv == "2026-07-28"
+
+    def _validate_modern(params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        meta = params.get("_meta")
+        if not isinstance(meta, dict):
+            return None
+        pv = meta.get(_META_PV)
+        if pv is None:
+            return None
+        if pv not in SUPPORTED_VERSIONS:
+            return {
+                "code": _ERR_UNSUP,
+                "message": f"Unsupported protocol version: {pv}",
+                "data": {"supported": SUPPORTED_VERSIONS, "requested": pv},
+            }
+        return None
 
     conn_version = ""
     _META_PV = getattr(_proto, "META_PROTOCOL_VERSION", "io.modelcontextprotocol/protocolVersion") if _proto else "io.modelcontextprotocol/protocolVersion"
@@ -287,6 +312,14 @@ def serve(registry: Dict[str, Dict[str, Any]], irag_path: str, timeout: float) -
         rid = req.get("id")
         is_notification = "id" not in req
         params = req.get("params", {}) or {}
+        modern = _is_modern_req(params)
+
+        # Validate modern requests (all methods, not just discover)
+        if modern:
+            verr = _validate_modern(params)
+            if verr:
+                _err(rid, verr["code"], verr["message"], verr.get("data"))
+                continue
 
         if method == "server/discover":
             # Modern: read protocol version from _meta (not params.protocolVersion)

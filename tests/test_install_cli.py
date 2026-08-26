@@ -176,7 +176,12 @@ class TestUnregisterCleanup(unittest.TestCase):
 
 
 class TestOpenCodeV1V2Split(unittest.TestCase):
-    """OpenCode 1 (stable) vs OpenCode 2 (beta) config structure."""
+    """OpenCode 1 (stable) vs OpenCode 2 (beta) config structure.
+
+    Per official docs (https://opencode.ai/docs/mcp-servers/ + /docs/config):
+      - OpenCode 1 (stable): mcp.<name> FLAT (no "servers" sub-key), enabled: true
+      - OpenCode 2 (beta): mcp.servers.<name>, no "enabled" (absent = enabled)
+    """
 
     def setUp(self):
         import tempfile, shutil
@@ -194,8 +199,8 @@ class TestOpenCodeV1V2Split(unittest.TestCase):
         spec.loader.exec_module(mod)
         return mod
 
-    def test_opencode_v1_has_enabled_true(self):
-        """OpenCode 1 config uses 'enabled': true on the server entry."""
+    def test_opencode_v1_flat_mcp_with_enabled(self):
+        """OpenCode 1 (stable): mcp.<name> FLAT with enabled: true (NO "servers" sub-key)."""
         import json
         mod = self._load()
         mod.register_client("opencode", self.tmp, False, "mcp-light-memory",
@@ -203,16 +208,21 @@ class TestOpenCodeV1V2Split(unittest.TestCase):
         cfg = self.tmp / "opencode.json"
         self.assertTrue(cfg.exists())
         data = json.loads(cfg.read_text(encoding="utf-8"))
-        entry = data["mcp"]["servers"]["mcp-light-memory"]
+        # V1: server is directly under mcp.<name> (FLAT)
+        self.assertIn("mcp", data)
+        self.assertIn("mcp-light-memory", data["mcp"])
+        entry = data["mcp"]["mcp-light-memory"]
         self.assertEqual(entry["type"], "local")
         self.assertIn("enabled", entry)
         self.assertTrue(entry["enabled"])
         self.assertIn("command", entry)
         self.assertIsInstance(entry["command"], list)
         self.assertIn("cwd", entry)
+        # V1 does NOT use mcp.servers
+        self.assertNotIn("servers", data["mcp"])
 
-    def test_opencode_v2_has_no_enabled(self):
-        """OpenCode 2 beta config does NOT use 'enabled'; V2 uses 'disabled' (absent = enabled)."""
+    def test_opencode_v2_servers_nested_no_enabled(self):
+        """OpenCode 2 (beta): mcp.servers.<name> with no "enabled" field."""
         import json
         mod = self._load()
         mod.register_client("opencode2", self.tmp, False, "mcp-light-memory",
@@ -220,6 +230,9 @@ class TestOpenCodeV1V2Split(unittest.TestCase):
         cfg = self.tmp / "opencode.json"
         self.assertTrue(cfg.exists())
         data = json.loads(cfg.read_text(encoding="utf-8"))
+        # V2: server is under mcp.servers.<name>
+        self.assertIn("mcp", data)
+        self.assertIn("servers", data["mcp"])
         entry = data["mcp"]["servers"]["mcp-light-memory"]
         self.assertEqual(entry["type"], "local")
         self.assertNotIn("enabled", entry)  # V2 does NOT use 'enabled'
@@ -227,25 +240,81 @@ class TestOpenCodeV1V2Split(unittest.TestCase):
         self.assertIsInstance(entry["command"], list)
         self.assertIn("cwd", entry)
 
-    def test_opencode_merge_preserves_other_servers(self):
-        """Merge must preserve existing MCP servers and other config keys."""
+    def test_opencode_v1_merge_preserves_other_flat_servers(self):
+        """V1 merge: existing flat mcp.<name> servers + other config keys preserved."""
         import json
         mod = self._load()
         cfg = self.tmp / "opencode.json"
         cfg.write_text(json.dumps({
             "$schema": "https://opencode.ai/config.json",
             "model": "anthropic/claude-sonnet-4-5",
-            "mcp": {"servers": {"other-mcp": {"type": "remote", "url": "https://x"}}}
+            "mcp": {"other-mcp": {"type": "remote", "url": "https://x", "enabled": True}}
         }), encoding="utf-8")
         mod.register_client("opencode", self.tmp, False, "mcp-light-memory",
                             ".agents/skills/internal-rag/mlm.py", ["mcp"])
         data = json.loads(cfg.read_text(encoding="utf-8"))
-        # original server preserved
-        self.assertIn("other-mcp", data["mcp"]["servers"])
-        # new server added
-        self.assertIn("mcp-light-memory", data["mcp"]["servers"])
-        # other config preserved
+        self.assertIn("other-mcp", data["mcp"])        # original flat server preserved
+        self.assertIn("mcp-light-memory", data["mcp"])  # new flat server added
         self.assertEqual(data["model"], "anthropic/claude-sonnet-4-5")
+        # No "servers" sub-key introduced
+        self.assertNotIn("servers", data["mcp"])
+
+    def test_opencode_v2_merge_preserves_other_nested_servers(self):
+        """V2 merge: existing mcp.servers.<name> servers preserved."""
+        import json
+        mod = self._load()
+        cfg = self.tmp / "opencode.json"
+        cfg.write_text(json.dumps({
+            "$schema": "https://opencode.ai/config.json",
+            "mcp": {"servers": {"other-v2": {"type": "remote", "url": "https://y"}}}
+        }), encoding="utf-8")
+        mod.register_client("opencode2", self.tmp, False, "mcp-light-memory",
+                            ".agents/skills/internal-rag/mlm.py", ["mcp"])
+        data = json.loads(cfg.read_text(encoding="utf-8"))
+        self.assertIn("other-v2", data["mcp"]["servers"])
+        self.assertIn("mcp-light-memory", data["mcp"]["servers"])
+
+    def test_opencode_v1_unregister_removes_from_flat_mcp(self):
+        """V1 unregister removes from mcp.<name> (flat)."""
+        import json
+        mod = self._load()
+        cfg = self.tmp / "opencode.json"
+        cfg.write_text(json.dumps({
+            "mcp": {"mcp-light-memory": {"type": "local", "command": ["x"], "enabled": True},
+                    "other": {"type": "remote", "url": "http://x"}}
+        }), encoding="utf-8")
+        mod.unregister_client("opencode", self.tmp, False, "mcp-light-memory")
+        data = json.loads(cfg.read_text(encoding="utf-8"))
+        self.assertNotIn("mcp-light-memory", data.get("mcp", {}))
+        self.assertIn("other", data.get("mcp", {}))  # other server preserved
+
+    def test_opencode_v2_unregister_removes_from_nested_servers(self):
+        """V2 unregister removes from mcp.servers.<name>."""
+        import json
+        mod = self._load()
+        cfg = self.tmp / "opencode.json"
+        cfg.write_text(json.dumps({
+            "mcp": {"servers": {"mcp-light-memory": {"type": "local", "command": ["x"]},
+                                "other-v2": {"type": "remote", "url": "http://y"}}}
+        }), encoding="utf-8")
+        mod.unregister_client("opencode2", self.tmp, False, "mcp-light-memory")
+        data = json.loads(cfg.read_text(encoding="utf-8"))
+        self.assertNotIn("mcp-light-memory", data.get("mcp", {}).get("servers", {}))
+        self.assertIn("other-v2", data.get("mcp", {}).get("servers", {}))
+
+    def test_verify_registered_server_opencode2_command_array(self):
+        """_verify_registered_server must handle opencode2 command as array."""
+        mod = self._load()
+        entry = {
+            "type": "local",
+            "command": [sys.executable, "/fake/script.py", "mcp"],
+            "cwd": "/fake",
+        }
+        # Should not raise — it runs the first element of the command array
+        try:
+            mod._verify_registered_server(entry, "opencode2")
+        except Exception as e:
+            self.fail(f"_verify_registered_server raised on opencode2 array command: {e}")
 
 
 if __name__ == "__main__":

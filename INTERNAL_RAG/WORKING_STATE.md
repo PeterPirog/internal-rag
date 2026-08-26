@@ -1,6 +1,6 @@
 # Current Working State
 
-updated: 2026-08-26T10:39:33+02:00
+updated: 2026-08-26T10:55:39+02:00
 branch: feat/v1.8-mcp-compliance-ephemeral
 base_commit: 84d0181
 
@@ -10,7 +10,7 @@ v1.5.0: abstention gate + FTS5 prefilter + multi-project MCP router + CI/docs
 
 ## Current request
 
-MCP/OpenCode compatibility and ephemeral-memory lifecycle modernization
+v1.8.1 hardening: OpenCode V1/V2 config fix, MCP validation, ephemeral lifecycle, GC fixes, atomic writes, CI green
 
 ## Current phase
 
@@ -42,8 +42,8 @@ v1.6.0 complete
 
 ## Checkpoint health
 
-- CHECKPOINT CURRENT at save time.
-- Run `irag.py guard` before final response.
+- RECOVERY REQUIRED: project code differs from the last checkpoint.
+- Inspect `git status` and `git diff`, reconstruct state, checkpoint it, then run guard.
 
 ## Recovery snapshot
 
