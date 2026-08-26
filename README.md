@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-1.8.0-blue">
+  <img alt="version" src="https://img.shields.io/badge/version-1.8.1-blue">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-green">
   <img alt="python" src="https://img.shields.io/badge/python-3.8%2B-blue">
   <img alt="deps" src="https://img.shields.io/badge/dependencies-0-success">
@@ -59,7 +59,7 @@ When your agent starts a task, it calls `context` and gets back relevant past de
 - **Git** (the target project must be a git repo)
 - Optional: `pip install sentence-transformers numpy` for better semantic retrieval
 
-**Version:** 1.8.0  
+**Version:** 1.8.1
 
 ### Install + register in one command
 
