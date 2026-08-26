@@ -27,7 +27,7 @@ import sys
 import zipfile
 from pathlib import Path
 
-VERSION = "1.7.0"
+VERSION = "1.8.1"
 ROOT = Path(__file__).parent.resolve()
 
 

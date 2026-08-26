@@ -46,7 +46,7 @@ import unicodedata
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-VERSION = "1.8.0"
+VERSION = "1.8.1"
 PRODUCT_NAME = "MCP Light Memory"
 PRODUCT_SLUG = "mcp-light-memory"
 LEGACY_NAME = "internal-rag"  # deprecated alias; kept for compatibility

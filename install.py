@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-VERSION = "1.8.0"
+VERSION = "1.8.1"
 PRODUCT_NAME = "MCP Light Memory"
 PRODUCT_SLUG = "mcp-light-memory"
 LEGACY_NAME = "internal-rag"  # deprecated; kept for compatibility

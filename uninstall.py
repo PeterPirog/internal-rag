@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse, datetime as dt, shutil, subprocess
 from pathlib import Path
 
-VERSION='1.6.0'
+VERSION='1.8.1'
 AGENTS_START='<!-- MCP_LIGHT_MEMORY_START -->'; AGENTS_END='<!-- MCP_LIGHT_MEMORY_END -->'
 EXCLUDE_START='# >>> MCP_LIGHT_MEMORY LOCAL-ONLY >>>'; EXCLUDE_END='# <<< MCP_LIGHT_MEMORY LOCAL-ONLY <<<'
 MANAGED_PATHS=[

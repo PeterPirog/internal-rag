@@ -1,5 +1,53 @@
 # Changelog
 
+## 1.8.1 — 2026-08-26
+
+Hardening release: MCP protocol-era separation, per-request client-capabilities validation, OpenCode 2 runtime plugin API, ProjectWriteLock ownership + stale-lock theft prevention, GC/retention fixes, ephemeral lifecycle e2e, config validation. 401 tests green (0 fail, 5 skipped). No new runtime dependencies (stdlib only, Python 3.8+).
+
+### P1/P21 — OpenCode V1/V2 config split + CI
+- Installer `register_client()`/`unregister_client()`/`_verify_registered_server()` per-client (V1 `enabled: true`, V2 `disabled` absent = enabled).
+- 8 V1/V2 golden tests (`tests/test_install_cli.py`).
+- CI red fix: router name `mcp-light-memory-router`.
+
+### P2/P3 — OpenCode 2 plugin runtime API
+- V2 plugin (`internal-rag-resilience-v2.ts`) rewritten to `Plugin.define({ id, setup(ctx) })` + `ctx.tool.hook("execute.after")` + `ctx.session.hook(...)` (documented V2 event names only).
+- V1 plugin unchanged (hooks-object API).
+- Installer selects exactly one plugin per client.
+- Issue #44788 documented as known V2 event-delivery limitation; MCP pull-based workflow is the primary resilience path.
+
+### P4/P5/P6 — MCP protocol era separation + validation
+- `SUPPORTED_MODERN_VERSIONS = ["2026-07-28"]` and `SUPPORTED_LEGACY_VERSIONS = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]` as explicit lists.
+- `server/discover` advertises ONLY modern revisions (legacy not advertised).
+- `initialize` negotiates ONLY legacy revisions (2026-07-28 counter-offers to 2025-11-25).
+- Modern per-request `_meta` validated by a single shared validator (`irag_mcp_protocol.validate_modern_request`):
+  - unsupported modern version → `-32022` with `supported`/`requested` data.
+  - missing/wrong-type `clientCapabilities` → JSON-RPC `-32602` (invalid params). Empty `{}` accepted.
+  - legacy requests (no `_meta`) pass through untouched.
+- Router enforces identical rules.
+- 46 conformance tests (`TestEraSeparation`, `TestRouterEraSeparation`, `TestClientCapabilitiesValidation`, `TestRouterClientCapabilitiesValidation`).
+
+### P7/P8/P20 — Ephemeral lifecycle CLI + e2e
+- CLI commands `observe` (ephemeral store), `promote` (distill → admission → durable → raw deletion), `gc` (plan/dry-run/apply with ephemeral + snapshot GC).
+- Provenance frontmatter: `source_observation`, `obs_content_hash` on durable memories.
+- End-to-end lifecycle test (`tests/test_e2e_lifecycle.py`): observe → promote → durable memory → raw deletion → searchable; benign output not promoted; expired observations rejected; `gc --apply` archives stale low-value memory with `archived_at` + `status: archived`; dry-run does not move.
+- `_last_json` parser handles JSON arrays (search) and objects.
+
+### P10–P15 — GC/retention hardening
+- `last_accessed` normalized by `_parse_ts` (ISO date string or epoch).
+- Archive metadata stamped BEFORE move (`archived_at` + `status: archived`) — crash-safe.
+- `deprioritize` writes `priority: low` frontmatter; retrieval `_policy_boost` applies `-2.0` penalty.
+- `gc --apply` runs under `ProjectWriteLock` (atomic, serialized).
+- Snapshot GC (byte-level enforcement).
+- `DEFAULT_CONFIG` includes `ephemeral` + `gc` sections; `_validate_config` accepts them as known sections.
+
+### P-Lock — ProjectWriteLock ownership + stale-lock theft prevention
+- Lock file now contains PID + timestamp + random ownership token (`secrets.token_hex`) + process creation epoch.
+- `release()` unlinks ONLY if the token in the file still matches this object's token (prevents foreign unlock: a stale owner cannot delete a new owner's lock).
+- A dead PID is always reclaimable (regardless of age); a live PID is NEVER stolen on age alone (any platform).
+- Windows liveness via `OpenProcess` + `GetExitCodeProcess` (ctypes over kernel32, stdlib only); `STILL_ACTIVE` (259) vs real exit code; PID reuse guarded by creation-epoch comparison.
+- POSIX: `os.kill(pid, 0)`; `flock` advisory lock as belt-and-braces.
+- Multiprocess tests: live holder not stolen on age; dead holder reclaimable; stale owner release does not stomp new owner; dead stale PID reclaimed; fresh-timestamp dead PID reclaimed.
+
 ## 1.8.0 — 2026-08-26
 
 Major modernization: MCP 2026-07-28 final spec compliance, OpenCode 1/2 split, ephemeral memory lifecycle, diagnostic distillation, GC/retention, atomic writes.
