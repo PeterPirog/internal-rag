@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression tests for MCP tool metadata exposed through tools/list."""
+"""Regression tests for MCP metadata exposed to clients."""
 from __future__ import annotations
 
 import json
@@ -25,6 +25,23 @@ EXPECTED_TITLES = {
 }
 
 
+def _run_requests(requests: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    proc = subprocess.run(
+        [sys.executable, str(IRAG), "mcp"],
+        cwd=str(ROOT),
+        input="\n".join(json.dumps(item) for item in requests) + "\n",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        timeout=60,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise AssertionError(f"MCP server failed: {proc.stderr}")
+    return [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
+
+
 def _tools_list() -> List[Dict[str, Any]]:
     requests = [
         {
@@ -41,20 +58,7 @@ def _tools_list() -> List[Dict[str, Any]]:
         {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
         {"jsonrpc": "2.0", "id": 3, "method": "shutdown", "params": {}},
     ]
-    proc = subprocess.run(
-        [sys.executable, str(IRAG), "mcp"],
-        cwd=str(ROOT),
-        input="\n".join(json.dumps(item) for item in requests) + "\n",
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        timeout=60,
-        check=False,
-    )
-    if proc.returncode != 0:
-        raise AssertionError(f"MCP server failed: {proc.stderr}")
-    responses = [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
+    responses = _run_requests(requests)
     listing = next(item for item in responses if item.get("id") == 2)
     return listing["result"]["tools"]
 
@@ -126,6 +130,47 @@ class TestMcpToolMetadata(unittest.TestCase):
         self.assertEqual(remember["required"], ["type", "title", "body"])
         self.assertIn("decision", remember["properties"]["type"]["enum"])
         self.assertIn("tentative", remember["properties"]["status"]["enum"])
+
+    def test_legacy_initialize_publishes_workflow_and_trust_guidance(self) -> None:
+        responses = _run_requests([
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-11-25",
+                    "capabilities": {},
+                    "clientInfo": {"name": "metadata-test", "version": "1"},
+                },
+            },
+            {"jsonrpc": "2.0", "id": 2, "method": "shutdown", "params": {}},
+        ])
+        instructions = next(item for item in responses if item.get("id") == 1)["result"]["instructions"]
+        self.assertIn("call context before project changes", instructions)
+        self.assertIn("remember only durable reusable knowledge", instructions)
+        self.assertIn("guard before finishing", instructions)
+        self.assertIn("untrusted evidence", instructions)
+
+    def test_modern_discover_publishes_same_guidance(self) -> None:
+        responses = _run_requests([
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "server/discover",
+                "params": {
+                    "_meta": {
+                        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                        "io.modelcontextprotocol/clientCapabilities": {},
+                    }
+                },
+            },
+            {"jsonrpc": "2.0", "id": 2, "method": "shutdown", "params": {}},
+        ])
+        instructions = next(item for item in responses if item.get("id") == 1)["result"]["instructions"]
+        self.assertIn("call context before project changes", instructions)
+        self.assertIn("remember only durable reusable knowledge", instructions)
+        self.assertIn("guard before finishing", instructions)
+        self.assertIn("untrusted evidence", instructions)
 
 
 if __name__ == "__main__":
