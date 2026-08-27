@@ -22,7 +22,9 @@ Excludes: `created`/`updated`/`last_accessed` timestamps, `status`, id, links �
 anything that changes without the memory itself changing.
 
 Normalization: NFKD fold (diacritics stripped), casefold, whitespace collapse.
-So `Użycie   bazy` ≡ `uzycie bazy`, and `"a\n  b"` ≡ `"a b"`.
+This makes equivalent text compare consistently across diacritic variants,
+letter case, and whitespace differences; for example, `"use   database"` ≡
+`"USE database"`, and `"a\n  b"` ≡ `"a b"`.
 
 - **Exact fingerprint** = `sha256(canonical)`.
 - **Near fingerprint** = 64-bit SimHash over tokenized canonical text:
@@ -76,8 +78,9 @@ stronger matched), or `null` (no signal). Conflict blocks report
 4. **Type-scoped**: only memories of the same `type` are compared, to avoid
    flagging a `decision` against an unrelated `knowledge` note.
 5. **Not transitive**: A≈B and B≈C does not imply A≈C (standard SimHash caveat).
-6. **Diacritics are folded** for comparison (NFKD) — `ż` and `z` are considered
-   the same token. This is intentional for PL/EN mixed corpora.
+6. **Diacritics are folded** for comparison (NFKD), so letters with diacritics
+   compare as their normalized base forms. This is intentional for mixed-language
+   corpora.
 
 ## Tuning
 
@@ -92,6 +95,6 @@ See `tests/test_dedup.py`:
 - identical text, different title → near (not exact)
 - identical title+body → exact, blocked
 - opposing decision → **not** flagged as duplicate (separate conflict path)
-- Polish diacritics + whitespace → exact after normalization
+- diacritics + whitespace differences → exact after normalization
 - archived memory → informational only, does not block
 - `--force` bypass; `--json` shape; import idempotency
