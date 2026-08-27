@@ -1,0 +1,387 @@
+name: mcp-registry
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build (for example v1.8.1); defaults to VERSION"
+        required: false
+        type: string
+      publish:
+        description: "Upload the MCPB and publish/sync Registry metadata"
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Resolve and verify release version
+        id: release
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" == "release" ]]; then
+            tag="${RELEASE_TAG}"
+          elif [[ -n "${INPUT_TAG:-}" ]]; then
+            tag="${INPUT_TAG}"
+          else
+            tag="v$(tr -d '[:space:]' < VERSION)"
+          fi
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid release tag: $tag" >&2
+            exit 1
+          fi
+          git rev-parse --verify "refs/tags/${tag}^{commit}" >/dev/null
+          git checkout --detach "$tag"
+          version="${tag#v}"
+          file_version="$(tr -d '[:space:]' < VERSION)"
+          if [[ "$version" != "$file_version" ]]; then
+            echo "Tag/version mismatch: tag=$version VERSION=$file_version" >&2
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "asset=mcp-light-memory-${version}.mcpb" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - name: Install MCPB CLI
+        run: npm install --global @anthropic-ai/mcpb@2.1.2
+
+      - name: Build MCPB staging directory
+        shell: bash
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          rm -rf .mcpb-build
+          mkdir -p .mcpb-build/server/internal-rag
+          cp -a .agents/skills/internal-rag/. .mcpb-build/server/internal-rag/
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path('.mcpb-build')
+          launcher = '''#!/usr/bin/env python3
+          from __future__ import annotations
+
+          import os
+          import shutil
+          import subprocess
+          import sys
+          from pathlib import Path
+
+
+          def fail(message: str) -> int:
+              print(f"MCP Light Memory MCPB: {message}", file=sys.stderr)
+              return 2
+
+
+          def main() -> int:
+              if len(sys.argv) != 2:
+                  return fail("project directory was not provided")
+
+              project = Path(sys.argv[1]).expanduser().resolve()
+              if not project.is_dir():
+                  return fail(f"project directory does not exist: {project}")
+
+              git = shutil.which("git")
+              if not git:
+                  return fail("Git is required but was not found in PATH")
+
+              check = subprocess.run(
+                  [git, "-C", str(project), "rev-parse", "--show-toplevel"],
+                  stdout=subprocess.PIPE,
+                  stderr=subprocess.PIPE,
+                  text=True,
+              )
+              if check.returncode != 0:
+                  return fail(f"selected directory is not a Git repository: {project}")
+
+              git_root = Path(check.stdout.strip()).resolve()
+              if os.path.normcase(str(git_root)) != os.path.normcase(str(project)):
+                  return fail(f"select the Git repository root instead: {git_root}")
+
+              server_dir = Path(__file__).resolve().parent
+              mlm = server_dir / "internal-rag" / "mlm.py"
+              if not mlm.is_file():
+                  return fail(f"server entry point not found: {mlm}")
+
+              os.chdir(project)
+              os.execv(sys.executable, [sys.executable, str(mlm), "mcp"])
+              return 0
+
+
+          if __name__ == "__main__":
+              raise SystemExit(main())
+          '''
+          # Remove indentation introduced by the YAML/Python heredoc context.
+          import textwrap
+          (root / 'server' / 'launcher.py').write_text(textwrap.dedent(launcher), encoding='utf-8')
+
+          version = os.environ['VERSION']
+          manifest = {
+              'manifest_version': '0.3',
+              'name': 'mcp-light-memory',
+              'display_name': 'MCP Light Memory',
+              'version': version,
+              'description': (
+                  'Local-first persistent memory for coding agents and MCP clients. '
+                  'Preserves relevant project context across sessions and reduces unnecessary '
+                  'token usage by retrieving only relevant memories.'
+              ),
+              'author': {
+                  'name': 'Peter Pirog',
+                  'url': 'https://github.com/PeterPirog',
+              },
+              'repository': {
+                  'type': 'git',
+                  'url': 'https://github.com/PeterPirog/mcp-light-memory',
+              },
+              'homepage': 'https://github.com/PeterPirog/mcp-light-memory',
+              'documentation': 'https://github.com/PeterPirog/mcp-light-memory/tree/main/docs',
+              'support': 'https://github.com/PeterPirog/mcp-light-memory/issues',
+              'license': 'MIT',
+              'keywords': [
+                  'mcp', 'memory', 'persistent-memory', 'coding-agents',
+                  'rag', 'local-first', 'opencode', 'warp',
+              ],
+              'server': {
+                  'type': 'python',
+                  'entry_point': 'server/launcher.py',
+                  'mcp_config': {
+                      'command': 'python',
+                      'args': [
+                          '${__dirname}/server/launcher.py',
+                          '${user_config.project_directory}',
+                      ],
+                      'env': {},
+                      'platform_overrides': {
+                          'win32': {
+                              'command': 'py',
+                              'args': [
+                                  '-3',
+                                  '${__dirname}/server/launcher.py',
+                                  '${user_config.project_directory}',
+                              ],
+                          }
+                      },
+                  },
+              },
+              'user_config': {
+                  'project_directory': {
+                      'type': 'directory',
+                      'title': 'Project directory',
+                      'description': (
+                          'Select the root directory of the Git repository that '
+                          'MCP Light Memory should use.'
+                      ),
+                      'required': True,
+                      'multiple': False,
+                  }
+              },
+              'compatibility': {
+                  'platforms': ['darwin', 'win32', 'linux'],
+                  'runtimes': {'python': '>=3.8,<4.0'},
+              },
+          }
+          (root / 'manifest.json').write_text(
+              json.dumps(manifest, indent=2) + '\n', encoding='utf-8'
+          )
+          PY
+
+      - name: Validate and pack MCPB
+        shell: bash
+        env:
+          ASSET: ${{ steps.release.outputs.asset }}
+        run: |
+          set -euo pipefail
+          mcpb validate .mcpb-build/manifest.json
+          mcpb pack .mcpb-build "$ASSET"
+          mcpb info "$ASSET"
+
+      - name: Smoke-test packed MCP server
+        shell: bash
+        env:
+          ASSET: ${{ steps.release.outputs.asset }}
+        run: |
+          set -euo pipefail
+          rm -rf .mcpb-unpacked .mcpb-smoke
+          mkdir .mcpb-unpacked .mcpb-smoke
+          git -C .mcpb-smoke init -q
+          mcpb unpack "$ASSET" .mcpb-unpacked
+          {
+            printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"mcpb-ci-smoke","version":"1.0"}}}'
+            printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}'
+            printf '%s\n' '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
+          } | python .mcpb-unpacked/server/launcher.py "$(pwd)/.mcpb-smoke" | tee mcpb-smoke.jsonl
+          grep -F '"name": "mcp-light-memory"' mcpb-smoke.jsonl
+          grep -F '"name": "context"' mcpb-smoke.jsonl
+          grep -F '"name": "search"' mcpb-smoke.jsonl
+          grep -F '"name": "checkpoint"' mcpb-smoke.jsonl
+          grep -F '"name": "guard"' mcpb-smoke.jsonl
+
+      - name: Generate Registry metadata
+        id: metadata
+        shell: bash
+        env:
+          ASSET: ${{ steps.release.outputs.asset }}
+          TAG: ${{ steps.release.outputs.tag }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          sha256="$(sha256sum "$ASSET" | awk '{print $1}')"
+          echo "sha256=$sha256" >> "$GITHUB_OUTPUT"
+          SHA256="$sha256" python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          tag = os.environ['TAG']
+          version = os.environ['VERSION']
+          asset = os.environ['ASSET']
+          sha256 = os.environ['SHA256']
+          repository = os.environ['GITHUB_REPOSITORY']
+          server = {
+              '$schema': 'https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json',
+              'name': 'io.github.PeterPirog/mcp-light-memory',
+              'title': 'MCP Light Memory',
+              'description': 'Local-first persistent memory for coding agents and MCP clients.',
+              'repository': {
+                  'url': f'https://github.com/{repository}',
+                  'source': 'github',
+              },
+              'version': version,
+              'packages': [{
+                  'registryType': 'mcpb',
+                  'identifier': f'https://github.com/{repository}/releases/download/{tag}/{asset}',
+                  'fileSha256': sha256,
+                  'transport': {'type': 'stdio'},
+              }],
+          }
+          Path('server.json').write_text(json.dumps(server, indent=2) + '\n', encoding='utf-8')
+          PY
+          cat server.json
+
+      - name: Install MCP Registry publisher
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" \
+            | tar xz mcp-publisher
+          ./mcp-publisher --help
+
+      - name: Validate Registry metadata
+        run: ./mcp-publisher validate server.json
+
+      - name: Upload MCPB to GitHub Release
+        if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.publish)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+          ASSET: ${{ steps.release.outputs.asset }}
+          SHA256: ${{ steps.metadata.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null
+          existing_digest="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets \
+            --jq ".assets[] | select(.name == \"$ASSET\") | .digest" || true)"
+          if [[ -z "$existing_digest" ]]; then
+            gh release upload "$TAG" "$ASSET" --repo "$GITHUB_REPOSITORY"
+          elif [[ "$existing_digest" == "sha256:$SHA256" ]]; then
+            echo "Release asset already exists with the expected SHA-256; keeping it."
+          else
+            echo "Release asset $ASSET already exists with a different digest: $existing_digest" >&2
+            exit 1
+          fi
+
+      - name: Authenticate to Official MCP Registry
+        if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.publish)
+        run: ./mcp-publisher login github-oidc
+
+      - name: Publish to Official MCP Registry if needed
+        if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.publish)
+        shell: bash
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          SHA256: ${{ steps.metadata.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          encoded_name="$(python -c 'import urllib.parse; print(urllib.parse.quote("io.github.PeterPirog/mcp-light-memory", safe=""))')"
+          url="https://registry.modelcontextprotocol.io/v0.1/servers/${encoded_name}/versions/${VERSION}"
+          http_code="$(curl -sS -o registry-existing.json -w '%{http_code}' "$url")"
+          if [[ "$http_code" == "200" ]]; then
+            EXPECTED_SHA="$SHA256" python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          data = json.loads(Path('registry-existing.json').read_text(encoding='utf-8'))
+          packages = data.get('server', {}).get('packages', [])
+          actual = packages[0].get('fileSha256') if packages else None
+          expected = os.environ['EXPECTED_SHA']
+          if actual != expected:
+              raise SystemExit(
+                  f'Registry version already exists with different SHA-256: {actual} != {expected}'
+              )
+          print('Registry version already exists with the expected SHA-256; keeping it.')
+          PY
+          elif [[ "$http_code" == "404" ]]; then
+            ./mcp-publisher publish server.json
+          else
+            cat registry-existing.json >&2 || true
+            echo "Unexpected Registry response: HTTP $http_code" >&2
+            exit 1
+          fi
+
+      - name: Sync published server.json to main
+        if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.publish)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp server.json /tmp/mcp-light-memory-server.json
+          git fetch origin main
+          git checkout -B main origin/main
+          cp /tmp/mcp-light-memory-server.json server.json
+          if git diff --quiet -- server.json; then
+            echo "server.json already matches the published Registry metadata."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add server.json
+          git commit -m "chore(registry): sync published metadata"
+          git push origin HEAD:main
+
+      - name: Upload MCPB build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcpb-${{ steps.release.outputs.version }}
+          path: ${{ steps.release.outputs.asset }}
+          if-no-files-found: error
