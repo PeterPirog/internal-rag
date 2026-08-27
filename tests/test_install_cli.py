@@ -475,5 +475,284 @@ class TestOpenCodePluginV1V2Select(unittest.TestCase):
         self.assertTrue(v2.exists(), "self-install must not delete the repo's own plugin")
 
 
+class TestFailClosedConfigHandling(unittest.TestCase):
+    """A malformed existing client config must NEVER be overwritten.
+
+    The installer must fail with a clear ERROR (path + parser error) and
+    leave the file byte-for-byte unchanged.
+    """
+
+    def setUp(self):
+        import tempfile, shutil
+        self.tmp = Path(tempfile.mkdtemp(prefix="irag-failclosed-"))
+        (self.tmp / ".git").mkdir()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _load(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("_install_fc", str(INSTALL_PY))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def _malformed_warp_cfg(self) -> Path:
+        d = self.tmp / ".warp"
+        d.mkdir()
+        cfg = d / ".mcp.json"
+        cfg.write_text('{"mcpServers": {"broken": { ... trailing garbage,}\n', encoding="utf-8")
+        return cfg
+
+    def test_malformed_warp_config_unchanged(self):
+        mod = self._load()
+        cfg = self._malformed_warp_cfg()
+        before = cfg.read_bytes()
+        with self.assertRaises(SystemExit):
+            mod.register_client("warp", self.tmp, False, "mcp-light-memory",
+                                ".agents/skills/internal-rag/mlm.py", ["mcp"])
+        self.assertEqual(cfg.read_bytes(), before,
+                         "malformed Warp config was modified by the installer")
+
+    def test_malformed_warp_error_is_clear(self):
+        mod = self._load()
+        cfg = self._malformed_warp_cfg()
+        import io, contextlib
+        buf = io.StringIO()
+        with self.assertRaises(SystemExit) as ctx, contextlib.redirect_stdout(buf):
+            mod.register_client("warp", self.tmp, False, "mcp-light-memory",
+                                ".agents/skills/internal-rag/mlm.py", ["mcp"])
+        out = buf.getvalue()
+        self.assertIn("ERROR", out)
+        self.assertIn(str(cfg), out)
+        self.assertIn("parser error", out)
+
+    def test_malformed_opencode_config_unchanged(self):
+        mod = self._load()
+        cfg = self.tmp / "opencode.json"
+        cfg.write_text('{"mcp": "not-an-object"', encoding="utf-8")
+        before = cfg.read_bytes()
+        with self.assertRaises(SystemExit):
+            mod.register_client("opencode", self.tmp, False, "mcp-light-memory",
+                                ".agents/skills/internal-rag/mlm.py", ["mcp"])
+        self.assertEqual(cfg.read_bytes(), before,
+                         "malformed OpenCode config was modified by the installer")
+
+    def test_malformed_opencode2_config_unchanged(self):
+        mod = self._load()
+        cfg = self.tmp / "opencode.json"
+        cfg.write_text('{"mcp": {"servers": [1,2,3]', encoding="utf-8")
+        before = cfg.read_bytes()
+        with self.assertRaises(SystemExit):
+            mod.register_client("opencode2", self.tmp, False, "mcp-light-memory",
+                                ".agents/skills/internal-rag/mlm.py", ["mcp"])
+        self.assertEqual(cfg.read_bytes(), before,
+                         "malformed OpenCode2 config was modified by the installer")
+
+    def test_valid_config_still_merge_preserved(self):
+        """Valid existing configs must still be merged, not clobbered."""
+        import json
+        mod = self._load()
+        cfg = self.tmp / ".warp" / ".mcp.json"
+        cfg.parent.mkdir()
+        cfg.write_text(json.dumps({
+            "mcpServers": {"other-server": {"command": "node", "args": ["x"]}}
+        }), encoding="utf-8")
+        mod.register_client("warp", self.tmp, False, "mcp-light-memory",
+                            ".agents/skills/internal-rag/mlm.py", ["mcp"])
+        data = json.loads(cfg.read_text(encoding="utf-8"))
+        self.assertIn("other-server", data["mcpServers"])
+        self.assertIn("mcp-light-memory", data["mcpServers"])
+
+    def test_load_client_config_missing_file_is_empty(self):
+        mod = self._load()
+        self.assertEqual(mod.load_client_config(self.tmp / "nope.json"), {})
+
+    def test_load_client_config_rejects_non_object_top_level(self):
+        mod = self._load()
+        cfg = self.tmp / "oc.json"
+        cfg.write_text("[1, 2, 3]", encoding="utf-8")
+        with self.assertRaises(mod.ConfigParseError):
+            mod.load_client_config(cfg)
+        self.assertEqual(cfg.read_bytes(), b"[1, 2, 3]",
+                         "unreadable shape must leave the file untouched")
+
+
+class TestOpenCodeJsoncSafePath(unittest.TestCase):
+    """OpenCode officially supports JSONC. The installer must not guess at
+    rewriting a JSONC file: when only opencode.jsonc exists (no .json), the
+    automatic write path is ambiguous -> fail safely with precise manual
+    instructions instead of risking config loss."""
+
+    def setUp(self):
+        import tempfile, shutil
+        self.tmp = Path(tempfile.mkdtemp(prefix="irag-jsonc-"))
+        (self.tmp / ".git").mkdir()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _load(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("_install_jsonc", str(INSTALL_PY))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_resolve_prefers_json_when_present(self):
+        mod = self._load()
+        (self.tmp / "opencode.json").write_text("{}", encoding="utf-8")
+        (self.tmp / "opencode.jsonc").write_text("{}", encoding="utf-8")
+        path, manual = mod.resolve_opencode_config(self.tmp, False)
+        self.assertFalse(manual)
+        self.assertEqual(path.name, "opencode.json")
+
+    def test_resolve_manual_when_only_jsonc_exists(self):
+        mod = self._load()
+        (self.tmp / "opencode.jsonc").write_text("// comment\n{}", encoding="utf-8")
+        path, manual = mod.resolve_opencode_config(self.tmp, False)
+        self.assertTrue(manual)
+        self.assertEqual(path.name, "opencode.json")
+
+    def test_register_fails_safe_on_jsonc_only(self):
+        import io, contextlib
+        mod = self._load()
+        jsonc = self.tmp / "opencode.jsonc"
+        jsonc.write_text("// my comment\n{\"mcp\": {}}", encoding="utf-8")
+        before = jsonc.read_bytes()
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            result = mod.register_client("opencode", self.tmp, False,
+                                         "mcp-light-memory",
+                                         ".agents/skills/internal-rag/mlm.py",
+                                         ["mcp"])
+        self.assertIsNone(result, "must not return a written config path")
+        self.assertEqual(jsonc.read_bytes(), before,
+                         "JSONC config must remain byte-for-byte unchanged")
+        out = buf.getvalue()
+        self.assertIn("MANUAL EDIT REQUIRED (JSONC)", out)
+        self.assertIn(str(jsonc), out)
+        self.assertNotIn("mcp-light-memory", jsonc.read_text(encoding="utf-8"))
+
+
+class TestClientConfigPaths(unittest.TestCase):
+    """Warp/OpenCode/OpenCode2 project vs global config path contract."""
+
+    def _load(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("_install_paths", str(INSTALL_PY))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_warp_project_and_global_paths(self):
+        mod = self._load()
+        from pathlib import Path as P
+        project = P("/tmp/proj")
+        self.assertEqual(mod.client_config_path("warp", project, False),
+                         project / ".warp" / ".mcp.json")
+        self.assertEqual(mod.client_config_path("warp", project, True),
+                         P.home() / ".warp" / ".mcp.json")
+
+    def test_opencode_project_and_global_paths(self):
+        mod = self._load()
+        from pathlib import Path as P
+        project = P("/tmp/proj")
+        self.assertEqual(mod.client_config_path("opencode", project, False),
+                         project / "opencode.json")
+        self.assertEqual(mod.client_config_path("opencode", project, True),
+                         P.home() / ".config" / "opencode" / "opencode.json")
+
+    def test_opencode2_project_and_global_paths(self):
+        mod = self._load()
+        from pathlib import Path as P
+        project = P("/tmp/proj")
+        self.assertEqual(mod.client_config_path("opencode2", project, False),
+                         project / "opencode.json")
+        self.assertEqual(mod.client_config_path("opencode2", project, True),
+                         P.home() / ".config" / "opencode" / "opencode.json")
+
+
+class TestJetbrainsScopeInstructions(unittest.TestCase):
+    """JetBrains: --client jetbrains prints Project level; --global prints
+    Global level. No config file is ever written automatically."""
+
+    def setUp(self):
+        import tempfile, shutil
+        self.tmp = Path(tempfile.mkdtemp(prefix="irag-jb-"))
+        (self.tmp / ".git").mkdir()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _load(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("_install_jb", str(INSTALL_PY))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def _capture(self, fn):
+        import io, contextlib
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            result = fn()
+        return buf.getvalue(), result
+
+    def test_project_mode_prints_project_level(self):
+        mod = self._load()
+        out, result = self._capture(lambda: mod.register_client(
+            "jetbrains", self.tmp, False, "mcp-light-memory",
+            ".agents/skills/internal-rag/mlm.py", ["mcp"]))
+        self.assertIsNone(result, "JetBrains registration must not write a config")
+        self.assertIn("Server level: Project / Current project.", out)
+        self.assertNotIn("Server level: Global (all projects).", out)
+
+    def test_global_mode_prints_global_level(self):
+        mod = self._load()
+        out, result = self._capture(lambda: mod.register_client(
+            "jetbrains", self.tmp, True, "mcp-light-memory",
+            ".agents/skills/internal-rag/mlm.py", ["mcp"]))
+        self.assertIsNone(result)
+        self.assertIn("Server level: Global (all projects).", out)
+        self.assertNotIn("Server level: Project / Current project.", out)
+
+    def test_never_writes_jetbrains_config_file(self):
+        mod = self._load()
+        for global_cfg in (False, True):
+            before = sorted(p.name for p in self.tmp.rglob("*"))
+            self._capture(lambda: mod.register_client(
+                "jetbrains", self.tmp, global_cfg, "mcp-light-memory",
+                ".agents/skills/internal-rag/mlm.py", ["mcp"]))
+            after = sorted(p.name for p in self.tmp.rglob("*"))
+            self.assertEqual(before, after,
+                             "installer must not create/modify files for JetBrains")
+
+
+class TestInstallPs1Parity(unittest.TestCase):
+    """install.ps1 must accept the same functional flags as install.py:
+    --client, --global, --compaction, --server-name, --unregister,
+    --share-tools (passed through to install.py)."""
+
+    def test_ps1_exposes_all_flags(self):
+        text = (PROJECT_ROOT / "install.ps1").read_text(encoding="utf-8")
+        for flag in ("$Client", "$Global", "$Compaction", "$ServerName",
+                     "$Unregister", "$ShareTools"):
+            self.assertIn(flag, text, f"install.ps1 missing parameter {flag}")
+        for passthrough in ("--client", "--global", "--compaction",
+                            "--server-name", "--unregister", "--share-tools"):
+            self.assertIn(passthrough, text, f"install.ps1 missing {passthrough} passthrough")
+
+    def test_ps1_client_is_validated(self):
+        text = (PROJECT_ROOT / "install.ps1").read_text(encoding="utf-8")
+        self.assertIn("ValidateSet", text,
+                      "install.ps1 should constrain -Client to known clients")
+        for client in ("warp", "opencode", "opencode2", "jetbrains"):
+            self.assertIn(client, text)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

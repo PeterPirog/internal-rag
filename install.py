@@ -332,6 +332,72 @@ def detect_python() -> str:
     return sys.executable
 
 
+class ConfigParseError(SystemExit):
+    """A client config file exists but cannot be parsed.
+
+    Fail-closed: the installer never overwrites or "repairs" a config it
+    cannot parse byte-for-byte. The file is left completely unchanged and
+    the error carries the path + parser message.
+    """
+
+    def __init__(self, path: Path, parse_error: str):
+        self.path = Path(path)
+        self.parse_error = parse_error
+        msg = (f"existing client config is not valid JSON and will NOT be modified: {self.path}\n"
+               f"  parser error: {parse_error}\n"
+               f"  Fix the file manually (or back it up), then re-run the installer.")
+        print(f"\nERROR: {msg}")
+        super().__init__(1)
+
+
+def load_client_config(cfg_path: Path) -> dict:
+    """Load an existing client config, failing closed on ANY parse problem.
+
+    - missing file -> {} (fresh config is safe to create)
+    - unreadable file -> ConfigParseError (byte-for-byte unchanged)
+    - invalid JSON -> ConfigParseError (byte-for-byte unchanged)
+    - JSON but with a non-object container (mcp/mcpServers/servers) ->
+      ConfigParseError (we refuse to guess at an arbitrary malformed shape)
+    """
+    if not cfg_path.exists():
+        return {}
+    try:
+        text = cfg_path.read_text(encoding="utf-8")
+    except OSError as e:
+        raise ConfigParseError(cfg_path, f"unreadable file: {e}")
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise ConfigParseError(cfg_path, f"{e.msg} (line {e.lineno}, column {e.colno})")
+    if not isinstance(data, dict):
+        raise ConfigParseError(cfg_path, "top-level value is not a JSON object")
+    for key in ("mcp", "mcpServers"):
+        if key in data and not isinstance(data[key], dict):
+            raise ConfigParseError(cfg_path, f"'{key}' is not a JSON object")
+    mcp = data.get("mcp")
+    if isinstance(mcp, dict) and "servers" in mcp and not isinstance(mcp["servers"], dict):
+        raise ConfigParseError(cfg_path, "'mcp.servers' is not a JSON object")
+    return data
+
+
+def resolve_opencode_config(project: Path, global_cfg: bool) -> tuple[Path, bool]:
+    """Resolve the OpenCode config path, honoring OpenCode's documented
+    JSONC support (JSON with Comments) without implementing a full JSONC
+    parser ourselves.
+
+    Returns (path, manual_only):
+    - the canonical .json path is the automatic write path;
+    - if the project/global location has opencode.jsonc (but no .json),
+      auto-writing is ambiguous (OpenCode merges both, and our stdlib JSON
+      writer cannot preserve comments safely) -> manual_only=True and the
+      installer prints precise manual instructions instead.
+    """
+    cfg = client_config_path("opencode", project, global_cfg)
+    jsonc_sibling = cfg.with_suffix(".jsonc")
+    manual_only = not cfg.exists() and jsonc_sibling.exists()
+    return cfg, manual_only
+
+
 def client_config_path(client: str, project: Path, global_cfg: bool) -> Path:
     """Return the MCP config file path for a given client."""
     home = Path.home()
@@ -406,19 +472,20 @@ def register_client(client: str, project: Path, global_cfg: bool,
             server_entry["working_directory"] = str(project.resolve())
 
     if client == "jetbrains":
-        _print_jetbrains_manual_instructions(server_name, server_entry, project)
+        _print_jetbrains_manual_instructions(server_name, server_entry, project,
+                                             global_cfg)
         return None
 
     # warp / opencode / opencode2: write the real config file
     cfg_path = client_config_path(client, project, global_cfg)
+    if client in ("opencode", "opencode2"):
+        cfg_path, manual_only = resolve_opencode_config(project, global_cfg)
+        if manual_only:
+            _print_opencode_jsonc_manual_instructions(cfg_path, server_name,
+                                                       server_entry, global_cfg)
+            return None
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
-    if cfg_path.exists():
-        try:
-            data = json.loads(cfg_path.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
-    else:
-        data = {}
+    data = load_client_config(cfg_path)
 
     # Navigate to the correct servers container per client
     if client == "opencode":
@@ -443,11 +510,15 @@ def register_client(client: str, project: Path, global_cfg: bool,
 
 
 def _print_jetbrains_manual_instructions(server_name: str, server_entry: dict,
-                                          project: Path):
+                                         project: Path, global_cfg: bool):
     """Print the ready-to-paste JSON + IDE menu path for JetBrains/PyCharm.
 
     PyCharm does NOT auto-read any MCP config file — the user must add the
     server manually in Settings → Tools → AI Assistant → MCP.
+
+    The installer never writes a JetBrains config file. --global selects the
+    IDE's Global server level; without it the Project level is printed, so the
+    instruction always matches the scope the user requested.
     """
     wd = server_entry.get("working_directory", str(project.resolve()))
     # Build the JSON block the user will paste into the IDE dialog
@@ -456,6 +527,10 @@ def _print_jetbrains_manual_instructions(server_name: str, server_entry: dict,
         "args": server_entry["args"],
     }
     paste_json = json.dumps(paste_entry, indent=2, ensure_ascii=False)
+    if global_cfg:
+        level_line = "  5. Server level: Global (all projects)."
+    else:
+        level_line = "  5. Server level: Project / Current project."
     print()
     print("=" * 72)
     print("  JETBRAINS / PyCharm — MANUAL MCP SETUP REQUIRED")
@@ -474,7 +549,7 @@ def _print_jetbrains_manual_instructions(server_name: str, server_entry: dict,
     print("     Without this, the memory store will be created in the")
     print("     IDE's default cwd, not in your project.")
     print()
-    print("  5. Server level = Global (all projects) or Project.")
+    print(level_line)
     print("  6. OK -> Apply. The server should start; green status = connected.")
     print()
     print("  7. If it does not start, click Reconnect in Status. Logs:")
@@ -482,6 +557,56 @@ def _print_jetbrains_manual_instructions(server_name: str, server_entry: dict,
     print()
     print("=" * 72)
     _verify_registered_server(server_entry, "jetbrains")
+
+
+def _print_opencode_jsonc_manual_instructions(cfg_path: Path, server_name: str,
+                                               server_entry: dict, global_cfg: bool):
+    """OpenCode officially supports JSONC (JSON with Comments). We do NOT
+    implement a full JSONC parser here: writing a JSONC file with the stdlib
+    JSON writer would drop comments and could corrupt a user's config.
+
+    Fail safely: print the exact manual edit (file, placement, snippet)
+    instead of risking config loss.
+    """
+    jsonc_path = cfg_path.with_suffix(".jsonc")
+    scope = "global" if global_cfg else "project"
+    if server_entry.get("enabled") is not None:
+        snippet = ('  "mcp": {\n'
+                   f'    "{server_name}": {{\n'
+                   f'      "type": "local",\n'
+                   f'      "command": [{", ".join(json.dumps(a) for a in server_entry["command"]) }],\n'
+                   f'      "cwd": {json.dumps(server_entry["cwd"])},\n'
+                   f'      "enabled": true\n'
+                   f'    }}\n'
+                   '  },')
+    else:
+        snippet = ('  "mcp": {\n'
+                   '    "servers": {\n'
+                   f'      "{server_name}": {{\n'
+                   f'        "type": "local",\n'
+                   f'        "command": [{", ".join(json.dumps(a) for a in server_entry["command"]) }],\n'
+                   f'        "cwd": {json.dumps(server_entry["cwd"])}\n'
+                   f'      }}\n'
+                   '    }\n'
+                   '  },')
+    print()
+    print("=" * 72)
+    print(f"  OPENCODE ({scope} config) — MANUAL EDIT REQUIRED (JSONC)")
+    print("=" * 72)
+    print()
+    print(f"  OpenCode officially supports JSONC, but this installer does not")
+    print("  rewrite JSONC files (it would drop your comments and could")
+    print(f"  corrupt the config). Add the server manually to:")
+    print()
+    print(f"    {jsonc_path}")
+    print()
+    print("  Inside the top-level object, add/merge this (adjust indentation):")
+    print()
+    print(snippet)
+    print()
+    print("  If an 'mcp' key already exists, merge instead of duplicating.")
+    print()
+    print("=" * 72)
 
 
 def _verify_registered_server(server_entry: dict, client: str):
@@ -717,10 +842,7 @@ def integrate_compaction(client: str, project: Path, global_cfg: bool):
     if not cfg_path.exists():
         # Config was just created by register_client; read it
         pass
-    try:
-        data = json.loads(cfg_path.read_text(encoding="utf-8"))
-    except Exception:
-        data = {}
+    data = load_client_config(cfg_path)
 
     if client == "opencode":
         comp = data.setdefault("compaction", {})

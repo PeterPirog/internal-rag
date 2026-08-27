@@ -127,15 +127,44 @@ the resilience plugin API per version).
 
 ### JetBrains AI Assistant / PyCharm
 
-Manual setup in the IDE (per JetBrains docs):
+Manual setup in the IDE (per JetBrains docs). The installer **never writes a
+JetBrains config file** — it prints the ready-to-paste JSON and the IDE menu
+path. The printed **Server level** matches the scope you requested:
+
+1. `install.py . --client jetbrains` → printed instruction: **Server level: Project / Current project**
+2. `install.py . --client jetbrains --global` → printed instruction: **Server level: Global**
+
+UI steps (per JetBrains docs):
 
 1. Settings (`Ctrl+Alt+S`) → **Tools** → **AI Assistant** → **Model Context Protocol (MCP)** → **Add** → **STDIO**.
 2. Paste the JSON the installer printed (`examples/jetbrains.example.json` shows the shape: `mcpServers.<name>` with `command` + `args`).
 3. **Working directory**: the project root (critical — the memory store is created under the cwd).
-4. **Server level**: **Project** or **Global** (both are IDE-level choices; the installer does not set them).
+4. **Server level**: as printed by the installer (Project, or Global with `--global`).
 5. OK → Apply; green status = connected. Logs: Help → Show Log in Explorer → `mcp/`.
 
 Do not describe this as "fully automatic" — the UI step is required.
+
+## Existing config files: fail-closed handling
+
+The installer **never overwrites or "repairs" a client config it cannot
+parse**. If the target config (Warp/OpenCode/OpenCode2) exists and is not
+valid JSON — or its `mcp` / `mcpServers` container is not a JSON object — the
+installer:
+
+- stops with a clear `ERROR` containing the config path and the parser error;
+- leaves the file **byte-for-byte unchanged**;
+- makes no attempt to fix arbitrary malformed content.
+
+Fix the file manually (or back it up first), then re-run the installer.
+
+### OpenCode JSONC
+
+OpenCode officially supports JSONC (JSON with Comments). The automatic write
+path is the plain `opencode.json` file. If the project/global location has an
+`opencode.jsonc` (but no `opencode.json`), the installer does **not** guess
+at a JSONC merge: it fails safely and prints the precise manual edit
+(file, placement, snippet) to make in `opencode.jsonc` instead of risking
+config loss.
 
 ## `--global` semantics
 
