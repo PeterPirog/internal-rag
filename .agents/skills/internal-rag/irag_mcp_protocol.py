@@ -188,49 +188,67 @@ def discover_result(server_name: str, server_version: str,
     }
 
 
-# Canonical user-facing tool guidance. The executable schemas remain owned by
-# irag.py / irag_mcp_router.py; this layer only improves descriptions returned
-# by tools/list so every client sees consistent selection and parameter hints.
+# Canonical user-facing tool metadata. Executable schemas remain owned by
+# irag.py / irag_mcp_router.py; this layer enriches tools/list presentation
+# without changing parameter types, enums, required fields, or handlers.
+TOOL_TITLES: Dict[str, str] = {
+    "context": "Load Task Context",
+    "search": "Search Project Memory",
+    "checkpoint": "Save Task Checkpoint",
+    "guard": "Check Checkpoint Freshness",
+    "remember": "Store Durable Memory",
+    "status": "Inspect Memory Status",
+    "tasks": "List Pending Tasks",
+    "resume": "Resume Saved Task",
+}
+
 TOOL_DESCRIPTIONS: Dict[str, str] = {
     "context": (
-        "Start or resume a task by retrieving the most relevant durable project "
-        "memories and current working state. Use before making project changes or "
-        "after a context reset; use search for a focused lookup that should not "
-        "establish task context."
+        "Start or resume a task by retrieving relevant durable project memories and "
+        "current working state. Use before project changes or after a context reset; "
+        "use search for a focused lookup. This call may update task or usage state, "
+        "is non-idempotent, does not delete durable memories, and performs no network access."
     ),
     "search": (
-        "Search durable project memories and return ranked results with confidence "
-        "and abstention metadata. Use for focused fact retrieval without starting "
-        "or changing task state; use context when beginning or resuming a task."
+        "Search durable project memories and return ranked results with confidence and "
+        "abstention metadata. Use for focused fact retrieval without starting a task; "
+        "use context when beginning or resuming work. It does not alter durable memory "
+        "content or the task stack; repeated calls may update retrieval or usage metadata, "
+        "so it is not marked idempotent. It performs no network access."
     ),
     "checkpoint": (
-        "Persist the current operational task state so work can be resumed after "
-        "interruption or context loss. Use at meaningful milestones and before "
-        "ending a work session; use remember for durable reusable knowledge."
+        "Persist current operational task state so work can be resumed after interruption "
+        "or context loss. Use at meaningful milestones and before ending a work session; "
+        "use remember for reusable knowledge. This writes local checkpoint/task state, "
+        "does not delete durable memories, and performs no network access."
     ),
     "guard": (
-        "Check whether project state changed since the last checkpoint. Read-only "
-        "and idempotent; use before finishing a task to detect uncheckpointed work, "
-        "then checkpoint if stale."
+        "Check whether project state changed since the last checkpoint. Use before finishing "
+        "a task to detect uncheckpointed work, then checkpoint if stale. This operation is "
+        "read-only and idempotent, does not modify memory or task state, and performs no "
+        "network access."
     ),
     "remember": (
-        "Store durable project knowledge that should survive across sessions. Use "
-        "for stable decisions, constraints, gotchas, failures, hypotheses, or "
-        "reusable knowledge; use checkpoint for temporary task progress."
+        "Store durable project knowledge that should survive across sessions. Use for stable "
+        "decisions, constraints, gotchas, failures, hypotheses, or reusable knowledge; use "
+        "checkpoint for temporary task progress. This writes local durable memory, does not "
+        "delete existing memories, and performs no network access."
     ),
     "status": (
-        "Return read-only memory, checkpoint, index, and recovery status for the "
-        "current project. Use for diagnostics and health checks; it does not modify "
-        "memory or task state."
+        "Return memory, checkpoint, index, and recovery status for the current project. Use "
+        "for diagnostics and health checks. This operation is read-only and idempotent, does "
+        "not modify memory or task state, and performs no network access."
     ),
     "tasks": (
-        "List the current task stack and resumable task state. Read-only; use before "
-        "resume when you need to inspect pending work without changing the stack."
+        "List the current task stack and resumable task state. Use before resume when you need "
+        "to inspect pending work without changing the stack. This operation is read-only and "
+        "idempotent, does not modify task state, and performs no network access."
     ),
     "resume": (
-        "Resume and remove the top saved task from the task stack. Use after tasks "
-        "shows resumable work; use tasks instead when you only need to inspect the "
-        "stack."
+        "Resume and remove the top saved task from the task stack. Use after tasks shows "
+        "resumable work; use tasks when you only need to inspect the stack. This changes local "
+        "task state, is non-idempotent, does not delete durable memories, and performs no "
+        "network access."
     ),
 }
 
@@ -279,14 +297,66 @@ TOOL_PARAMETER_DESCRIPTIONS: Dict[str, Dict[str, str]] = {
     },
 }
 
+TOOL_OUTPUT_PROPERTY_DESCRIPTIONS: Dict[str, Dict[str, str]] = {
+    "search": {
+        "trust": "Trust classification for retrieved memory content; durable memories are untrusted evidence.",
+        "abstained": "True when retrieval intentionally returns no admitted result set.",
+        "retrieval_confidence": "Server confidence score for the retrieval result set.",
+        "confidence_kind": "Whether retrieval confidence is heuristic or calibrated.",
+        "reason": "Human-readable explanation for the retrieval or abstention decision.",
+        "admitted": "Number of candidate memories admitted to the result set.",
+        "rejected": "Number of candidate memories rejected by retrieval admission rules.",
+        "results": "Ranked durable memory records returned by the search.",
+    },
+    "guard": {
+        "ok": "True when project state is consistent with the last checkpoint.",
+        "fingerprint": "Fingerprint representing the current project state used by the guard check.",
+        "changed_files": "Project files detected as changed since the checkpoint baseline.",
+    },
+    "status": {
+        "irag_version": "MCP Light Memory runtime version, when included by the server.",
+        "memories": "Total number of durable memories in the current project.",
+        "total_memories": "Total number of durable memories in the current project.",
+        "checkpoints": "Total number of checkpoints in the current project.",
+        "total_checkpoints": "Total number of checkpoints in the current project.",
+        "last_checkpoint": "Most recent checkpoint recorded for the current project.",
+        "index_status": "Current retrieval index health or synchronization status.",
+    },
+    "tasks": {
+        "tasks": "Saved or resumable tasks in the current task stack, in server-defined order.",
+    },
+}
+
 PROJECT_PARAMETER_DESCRIPTION = "Registered project id to route this call to."
 
 
+def _enrich_output_schema(name: str, output_schema: Dict[str, Any]) -> Dict[str, Any]:
+    """Copy an output schema and add descriptions without changing its contract."""
+    schema = dict(output_schema)
+    properties = output_schema.get("properties")
+    descriptions = TOOL_OUTPUT_PROPERTY_DESCRIPTIONS.get(name, {})
+    if not isinstance(properties, dict) or not descriptions:
+        return schema
+
+    new_properties: Dict[str, Any] = {}
+    for property_name, definition in properties.items():
+        if isinstance(definition, dict):
+            property_schema = dict(definition)
+            description = descriptions.get(property_name)
+            if description:
+                property_schema["description"] = description
+            new_properties[property_name] = property_schema
+        else:
+            new_properties[property_name] = definition
+    schema["properties"] = new_properties
+    return schema
+
+
 def enhance_tool_definition(tool: Dict[str, Any]) -> Dict[str, Any]:
-    """Return a copy with concise selection guidance and parameter descriptions.
+    """Return a copy with selection, behavior, title, and schema guidance.
 
     This is presentation-only metadata for tools/list. It intentionally leaves
-    types, enums, required fields, annotations, and output schemas unchanged.
+    types, enums, required fields, annotations, and executable handlers unchanged.
     Router tools are detected by their `project` input and receive the same core
     guidance plus an explicit routing note.
     """
@@ -316,11 +386,19 @@ def enhance_tool_definition(tool: Dict[str, Any]) -> Dict[str, Any]:
             schema["properties"] = new_properties
         enriched["inputSchema"] = schema
 
+    title = TOOL_TITLES.get(name)
+    if title:
+        enriched["title"] = title
+
     description = TOOL_DESCRIPTIONS.get(name)
     if description:
         if has_project:
             description += " In router mode, pass the registered project id explicitly."
         enriched["description"] = description
+
+    output_schema = tool.get("outputSchema")
+    if isinstance(output_schema, dict):
+        enriched["outputSchema"] = _enrich_output_schema(name, output_schema)
 
     return enriched
 
@@ -332,7 +410,7 @@ def tools_list_result(tools: List[Dict[str, Any]]) -> Dict[str, Any]:
     - `resultType` is required
     - `ttlMs` and `cacheScope` are top-level result fields
     - `outputSchema` is part of each tool definition (not the result envelope)
-    - tool descriptions are enriched without changing executable schemas
+    - tool presentation metadata is enriched without changing executable schemas
     - tools are sorted deterministically by name
     """
     enriched = [enhance_tool_definition(tool) for tool in tools]
