@@ -10,13 +10,9 @@ build/
 .DS_Store
 Thumbs.db
 
-INTERNAL_RAG/.checkpoint.json
-INTERNAL_RAG/.tasks.json
-INTERNAL_RAG/.fpcache.json
-INTERNAL_RAG/.history.jsonl
-INTERNAL_RAG/.index.sqlite3
-INTERNAL_RAG/.index.sqlite3-wal
-INTERNAL_RAG/.index.sqlite3-shm
-INTERNAL_RAG/exports/
-INTERNAL_RAG/sessions/.snapshots/
+# Project-specific operational memory — always local, never committed.
+# (The tooling recreates this directory automatically via `irag.py init` /
+# `checkpoint`, so no template or skeleton is needed in the repo.)
+INTERNAL_RAG/
+.irag.yml
 .venv-embed/
