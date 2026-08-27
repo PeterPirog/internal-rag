@@ -80,7 +80,7 @@ python3 ~/mcp-light-memory/install.py . --client warp
 The installer:
 - copies skill files + creates `INTERNAL_RAG/` + `AGENTS.md`
 - runs `init` + `checkpoint` + `validate` (so `guard` is `OK` immediately)
-- auto-registers the MCP server in the client config (or prints manual instructions for JetBrains)
+- auto-registers the MCP server in the client config when it can do so safely (or reports `MANUAL_REQUIRED` / prints JetBrains instructions)
 - writes the **absolute path** to the verified Python interpreter (survives Windows PATH issues)
 
 ```powershell
@@ -95,9 +95,9 @@ One installer, four clients, two config scopes. Full guide: [docs/INSTALLATION.m
 
 | Client | Project scope | Global scope |
 |---|---|---|
-| **Warp** (automatic) | `install.py . --client warp` | `install.py . --client warp --global` |
-| **OpenCode stable (V1)** (automatic) | `install.py . --client opencode` | `install.py . --client opencode --global` |
-| **OpenCode 2 (V2, beta)** (automatic) | `install.py . --client opencode2` | `install.py . --client opencode2 --global` |
+| **Warp** (config write automatic; project activation may require approval) | `install.py . --client warp` | `install.py . --client warp --global` |
+| **OpenCode stable (V1)** (automatic for safe JSON config writes) | `install.py . --client opencode` | `install.py . --client opencode --global` |
+| **OpenCode 2 (V2, beta)** (automatic for safe JSON config writes) | `install.py . --client opencode2` | `install.py . --client opencode2 --global` |
 | **JetBrains AI / PyCharm** (manual in IDE UI) | `install.py . --client jetbrains` | `install.py . --client jetbrains --global` |
 
 - **`--global` changes the scope of the CLIENT CONFIG** (`~/.warp/.mcp.json` vs `{repo}/.warp/.mcp.json`, `~/.config/opencode/opencode.json` vs project `opencode.json`). The server still points at the **target project** you installed into.
@@ -105,9 +105,35 @@ One installer, four clients, two config scopes. Full guide: [docs/INSTALLATION.m
 - **JetBrains/PyCharm is assisted, not fully automatic**: the installer prepares the JSON + Working Directory; you add the server in Settings → Tools → AI Assistant → MCP and choose Server level = Project or Global.
 - Manual setup (no installer) per client: [docs/INSTALLATION.md](docs/INSTALLATION.md) + client pages ([Warp](docs/WARP-SETUP.md) · [OpenCode](docs/OPENCODE.md)).
 
-### Zero-shot (agent does it)
+### Zero-shot: copy-paste prompts for Warp and OpenCode
 
-Paste a prompt into the client's agent — see [docs/ZERO-SHOT-SETUP-PROMPTS.md](docs/ZERO-SHOT-SETUP-PROMPTS.md).
+You can paste one of these directly into the client agent. Replace `C:\Projects\App` with the real target repository path.
+
+**Warp — install for one project:**
+
+```text
+Zainstaluj i skonfiguruj MCP Light Memory (mcp-light-memory) jako serwer MCP dla projektu C:\Projects\App w Warp, w zakresie projektu. Użyj repozytorium https://github.com/PeterPirog/mcp-light-memory. Jeśli narzędzie nie jest jeszcze sklonowane, sklonuj je do stabilnej lokalizacji poza projektem; jeśli już istnieje, zaktualizuj przez git pull --ff-only. Zastosuj kanoniczny kontrakt instalacji z repozytorium i wykonaj install.py z TARGET_PROJECT=C:\Projects\App oraz --client warp bez --global. Nie nadpisuj istniejącej konfiguracji na siłę. Po instalacji zweryfikuj z cwd=C:\Projects\App: mlm.py --version, mlm.py status i mlm.py guard oraz sprawdź, że konfiguracja Warp zawiera mcp-light-memory i ścieżkę C:\Projects\App. Sukces zgłoś dopiero po MCP REGISTRATION: REGISTERED i poprawnej weryfikacji. Jeśli Warp wymaga dodatkowego project activation/toggle/approval, wskaż dokładnie ten krok i nie twierdź, że serwer jest aktywny przed jego wykonaniem.
+```
+
+**Warp — global client config for one project:**
+
+```text
+Zainstaluj i skonfiguruj MCP Light Memory (mcp-light-memory) w Warp globalnie dla projektu C:\Projects\App. Użyj repozytorium https://github.com/PeterPirog/mcp-light-memory. Jeśli narzędzie nie jest jeszcze sklonowane, sklonuj je do stabilnej lokalizacji poza projektem; jeśli już istnieje, wykonaj git pull --ff-only. Zastosuj kanoniczny kontrakt instalacji i uruchom install.py z TARGET_PROJECT=C:\Projects\App, --client warp oraz --global. Pamiętaj: --global oznacza globalny config klienta Warp, ale serwer nadal ma być związany z C:\Projects\App; nie używaj routera multi-project. Po instalacji zweryfikuj z cwd=C:\Projects\App: mlm.py --version, mlm.py status, mlm.py guard oraz sprawdź globalny config Warp pod kątem mcp-light-memory i ścieżki C:\Projects\App. Sukces zgłoś tylko po MCP REGISTRATION: REGISTERED i poprawnej weryfikacji.
+```
+
+**OpenCode — install for one project (stable/V1):**
+
+```text
+Zainstaluj i skonfiguruj MCP Light Memory (mcp-light-memory) jako serwer MCP dla projektu C:\Projects\App w OpenCode. Przez "OpenCode" rozumiem stable/V1, więc użyj --client opencode, nie opencode2. Użyj repozytorium https://github.com/PeterPirog/mcp-light-memory. Jeśli narzędzie nie jest jeszcze sklonowane, sklonuj je do stabilnej lokalizacji poza projektem; jeśli już istnieje, wykonaj git pull --ff-only. Uruchom install.py z TARGET_PROJECT=C:\Projects\App i --client opencode bez --global. Nie nadpisuj istniejącego configu na siłę. Jeśli installer zwróci MCP REGISTRATION: MANUAL_REQUIRED (np. istnieje opencode.jsonc), nie zgłaszaj sukcesu: wykonaj bezpieczną edycję JSONC zachowując komentarze i pozostałe ustawienia, jeśli masz odpowiednie narzędzia; w przeciwnym razie wskaż dokładną akcję manualną. Po realnej rejestracji zweryfikuj z cwd=C:\Projects\App: mlm.py --version, mlm.py status, mlm.py guard oraz sprawdź, że config OpenCode zawiera mcp-light-memory i C:\Projects\App.
+```
+
+**OpenCode — global client config for one project (stable/V1):**
+
+```text
+Zainstaluj i skonfiguruj MCP Light Memory (mcp-light-memory) globalnie w OpenCode dla projektu C:\Projects\App. Przez "OpenCode" rozumiem stable/V1, więc użyj --client opencode. Użyj repozytorium https://github.com/PeterPirog/mcp-light-memory. Jeśli narzędzie nie jest jeszcze sklonowane, sklonuj je do stabilnej lokalizacji poza projektem; jeśli już istnieje, wykonaj git pull --ff-only. Uruchom install.py z TARGET_PROJECT=C:\Projects\App, --client opencode oraz --global. --global oznacza globalny config OpenCode, ale serwer nadal ma być związany tylko z C:\Projects\App; nie używaj routera multi-project. Jeśli installer zwróci MCP REGISTRATION: MANUAL_REQUIRED, nie zgłaszaj sukcesu i postępuj zgodnie z bezpieczną instrukcją JSONC. Po realnej rejestracji zweryfikuj z cwd=C:\Projects\App: mlm.py --version, mlm.py status, mlm.py guard oraz sprawdź globalny config OpenCode pod kątem mcp-light-memory i ścieżki C:\Projects\App.
+```
+
+For OpenCode 2 / V2, use the same prompts but explicitly say **OpenCode 2 / V2** and require `--client opencode2`. More variants: [docs/ZERO-SHOT-SETUP-PROMPTS.md](docs/ZERO-SHOT-SETUP-PROMPTS.md).
 
 ---
 
@@ -216,7 +242,7 @@ mlm.py doctor
 | `INTERNAL_RAG/` (storage folder — unchanged) | — |
 | `.agents/skills/internal-rag/` (skill dir — unchanged) | — |
 
-The on-disk folder `INTERNAL_RAG/` and the skill directory `.agents/skills/internal-rag/` are intentionally kept under their legacy names for **zero-migration** backward compatibility. See [docs/MIGRATION-TO-MCP-LIGHT-MEMORY.md](docs/MIGRATION-TO-MCP-LIGHT-MEMORY.md).
+The on-disk folder `INTERNAL_RAG/` and the skill directory `.agents/skills/internal-rag/` are intentionally kept under their legacy names for **zero-migration** backward compatibility. See `docs/MIGRATION-TO-MCP-LIGHT-MEMORY.md`.
 
 ## Durable memory (CRUD)
 
