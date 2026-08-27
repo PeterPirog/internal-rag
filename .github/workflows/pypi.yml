@@ -1,0 +1,97 @@
+name: pypi
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "pyproject.toml"
+      - "mcp_light_memory/**"
+      - "install.py"
+      - "privacy_check.py"
+      - "VERSION"
+      - ".agents/skills/internal-rag/**"
+      - ".opencode/tools/**"
+      - ".opencode/commands/**"
+      - ".opencode/plugins/internal-rag-resilience.ts"
+      - ".opencode/plugins/internal-rag-resilience-v2.ts"
+      - ".github/workflows/pypi.yml"
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish the built package to PyPI"
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install packaging tools
+        run: python -m pip install --upgrade build twine
+
+      - name: Build distributions
+        run: python -m build
+
+      - name: Validate package metadata
+        run: python -m twine check dist/*
+
+      - name: Inspect wheel contents
+        shell: bash
+        run: |
+          set -euo pipefail
+          wheel=$(find dist -name '*.whl' -print -quit)
+          python -m zipfile -l "$wheel" | tee wheel-contents.txt
+          grep -F 'mcp_light_memory/install.py' wheel-contents.txt
+          grep -F 'mcp_light_memory/.agents/skills/internal-rag/mlm.py' wheel-contents.txt
+          grep -F 'mcp_light_memory/.opencode/tools/memory-status.ts' wheel-contents.txt
+
+      - name: Smoke-test installed CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m venv .venv-smoke
+          . .venv-smoke/bin/activate
+          python -m pip install dist/*.whl
+          mcp-light-memory --help
+          mlm-install --help
+
+      - name: Upload distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.publish)
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/mcp-light-memory
+    permissions:
+      id-token: write
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
