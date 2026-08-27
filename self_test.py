@@ -25,7 +25,7 @@ def main():
  try:
   # Fresh local install
   r=tmp/'fresh'; r.mkdir(); init_repo(r,env=env)
-  x=run([sys.executable,str(HERE/'install.py'),str(r)],HERE,env=env); need('INSTALLATION COMPLETE' in x.stdout,'install')
+  x=run([sys.executable,str(HERE/'install.py'),str(r)],HERE,env=env); need('PROJECT INSTALLATION COMPLETE' in x.stdout,'install')
   need(run(['git','status','--short'],r,env=env).stdout.strip()=='','local install polluted git status')
   cli=r/'.agents/skills/internal-rag/irag.py'
   c=run([sys.executable,str(cli),'context','--task','modify app'],r,env=env); need('recovery_required: NO' in c.stdout,c.stdout)

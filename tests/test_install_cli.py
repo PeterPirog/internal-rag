@@ -628,13 +628,29 @@ class TestOpenCodeJsoncSafePath(unittest.TestCase):
                                          "mcp-light-memory",
                                          ".agents/skills/internal-rag/mlm.py",
                                          ["mcp"])
-        self.assertIsNone(result, "must not return a written config path")
+        self.assertEqual(result.status, "MANUAL_REQUIRED")
+        self.assertIsNone(result.cfg_path)
         self.assertEqual(jsonc.read_bytes(), before,
                          "JSONC config must remain byte-for-byte unchanged")
         out = buf.getvalue()
         self.assertIn("MANUAL EDIT REQUIRED (JSONC)", out)
         self.assertIn(str(jsonc), out)
         self.assertNotIn("mcp-light-memory", jsonc.read_text(encoding="utf-8"))
+
+    def test_jsonc_plus_compaction_does_not_create_opencode_json(self):
+        """--compaction with a JSONC-only setup must NOT implicitly create a
+        second opencode.json file next to the user's opencode.jsonc."""
+        import io, contextlib
+        mod = self._load()
+        jsonc = self.tmp / "opencode.jsonc"
+        jsonc.write_text("// comment\n{}", encoding="utf-8")
+        before = jsonc.read_bytes()
+        with contextlib.redirect_stdout(io.StringIO()):
+            mod.integrate_compaction("opencode", self.tmp, False)
+        self.assertFalse((self.tmp / "opencode.json").exists(),
+                         "compaction must not create a second config file next to JSONC")
+        self.assertEqual(jsonc.read_bytes(), before,
+                         "JSONC must remain byte-for-byte unchanged")
 
 
 class TestClientConfigPaths(unittest.TestCase):
@@ -707,7 +723,8 @@ class TestJetbrainsScopeInstructions(unittest.TestCase):
         out, result = self._capture(lambda: mod.register_client(
             "jetbrains", self.tmp, False, "mcp-light-memory",
             ".agents/skills/internal-rag/mlm.py", ["mcp"]))
-        self.assertIsNone(result, "JetBrains registration must not write a config")
+        self.assertEqual(result.status, "INSTRUCTIONS_ONLY",
+                         "JetBrains must report INSTRUCTIONS_ONLY (never REGISTERED)")
         self.assertIn("Server level: Project / Current project.", out)
         self.assertNotIn("Server level: Global (all projects).", out)
 
@@ -716,7 +733,7 @@ class TestJetbrainsScopeInstructions(unittest.TestCase):
         out, result = self._capture(lambda: mod.register_client(
             "jetbrains", self.tmp, True, "mcp-light-memory",
             ".agents/skills/internal-rag/mlm.py", ["mcp"]))
-        self.assertIsNone(result)
+        self.assertEqual(result.status, "INSTRUCTIONS_ONLY")
         self.assertIn("Server level: Global (all projects).", out)
         self.assertNotIn("Server level: Project / Current project.", out)
 
@@ -730,6 +747,109 @@ class TestJetbrainsScopeInstructions(unittest.TestCase):
             after = sorted(p.name for p in self.tmp.rglob("*"))
             self.assertEqual(before, after,
                              "installer must not create/modify files for JetBrains")
+
+
+class TestRegistrationOutcomeReporting(unittest.TestCase):
+    """register_client() must return an explicit, unambiguous outcome:
+    REGISTERED / MANUAL_REQUIRED / INSTRUCTIONS_ONLY — and the output must
+    never claim 'registered' when it did not happen."""
+
+    def setUp(self):
+        import tempfile, shutil
+        self.tmp = Path(tempfile.mkdtemp(prefix="irag-regout-"))
+        (self.tmp / ".git").mkdir()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _load(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("_install_regout", str(INSTALL_PY))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def _capture(self, client, **kw):
+        import io, contextlib
+        mod = self._load()
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            result = mod.register_client(client, self.tmp, kw.get("global_cfg", False),
+                                         "mcp-light-memory",
+                                         ".agents/skills/internal-rag/mlm.py",
+                                         ["mcp"])
+        return buf.getvalue(), result
+
+    def test_warp_reports_registered(self):
+        out, result = self._capture("warp")
+        self.assertEqual(result.status, "REGISTERED")
+        self.assertEqual(result.cfg_path, self.tmp / ".warp" / ".mcp.json")
+        self.assertIn("Registered MCP server 'mcp-light-memory'", out)
+
+    def test_opencode_json_reports_registered(self):
+        out, result = self._capture("opencode")
+        self.assertEqual(result.status, "REGISTERED")
+        self.assertEqual(result.cfg_path, self.tmp / "opencode.json")
+
+    def test_opencode2_json_reports_registered(self):
+        out, result = self._capture("opencode2")
+        self.assertEqual(result.status, "REGISTERED")
+        self.assertEqual(result.cfg_path, self.tmp / "opencode.json")
+
+    def test_jsonc_only_reports_manual_required_and_never_registered(self):
+        (self.tmp / "opencode.jsonc").write_text("// c\n{}", encoding="utf-8")
+        out, result = self._capture("opencode")
+        self.assertEqual(result.status, "MANUAL_REQUIRED")
+        self.assertIn("MANUAL EDIT REQUIRED (JSONC)", out)
+        self.assertNotIn("MCP REGISTRATION: REGISTERED", out)
+        self.assertNotIn("MCP server registered", out.lower().replace(
+            "registered mcp server 'mcp-light-memory'", ""))
+        # The installer must not claim a completed MCP registration.
+        self.assertNotIn("Registered MCP server", out)
+
+    def test_jetbrains_output_never_says_registered(self):
+        out, result = self._capture("jetbrains")
+        self.assertEqual(result.status, "INSTRUCTIONS_ONLY")
+        low = out.lower()
+        self.assertNotIn("registered", low,
+                         "JetBrains output must never claim the server is registered")
+
+    def test_malformed_config_byte_for_byte_unchanged(self):
+        d = self.tmp / ".warp"
+        d.mkdir()
+        cfg = d / ".mcp.json"
+        bad = b'{"mcpServers": {"x": { broken, }\n'
+        cfg.write_bytes(bad)
+        with self.assertRaises(SystemExit):
+            self._capture("warp")
+        self.assertEqual(cfg.read_bytes(), bad)
+
+    def test_main_jsonc_path_exits_2_and_never_claims_registered(self):
+        """End-to-end: main() with a JSONC-only OpenCode setup must exit 2,
+        print the manual-action block, and never print a success/registered
+        message for the MCP step."""
+        import subprocess
+        subprocess.run(["git", "init", "-q", str(self.tmp)], check=True)
+        subprocess.run(["git", "-C", str(self.tmp), "config", "user.email", "t@t"], check=True)
+        subprocess.run(["git", "-C", str(self.tmp), "config", "user.name", "t"], check=True)
+        (self.tmp / "app.py").write_text("print(1)\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.tmp), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(self.tmp), "commit", "-q", "-m", "init"], check=True)
+        (self.tmp / "opencode.jsonc").write_text("// c\n{}", encoding="utf-8")
+        r = subprocess.run([sys.executable, str(INSTALL_PY), str(self.tmp),
+                            "--client", "opencode"],
+                           capture_output=True, text=True, timeout=300)
+        self.assertEqual(r.returncode, 2,
+                         f"MANUAL_REQUIRED must exit 2, got {r.returncode}\n{r.stdout}\n{r.stderr}")
+        out = r.stdout
+        self.assertIn("PROJECT FILES INSTALLED", out)
+        self.assertIn("MCP REGISTRATION NOT COMPLETE", out)
+        self.assertIn("MANUAL ACTION REQUIRED", out)
+        self.assertIn("MCP REGISTRATION: MANUAL_REQUIRED", out)
+        self.assertNotIn("INSTALLATION COMPLETE\nMCP server registered", out)
+        self.assertNotIn("MCP server registered for", out)
+        self.assertIn("MCP REGISTRATION", out)
 
 
 class TestInstallPs1Parity(unittest.TestCase):

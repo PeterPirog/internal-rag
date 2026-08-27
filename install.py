@@ -428,8 +428,37 @@ def client_config_path(client: str, project: Path, global_cfg: bool) -> Path:
         raise ValueError(f"Unknown client: {client}")
 
 
+# Explicit MCP registration outcomes (reported by register_client).
+REGISTRATION_REGISTERED = "REGISTERED"
+REGISTRATION_MANUAL_REQUIRED = "MANUAL_REQUIRED"
+REGISTRATION_INSTRUCTIONS_ONLY = "INSTRUCTIONS_ONLY"
+
+
+class RegistrationResult:
+    """Outcome of register_client().
+
+    - REGISTERED: the client config was actually written (Warp/OpenCode JSON).
+    - MANUAL_REQUIRED: the installer refused to guess (e.g. OpenCode JSONC-only);
+      a human/agent must perform the printed manual edit. Exit code: 2.
+    - INSTRUCTIONS_ONLY: JetBrains/PyCharm — the IDE UI step is required by
+      design; assisted success, exit code: 0.
+
+    Exit code contract (documented for agent automation):
+      0 = requested automatic registration completed (REGISTERED) or the
+          client is explicitly manual (JetBrains, INSTRUCTIONS_ONLY);
+      2 = registration could not be completed automatically (MANUAL_REQUIRED).
+    """
+
+    def __init__(self, status: str, cfg_path: Path | None = None):
+        self.status = status
+        self.cfg_path = cfg_path
+
+    def __repr__(self):
+        return f"RegistrationResult(status={self.status!r}, cfg_path={self.cfg_path!r})"
+
+
 def register_client(client: str, project: Path, global_cfg: bool,
-                    server_name: str, script_rel: str, extra_args: list[str]):
+                    server_name: str, script_rel: str, extra_args: list[str]) -> RegistrationResult:
     """Register the MCP server in the client's config file (merge, preserve existing).
 
     Config structures per client (verified against official docs 2026-08-26):
@@ -474,7 +503,7 @@ def register_client(client: str, project: Path, global_cfg: bool,
     if client == "jetbrains":
         _print_jetbrains_manual_instructions(server_name, server_entry, project,
                                              global_cfg)
-        return None
+        return RegistrationResult(REGISTRATION_INSTRUCTIONS_ONLY)
 
     # warp / opencode / opencode2: write the real config file
     cfg_path = client_config_path(client, project, global_cfg)
@@ -483,7 +512,7 @@ def register_client(client: str, project: Path, global_cfg: bool,
         if manual_only:
             _print_opencode_jsonc_manual_instructions(cfg_path, server_name,
                                                        server_entry, global_cfg)
-            return None
+            return RegistrationResult(REGISTRATION_MANUAL_REQUIRED)
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
     data = load_client_config(cfg_path)
 
@@ -506,7 +535,7 @@ def register_client(client: str, project: Path, global_cfg: bool,
                         encoding="utf-8")
     print(f"Registered MCP server '{server_name}' in {cfg_path}")
     _verify_registered_server(server_entry, client)
-    return cfg_path
+    return RegistrationResult(REGISTRATION_REGISTERED, cfg_path)
 
 
 def _print_jetbrains_manual_instructions(server_name: str, server_entry: dict,
@@ -839,9 +868,15 @@ def integrate_compaction(client: str, project: Path, global_cfg: bool):
         cfg_path = client_config_path("opencode2", project, global_cfg)
     else:
         return
+    # Never implicitly create a second config file alongside an existing
+    # JSONC (manual-only) setup: fail safely instead of mixing two files.
     if not cfg_path.exists():
-        # Config was just created by register_client; read it
-        pass
+        jsonc = cfg_path.with_suffix(".jsonc")
+        if jsonc.exists():
+            print(f"  Compaction SKIPPED: {jsonc.name} exists (JSONC manual-only).")
+            print(f"  Add the compaction settings manually to {jsonc} — the")
+            print("  installer does not rewrite JSONC or create a second file.")
+            return
     data = load_client_config(cfg_path)
 
     if client == "opencode":
@@ -911,18 +946,27 @@ def main():
     if not memory_existed_before:
         run_irag(target, 'checkpoint', '--reason', 'install-init')
     run_irag(target, 'validate')
+    reg = None
     if args.client:
         script_rel = '.agents/skills/internal-rag/mlm.py'
-        register_client(args.client, target, args.global_cfg, args.server_name, script_rel, ['mcp'])
+        reg = register_client(args.client, target, args.global_cfg, args.server_name, script_rel, ['mcp'])
     if args.compaction and args.client in ("opencode", "opencode2"):
+        # integrate_compaction() is JSONC-safe: it never creates a second
+        # file next to an existing opencode.jsonc (skips with a clear message).
         integrate_compaction(args.client, target, args.global_cfg)
-    print('\nINSTALLATION COMPLETE')
+    print('\nPROJECT INSTALLATION COMPLETE')
     print('Existing INTERNAL_RAG memory was preserved.')
     print(f'Git local exclude: {exclude_path}')
-    if args.client and args.client not in ("jetbrains",):
-        print(f'MCP server registered for {args.client}.')
-    elif args.client == "jetbrains":
-        print('MCP setup instructions printed above (manual IDE step required).')
+    if args.client and reg is not None:
+        if reg.status == REGISTRATION_REGISTERED:
+            print(f'MCP REGISTRATION: REGISTERED ({reg.cfg_path})')
+        elif reg.status == REGISTRATION_MANUAL_REQUIRED:
+            print('MCP REGISTRATION: MANUAL_REQUIRED')
+            print('  PROJECT FILES INSTALLED')
+            print('  MCP REGISTRATION NOT COMPLETE')
+            print('  MANUAL ACTION REQUIRED — see the printed manual edit above.')
+        else:  # INSTRUCTIONS_ONLY (JetBrains)
+            print('MCP REGISTRATION: INSTRUCTIONS_ONLY (JetBrains/PyCharm — IDE UI step required)')
     # Client-specific restart instruction
     restart_msgs = {
         'warp': 'Restart Warp, then run context for the current task.',
@@ -936,6 +980,13 @@ def main():
     print(f'Memory store: {mem_store}')
     print('\nBefore publishing the target repository, run:')
     print(f'  {sys.executable} "{HERE / "privacy_check.py"}" "{target}"')
+    # Exit code contract (agent automation):
+    #   0 = requested automatic registration completed (REGISTERED), or the
+    #       client is explicitly manual (JetBrains / INSTRUCTIONS_ONLY);
+    #   2 = registration requires manual action (MANUAL_REQUIRED, e.g. OpenCode
+    #       JSONC-only). Project files ARE installed either way.
+    if reg is not None and reg.status == REGISTRATION_MANUAL_REQUIRED:
+        raise SystemExit(2)
 
 if __name__ == '__main__':
     main()

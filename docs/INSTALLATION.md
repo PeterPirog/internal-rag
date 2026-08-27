@@ -37,6 +37,23 @@ python ~/mcp-light-memory/install.py <target-project> --client <client> [--globa
 The installer is idempotent — re-running it updates in place and preserves
 existing memory.
 
+### Registration outcome & exit code (agent contract)
+
+`install.py` reports the MCP registration outcome explicitly:
+
+- `MCP REGISTRATION: REGISTERED <path>` — the client config was written.
+- `MCP REGISTRATION: MANUAL_REQUIRED` + `PROJECT FILES INSTALLED` /
+  `MCP REGISTRATION NOT COMPLETE` / `MANUAL ACTION REQUIRED` — the installer
+  refused to guess (e.g. only `opencode.jsonc` exists); perform the printed
+  manual edit.
+- `MCP REGISTRATION: INSTRUCTIONS_ONLY` — JetBrains/PyCharm: assisted by
+  design; the IDE UI step is required.
+
+Exit codes: `0` = requested automatic registration completed, or the client is
+explicitly manual (JetBrains); `2` = `MANUAL_REQUIRED` (automatic registration
+was requested but could not be completed). Project files are installed in all
+cases.
+
 ## Installation matrix
 
 | Client | Scope | Command |
