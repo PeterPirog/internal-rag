@@ -188,6 +188,143 @@ def discover_result(server_name: str, server_version: str,
     }
 
 
+# Canonical user-facing tool guidance. The executable schemas remain owned by
+# irag.py / irag_mcp_router.py; this layer only improves descriptions returned
+# by tools/list so every client sees consistent selection and parameter hints.
+TOOL_DESCRIPTIONS: Dict[str, str] = {
+    "context": (
+        "Start or resume a task by retrieving the most relevant durable project "
+        "memories and current working state. Use before making project changes or "
+        "after a context reset; use search for a focused lookup that should not "
+        "establish task context."
+    ),
+    "search": (
+        "Search durable project memories and return ranked results with confidence "
+        "and abstention metadata. Use for focused fact retrieval without starting "
+        "or changing task state; use context when beginning or resuming a task."
+    ),
+    "checkpoint": (
+        "Persist the current operational task state so work can be resumed after "
+        "interruption or context loss. Use at meaningful milestones and before "
+        "ending a work session; use remember for durable reusable knowledge."
+    ),
+    "guard": (
+        "Check whether project state changed since the last checkpoint. Read-only "
+        "and idempotent; use before finishing a task to detect uncheckpointed work, "
+        "then checkpoint if stale."
+    ),
+    "remember": (
+        "Store durable project knowledge that should survive across sessions. Use "
+        "for stable decisions, constraints, gotchas, failures, hypotheses, or "
+        "reusable knowledge; use checkpoint for temporary task progress."
+    ),
+    "status": (
+        "Return read-only memory, checkpoint, index, and recovery status for the "
+        "current project. Use for diagnostics and health checks; it does not modify "
+        "memory or task state."
+    ),
+    "tasks": (
+        "List the current task stack and resumable task state. Read-only; use before "
+        "resume when you need to inspect pending work without changing the stack."
+    ),
+    "resume": (
+        "Resume and remove the top saved task from the task stack. Use after tasks "
+        "shows resumable work; use tasks instead when you only need to inspect the "
+        "stack."
+    ),
+}
+
+TOOL_PARAMETER_DESCRIPTIONS: Dict[str, Dict[str, str]] = {
+    "context": {
+        "task": (
+            "Short description of the task being started or resumed; used to "
+            "retrieve relevant project context."
+        ),
+        "limit": "Maximum number of relevant memories to include in the context packet.",
+    },
+    "search": {
+        "query": (
+            "Natural-language query describing the fact, decision, constraint, or "
+            "prior work to retrieve."
+        ),
+        "limit": "Maximum number of ranked memories to return.",
+        "types": "Optional memory types to include; omit to search all supported types.",
+        "statuses": "Optional memory statuses to include; omit to use the server default.",
+        "at": "Optional YYYY-MM-DD date used to filter memories by temporal validity.",
+        "explain": "Include per-channel retrieval scoring details for diagnostics.",
+    },
+    "checkpoint": {
+        "reason": "Why this checkpoint is being created.",
+        "phase": "Current task phase or milestone name.",
+        "completed": "Work completed since the previous checkpoint.",
+        "in_progress": "Work currently underway.",
+        "blockers": "Known blockers or unresolved issues.",
+        "next": "Recommended next action when work resumes.",
+    },
+    "remember": {
+        "type": "Memory category describing the kind of durable knowledge being stored.",
+        "title": "Short, specific title for the memory.",
+        "body": (
+            "Durable content to preserve: a decision, fact, constraint, gotcha, "
+            "failure, hypothesis, or reusable session knowledge."
+        ),
+        "tags": "Optional comma-separated tags used to organize or retrieve the memory.",
+        "evidence": "Optional source or project-relative evidence reference supporting the memory.",
+        "scope": "Optional scope describing where this memory applies.",
+        "consequence": "Optional impact or consequence of this memory for future work.",
+        "status": (
+            "Memory confidence state: active for established knowledge or tentative "
+            "for information that still needs confirmation."
+        ),
+    },
+}
+
+PROJECT_PARAMETER_DESCRIPTION = "Registered project id to route this call to."
+
+
+def enhance_tool_definition(tool: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a copy with concise selection guidance and parameter descriptions.
+
+    This is presentation-only metadata for tools/list. It intentionally leaves
+    types, enums, required fields, annotations, and output schemas unchanged.
+    Router tools are detected by their `project` input and receive the same core
+    guidance plus an explicit routing note.
+    """
+    enriched = dict(tool)
+    name = str(tool.get("name", ""))
+
+    input_schema = tool.get("inputSchema")
+    has_project = False
+    if isinstance(input_schema, dict):
+        schema = dict(input_schema)
+        properties = input_schema.get("properties")
+        if isinstance(properties, dict):
+            has_project = "project" in properties
+            parameter_descriptions = TOOL_PARAMETER_DESCRIPTIONS.get(name, {})
+            new_properties: Dict[str, Any] = {}
+            for parameter_name, definition in properties.items():
+                if isinstance(definition, dict):
+                    parameter = dict(definition)
+                    description = parameter_descriptions.get(parameter_name)
+                    if parameter_name == "project":
+                        description = PROJECT_PARAMETER_DESCRIPTION
+                    if description:
+                        parameter["description"] = description
+                    new_properties[parameter_name] = parameter
+                else:
+                    new_properties[parameter_name] = definition
+            schema["properties"] = new_properties
+        enriched["inputSchema"] = schema
+
+    description = TOOL_DESCRIPTIONS.get(name)
+    if description:
+        if has_project:
+            description += " In router mode, pass the registered project id explicitly."
+        enriched["description"] = description
+
+    return enriched
+
+
 def tools_list_result(tools: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Modern tools/list result with resultType and cache metadata.
 
@@ -195,9 +332,11 @@ def tools_list_result(tools: List[Dict[str, Any]]) -> Dict[str, Any]:
     - `resultType` is required
     - `ttlMs` and `cacheScope` are top-level result fields
     - `outputSchema` is part of each tool definition (not the result envelope)
+    - tool descriptions are enriched without changing executable schemas
     - tools are sorted deterministically by name
     """
-    ordered = sorted(tools, key=lambda t: t.get("name", ""))
+    enriched = [enhance_tool_definition(tool) for tool in tools]
+    ordered = sorted(enriched, key=lambda t: t.get("name", ""))
     return {
         "resultType": "complete",
         "tools": ordered,
