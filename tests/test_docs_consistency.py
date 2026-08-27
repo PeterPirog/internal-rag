@@ -7,9 +7,12 @@ silently drifting away from English. Zero external dependencies; Python 3.8+.
 """
 from __future__ import annotations
 
+import ast
 import importlib.util
+import io
 import json
 import re
+import tokenize
 import unittest
 from pathlib import Path
 from typing import List
@@ -87,14 +90,29 @@ def _strip_jsonc(text: str) -> str:
 
 
 def _extract_fenced_blocks(text: str, language: str) -> List[str]:
-    blocks: List[str] = []
-    pattern = re.compile(
-        r"```" + re.escape(language) + r"\s*\n(.*?)\n```",
-        re.DOTALL,
-    )
-    for match in pattern.finditer(text):
-        blocks.append(match.group(1))
-    return blocks
+    pattern = re.compile(r"```" + re.escape(language) + r"\s*\n(.*?)\n```", re.DOTALL)
+    return [match.group(1) for match in pattern.finditer(text)]
+
+
+def _python_comments_and_docstrings(text: str) -> str:
+    """Return Python comments and docstrings, excluding runtime string data."""
+    prose: List[str] = []
+    try:
+        for token in tokenize.generate_tokens(io.StringIO(text).readline):
+            if token.type == tokenize.COMMENT:
+                prose.append(token.string)
+    except (tokenize.TokenError, IndentationError):
+        pass
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return "\n".join(prose)
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            doc = ast.get_docstring(node, clean=False)
+            if doc:
+                prose.append(doc)
+    return "\n".join(prose)
 
 
 class TestDocsConsistency(unittest.TestCase):
@@ -109,8 +127,7 @@ class TestDocsConsistency(unittest.TestCase):
 
     def test_docs_protocol_versions_include_all_supported(self):
         docs_text = "\n".join(
-            path.read_text(encoding="utf-8", errors="replace")
-            for path in DOCS.glob("*.md")
+            path.read_text(encoding="utf-8", errors="replace") for path in DOCS.glob("*.md")
         )
         mentioned = set(re.findall(r"`(20\d{2}-\d{2}-\d{2})`", docs_text))
         self.assertFalse(set(_load_supported_versions()) - mentioned)
@@ -152,14 +169,9 @@ class TestDocsConsistency(unittest.TestCase):
 
 class TestInstallDocsMatrix(unittest.TestCase):
     INSTALL_DOCS = (
-        "README.md",
-        "INSTALL.md",
-        "START_HERE.md",
-        "docs/INSTALLATION.md",
-        "docs/ZERO-SHOT-SETUP-PROMPTS.md",
-        "docs/WARP-SETUP.md",
-        "docs/OPENCODE.md",
-        "docs/MCP-MULTI-PROJECT.md",
+        "README.md", "INSTALL.md", "START_HERE.md", "docs/INSTALLATION.md",
+        "docs/ZERO-SHOT-SETUP-PROMPTS.md", "docs/WARP-SETUP.md",
+        "docs/OPENCODE.md", "docs/MCP-MULTI-PROJECT.md",
     )
 
     def _read(self, rel: str) -> str:
@@ -179,7 +191,7 @@ class TestInstallDocsMatrix(unittest.TestCase):
 
     def test_install_md_warns_bare_install_is_not_registration(self):
         text = self._read("INSTALL.md")
-        self.assertRegex(text, r"(?i)does \*\*not\*\*.*register|not.*register")
+        self.assertRegex(text, r"(?is)does \*\*not\*\*\s*register|not.*register")
 
     def test_opencode_v1_example_is_flat_mcp(self):
         data = json.loads(self._read("examples/opencode-legacy.example.json"))
@@ -250,13 +262,8 @@ class TestAgentInstallContract(unittest.TestCase):
     def test_workflow_requires_real_registration(self):
         contract = self._contract()
         for token in (
-            "verify TARGET_PROJECT",
-            "stable location outside",
-            "mlm.py --version",
-            "mlm.py status",
-            "mlm.py guard",
-            "report success",
-            "UI/approval",
+            "verify TARGET_PROJECT", "stable location outside", "mlm.py --version",
+            "mlm.py status", "mlm.py guard", "report success", "UI/approval",
         ):
             self.assertIn(token, contract)
         self.assertRegex(contract, r"(?i)activation|approval")
@@ -264,32 +271,45 @@ class TestAgentInstallContract(unittest.TestCase):
 
 
 class TestEnglishLanguagePolicy(unittest.TestCase):
-    """User-facing docs and production source prose must remain English."""
+    """Documentation and source comments/docstrings must remain English."""
 
-    NON_ENGLISH_DIACRITIC_CODEPOINTS = (
+    DIACRITIC_CODEPOINTS = (
         0x0105, 0x0107, 0x0119, 0x0142, 0x0144, 0x00F3, 0x015B, 0x017A, 0x017C,
         0x0104, 0x0106, 0x0118, 0x0141, 0x0143, 0x00D3, 0x015A, 0x0179, 0x017B,
     )
-    NON_ENGLISH_DIACRITICS = re.compile(
-        "[" + "".join(chr(codepoint) for codepoint in NON_ENGLISH_DIACRITIC_CODEPOINTS) + "]"
+    LANGUAGE_MARKERS = re.compile(
+        "[" + "".join(chr(codepoint) for codepoint in DIACRITIC_CODEPOINTS) + "]"
     )
-    TEXT_SUFFIXES = {".md", ".py", ".ts", ".ps1", ".yml", ".yaml"}
+    SOURCE_SUFFIXES = {".py", ".ts", ".ps1", ".yml", ".yaml"}
     SKIP_DIRS = {".git", "node_modules", "__pycache__", "tests", "benchmarks"}
 
-    def test_documentation_and_production_source_prose_is_english(self):
+    def test_markdown_documentation_is_english(self):
+        offenders = []
+        for path in PROJECT_ROOT.rglob("*.md"):
+            if any(part in self.SKIP_DIRS for part in path.parts):
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace")
+            if self.LANGUAGE_MARKERS.search(text):
+                offenders.append(str(path.relative_to(PROJECT_ROOT)))
+        self.assertFalse(offenders, "Non-English prose markers found in Markdown: " + ", ".join(offenders))
+
+    def test_production_source_comments_and_docstrings_are_english(self):
         offenders = []
         for path in PROJECT_ROOT.rglob("*"):
-            if not path.is_file() or path.suffix.lower() not in self.TEXT_SUFFIXES:
+            if not path.is_file() or path.suffix.lower() not in self.SOURCE_SUFFIXES:
                 continue
             if any(part in self.SKIP_DIRS for part in path.parts):
                 continue
             text = path.read_text(encoding="utf-8", errors="replace")
-            if self.NON_ENGLISH_DIACRITICS.search(text):
+            if path.suffix.lower() == ".py":
+                prose = _python_comments_and_docstrings(text)
+            else:
+                prose = text
+            if self.LANGUAGE_MARKERS.search(prose):
                 offenders.append(str(path.relative_to(PROJECT_ROOT)))
         self.assertFalse(
             offenders,
-            "Non-English prose markers found in documentation/production source: "
-            + ", ".join(offenders),
+            "Non-English markers found in production comments/docstrings: " + ", ".join(offenders),
         )
 
 
