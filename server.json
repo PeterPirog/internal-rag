@@ -1,0 +1,21 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.PeterPirog/mcp-light-memory",
+  "title": "MCP Light Memory",
+  "description": "Local-first persistent memory for coding agents and MCP clients.",
+  "repository": {
+    "url": "https://github.com/PeterPirog/mcp-light-memory",
+    "source": "github"
+  },
+  "version": "1.8.1",
+  "packages": [
+    {
+      "registryType": "mcpb",
+      "identifier": "https://github.com/PeterPirog/mcp-light-memory/releases/download/v1.8.1/mcp-light-memory-1.8.1.mcpb",
+      "fileSha256": "aed3eb7e2431851a061be66a83ff92fe1ce7d470aa2b52bd92879cf15358a24c",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}
