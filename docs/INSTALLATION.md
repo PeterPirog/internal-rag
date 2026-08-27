@@ -230,22 +230,22 @@ selects `opencode2`. Otherwise map by the words above — never guess a version.
 
 ### 3. SCOPE
 
-- "projektowo", "dla projektu", "project" without "global" → **no** `--global`.
-- "globalnie", "global" → `--global`.
-- **"globalnie dla projektu C:\X"** means: global **client config**, server
+- "project", "for this project", or "for project C:\X" without "global" → **no** `--global`.
+- "global" or "globally" → `--global`.
+- **"globally for project C:\X"** means: global **client config**, server
   bound to `C:\X`. It does **NOT** mean the multi-project router.
-- Choose the router only when the user explicitly says: "wiele projektów",
-  "multi-project", "jeden endpoint dla kilku repozytoriów", or lists several
+- Choose the router only when the user explicitly says "multiple projects",
+  "multi-project", "one endpoint for several repositories", or lists several
   projects.
 
-### 4. Exact examples (PL / EN)
+### 4. Exact examples
 
 | Request | Command |
 |---|---|
-| PL: "Zainstaluj w Warp server mcp-light-memory globalnie dla projektu C:\Work\App" | `python <tool>/install.py "C:\Work\App" --client warp --global` |
-| EN: "Install mcp-light-memory for OpenCode for project C:\Work\App" | `python <tool>/install.py "C:\Work\App" --client opencode` |
-| EN: "Install for OpenCode 2, global, for project C:\Work\App" | `python <tool>/install.py "C:\Work\App" --client opencode2 --global` |
-| PL: "Przygotuj mcp-light-memory dla PyCharm globalnie dla projektu C:\Work\App" | `python <tool>/install.py "C:\Work\App" --client jetbrains --global` + manual JetBrains UI step (Server level = Global) |
+| "Install the mcp-light-memory server in Warp globally for project C:\Work\App" | `python <tool>/install.py "C:\Work\App" --client warp --global` |
+| "Install mcp-light-memory for OpenCode for project C:\Work\App" | `python <tool>/install.py "C:\Work\App" --client opencode` |
+| "Install for OpenCode 2, global, for project C:\Work\App" | `python <tool>/install.py "C:\Work\App" --client opencode2 --global` |
+| "Prepare mcp-light-memory for PyCharm globally for project C:\Work\App" | `python <tool>/install.py "C:\Work\App" --client jetbrains --global` + manual JetBrains UI step (Server level = Global) |
 
 ### 5. Agent workflow
 
