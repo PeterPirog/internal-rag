@@ -48,6 +48,17 @@ Hardening release: MCP protocol-era separation, per-request client-capabilities 
 - POSIX: `os.kill(pid, 0)`; `flock` advisory lock as belt-and-braces.
 - Multiprocess tests: live holder not stolen on age; dead holder reclaimable; stale owner release does not stomp new owner; dead stale PID reclaimed; fresh-timestamp dead PID reclaimed.
 
+### P-GC — GC policy alignment: one canonical config shape, honest dry-run
+- Canonical `gc` shape in `DEFAULT_CONFIG` and `config --init` template: `grace_days`, `stale_days`, `gc_candidate_days`, `archive_after_days`, `snapshot_max_age_days`, `snapshot_max_count`, `snapshot_max_bytes`.
+- `gc_cli_cmd` reads the effective `load_config()`; explicit CLI flags (`--grace-days`, `--stale-days`, `--gc-candidate-days`, `--archive-after-days`, `--snapshot-max-age-days`, `--snapshot-max-count`, `--snapshot-max-bytes`) override config, which overrides built-in defaults. The report now includes the effective `policy`.
+- `gc.archive_after_days` now actually drives staging: any memory beyond that disuse is an archive candidate regardless of value; `gc_candidate_days` still archives only low-value (value < 0.3) memories; value scoring itself is unchanged.
+- `snapshot_gc_plan` enforces `snapshot_max_bytes` by selecting the minimal sufficient set of oldest snapshots (decrementing the remaining byte budget); the active recovery point is never deleted.
+- `gc --dry-run` is strictly read-only: no file, snapshot, or SQLite mutation (ephemeral expired count is reported, not deleted). TTL cleanup runs only with `--apply` or the explicit `--cleanup-ephemeral` flag.
+- Top-level `snapshots:` section from the v1.8.0 docs is a **deprecated alias** of `gc.snapshot_*` (fills only still-default values; an explicit `gc.*` always wins). Documented in `docs/CONFIG.md`.
+- `_validate_config` now validates types/ranges for `gc.*`, `ephemeral.*`, and the deprecated `snapshots.*`.
+- `docs/CONFIG.md` and `docs/CLI.md` updated to match the code.
+- New tests (`tests/test_gc_config_alignment.py`): config overrides, CLI > config, staging thresholds, snapshot byte budget, dry-run zero mutation, validation coverage.
+
 ## 1.8.0 — 2026-08-26
 
 Major modernization: MCP 2026-07-28 final spec compliance, OpenCode 1/2 split, ephemeral memory lifecycle, diagnostic distillation, GC/retention, atomic writes.

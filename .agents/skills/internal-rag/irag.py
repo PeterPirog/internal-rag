@@ -316,11 +316,36 @@ DEFAULT_CONFIG = {
         "grace_days": 30,
         "stale_days": 90,
         "gc_candidate_days": 180,
+        "archive_after_days": 365,
         "snapshot_max_age_days": 30,
         "snapshot_max_count": 20,
         "snapshot_max_bytes": 0,
     },
 }
+
+
+def _apply_deprecated_snapshots_alias(cfg: Dict[str, Any]) -> None:
+    """Backward compatibility: a top-level `snapshots:` section is a deprecated
+    alias of `gc.snapshot_*` (kept because published docs once documented it).
+
+    Canonical shape is `gc.snapshot_max_age_days` / `gc.snapshot_max_count` /
+    `gc.snapshot_max_bytes`. Alias values fill in ONLY defaults that are still
+    at their built-in values — an explicit `gc.snapshot_*` always wins. The
+    alias is never promoted into the effective config, so there is exactly one
+    source of truth (`gc.*`).
+    """
+    snap = cfg.get("snapshots")
+    if not isinstance(snap, dict):
+        return
+    gc_sec = cfg.setdefault("gc", {})
+    builtins = {
+        "max_age_days": ("snapshot_max_age_days", 30),
+        "max_count": ("snapshot_max_count", 20),
+        "max_bytes": ("snapshot_max_bytes", 0),
+    }
+    for alias_key, (canon_key, default) in builtins.items():
+        if alias_key in snap and gc_sec.get(canon_key, default) == default:
+            gc_sec[canon_key] = snap[alias_key]
 
 
 # ----------------------------- paths & git ----------------------------------
@@ -390,7 +415,9 @@ def load_config() -> Dict[str, Any]:
             cfg = parse_yaml_simple(CONFIG_PATH.read_text(encoding="utf-8", errors="replace"))
         except Exception:
             cfg = {}
-    return deep_merge(json.loads(json.dumps(DEFAULT_CONFIG)), cfg)
+    merged = deep_merge(json.loads(json.dumps(DEFAULT_CONFIG)), cfg)
+    _apply_deprecated_snapshots_alias(merged)
+    return merged
 
 
 def deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
@@ -4238,13 +4265,37 @@ privacy:
 
 usage:
   stale_days: 30
+
+# Ephemeral observations (raw tool outputs — TTL-based, never durable):
+ephemeral:
+  ttl_seconds: 1800          # 30 minutes
+  max_records: 200           # hard cap on stored observations
+  max_bytes: 2097152         # 2 MB total (hard cap, evict oldest to satisfy)
+  max_record_bytes: 65536    # 64 KB per observation
+
+# GC / retention policy (one canonical shape; CLI flags override these):
+gc:
+  grace_days: 30             # physical delete N days after archiving
+  stale_days: 90             # deprioritize after 90d disuse (low value)
+  gc_candidate_days: 180     # archive candidate after 180d disuse (low value)
+  archive_after_days: 365    # archive after 1 year disuse (any value)
+  snapshot_max_age_days: 30  # session snapshot max age
+  snapshot_max_count: 20     # session snapshot max count
+  snapshot_max_bytes: 0      # 0 = unlimited
 """
 
 
 def _validate_config(cfg: Dict[str, Any]) -> List[str]:
     """Validate config values, return list of issues (empty = valid)."""
     issues: List[str] = []
-    known_sections = {"retrieval", "tokens", "checkpoints", "privacy", "usage", "links", "ephemeral", "gc"}
+    known_sections = {"retrieval", "tokens", "checkpoints", "privacy", "usage", "links",
+                      "ephemeral", "gc", "snapshots"}
+
+    def _nonneg_int(v: Any) -> bool:
+        return isinstance(v, int) and not isinstance(v, bool) and v >= 0
+
+    def _pos_int(v: Any) -> bool:
+        return isinstance(v, int) and not isinstance(v, bool) and v >= 1
     for key in cfg:
         if key not in known_sections:
             issues.append(f"unknown section: {key}")
@@ -4342,6 +4393,49 @@ def _validate_config(cfg: Dict[str, Any]) -> List[str]:
     else:
         if "stale_days" in u and (not isinstance(u["stale_days"], int) or u["stale_days"] < 0):
             issues.append("usage.stale_days: must be a non-negative integer")
+    e = cfg.get("ephemeral")
+    if e is not None:
+        if not isinstance(e, dict):
+            issues.append("ephemeral: must be a mapping")
+        else:
+            if "ttl_seconds" in e and not _pos_int(e["ttl_seconds"]):
+                issues.append("ephemeral.ttl_seconds: must be a positive integer")
+            if "max_records" in e and not _pos_int(e["max_records"]):
+                issues.append("ephemeral.max_records: must be a positive integer")
+            if "max_bytes" in e and not _nonneg_int(e["max_bytes"]):
+                issues.append("ephemeral.max_bytes: must be a non-negative integer")
+            if "max_record_bytes" in e and not _pos_int(e["max_record_bytes"]):
+                issues.append("ephemeral.max_record_bytes: must be a positive integer")
+    g = cfg.get("gc")
+    if g is not None:
+        if not isinstance(g, dict):
+            issues.append("gc: must be a mapping")
+        else:
+            if "grace_days" in g and not _nonneg_int(g["grace_days"]):
+                issues.append("gc.grace_days: must be a non-negative integer")
+            if "stale_days" in g and not _nonneg_int(g["stale_days"]):
+                issues.append("gc.stale_days: must be a non-negative integer")
+            if "gc_candidate_days" in g and not _nonneg_int(g["gc_candidate_days"]):
+                issues.append("gc.gc_candidate_days: must be a non-negative integer")
+            if "archive_after_days" in g and not _nonneg_int(g["archive_after_days"]):
+                issues.append("gc.archive_after_days: must be a non-negative integer")
+            if "snapshot_max_age_days" in g and not _nonneg_int(g["snapshot_max_age_days"]):
+                issues.append("gc.snapshot_max_age_days: must be a non-negative integer")
+            if "snapshot_max_count" in g and not _nonneg_int(g["snapshot_max_count"]):
+                issues.append("gc.snapshot_max_count: must be a non-negative integer")
+            if "snapshot_max_bytes" in g and not _nonneg_int(g["snapshot_max_bytes"]):
+                issues.append("gc.snapshot_max_bytes: must be a non-negative integer (0 = unlimited)")
+    s = cfg.get("snapshots")
+    if s is not None:
+        if not isinstance(s, dict):
+            issues.append("snapshots: deprecated alias of gc.snapshot_*; must be a mapping")
+        else:
+            if "max_age_days" in s and not _nonneg_int(s["max_age_days"]):
+                issues.append("snapshots.max_age_days: deprecated; must be a non-negative integer")
+            if "max_count" in s and not _nonneg_int(s["max_count"]):
+                issues.append("snapshots.max_count: deprecated; must be a non-negative integer")
+            if "max_bytes" in s and not _nonneg_int(s["max_bytes"]):
+                issues.append("snapshots.max_bytes: deprecated; must be a non-negative integer")
     return issues
 
 
@@ -4629,10 +4723,36 @@ def promote_cmd(args) -> int:
 
 
 def gc_cli_cmd(args) -> int:
-    """Retention/GC CLI: gc [--dry-run|--apply] [--json] [--grace-days N]"""
+    """Retention/GC CLI: gc [--dry-run|--apply] [--json] [--grace-days N] ...
+
+    Effective policy = built-in defaults <- .irag.yml `gc`/`ephemeral`
+    <- explicit CLI flags (flags always win). `--dry-run` is read-only: it
+    neither touches memory files, snapshots, nor the ephemeral SQLite store
+    (TTL cleanup runs only with `--apply` or `--cleanup-ephemeral`).
+    """
     import importlib.util as _ilu
     _spec = _ilu.spec_from_file_location("irag_gc", str(Path(__file__).resolve().parent / "irag_gc.py"))
     gc = _ilu.module_from_spec(_spec); _spec.loader.exec_module(gc)
+
+    cfg = load_config()
+    g = cfg.get("gc", {})
+
+    def _opt(flag_value: Any, key: str, default: Any) -> Any:
+        """CLI flag wins when explicitly given (non-None sentinel); otherwise
+        the effective config value; otherwise the built-in default."""
+        if flag_value is not None:
+            return flag_value
+        if isinstance(g, dict) and key in g:
+            return g[key]
+        return default
+
+    grace_days = int(_opt(getattr(args, "grace_days", None), "grace_days", 30))
+    stale_days = int(_opt(getattr(args, "stale_days", None), "stale_days", 90))
+    max_age = _opt(getattr(args, "gc_candidate_days", None), "gc_candidate_days", 180)
+    archive_after = int(_opt(getattr(args, "archive_after_days", None), "archive_after_days", 365))
+    snap_age = int(_opt(getattr(args, "snapshot_max_age_days", None), "snapshot_max_age_days", 30))
+    snap_count = int(_opt(getattr(args, "snapshot_max_count", None), "snapshot_max_count", 20))
+    snap_bytes = int(_opt(getattr(args, "snapshot_max_bytes", None), "snapshot_max_bytes", 0))
 
     files = []
     for p in memory_files():
@@ -4641,29 +4761,52 @@ def gc_cli_cmd(args) -> int:
             files.append((p, fm))
         except Exception:
             continue
-    plan = gc.gc_plan(RAG, files, grace_days=args.grace_days)
+    plan = gc.gc_plan(RAG, files,
+                      grace_days=grace_days,
+                      stale_days=stale_days,
+                      gc_candidate_days=int(max_age),
+                      archive_after_days=archive_after)
 
-    # Include ephemeral cleanup + snapshot cleanup in the report
-    eph_stats = None
-    snap_plan = gc.snapshot_gc_plan(RAG)
+    # Snapshot cleanup plan (read-only). Executed only under --apply.
+    snap_plan = gc.snapshot_gc_plan(RAG, max_age_days=snap_age,
+                                    max_count=snap_count, max_bytes=snap_bytes)
+    snap_run = None
     if args.apply:
         snap_run = gc.snapshot_gc_run(snap_plan, apply=True)
-    else:
-        snap_run = None
 
     result = gc.gc_run(RAG, plan, apply=args.apply,
                        write_lock=(ProjectWriteLock(RAG / ".write.lock") if args.apply else None))
-    # Ephemeral expiry runs on every GC (cheap, TTL-based)
-    try:
-        import importlib.util as _ilu2
-        _sp = _ilu2.spec_from_file_location("irag_ephemeral", str(Path(__file__).resolve().parent / "irag_ephemeral.py"))
-        eph = _ilu2.module_from_spec(_sp); _sp.loader.exec_module(eph)
-        deleted = eph.cleanup_expired(RAG)
-        eph_stats = {"expired_deleted": deleted, **eph.ephemeral_stats(RAG)}
-    except Exception:
-        eph_stats = None
+
+    # Ephemeral TTL cleanup: EXPLICIT path only. `--dry-run` (default) is
+    # strictly read-only — it reports the expired count without deleting.
+    eph_stats = None
+    cleanup_expired = bool(getattr(args, "cleanup_ephemeral", False))
+    if args.apply or cleanup_expired:
+        try:
+            import importlib.util as _ilu2
+            _sp = _ilu2.spec_from_file_location("irag_ephemeral", str(Path(__file__).resolve().parent / "irag_ephemeral.py"))
+            eph = _ilu2.module_from_spec(_sp); _sp.loader.exec_module(eph)
+            deleted = eph.cleanup_expired(RAG)
+            eph_stats = {"expired_deleted": deleted, **eph.ephemeral_stats(RAG)}
+        except Exception:
+            eph_stats = None
+    else:
+        # dry-run: read-only stats, no DELETE statements
+        try:
+            import importlib.util as _ilu2
+            _sp = _ilu2.spec_from_file_location("irag_ephemeral", str(Path(__file__).resolve().parent / "irag_ephemeral.py"))
+            eph = _ilu2.module_from_spec(_sp); _sp.loader.exec_module(eph)
+            eph_stats = eph.ephemeral_stats(RAG)
+        except Exception:
+            eph_stats = None
 
     out = {"applied": args.apply,
+           "policy": {"grace_days": grace_days, "stale_days": stale_days,
+                      "gc_candidate_days": int(max_age),
+                      "archive_after_days": archive_after,
+                      "snapshot_max_age_days": snap_age,
+                      "snapshot_max_count": snap_count,
+                      "snapshot_max_bytes": snap_bytes},
            "plan": {"total": plan["total"], "protected": plan["protected_count"],
                     "would_archive": plan["would_archive"],
                     "would_delete": plan["would_delete"],
@@ -5265,9 +5408,24 @@ def main() -> None:
     p.add_argument("--json", action="store_true")
 
     p = sub.add_parser("gc", help="Retention/GC: non-aggressive lifecycle management.")
-    p.add_argument("--dry-run", action="store_true", help="Report only (default).")
-    p.add_argument("--apply", action="store_true", help="Execute the plan.")
-    p.add_argument("--grace-days", type=int, default=30)
+    p.add_argument("--dry-run", action="store_true", help="Report only (default; read-only).")
+    p.add_argument("--apply", action="store_true", help="Execute the plan (also runs ephemeral TTL cleanup).")
+    p.add_argument("--cleanup-ephemeral", action="store_true",
+                   help="Explicit path: run ephemeral TTL cleanup (otherwise only --apply does).")
+    p.add_argument("--grace-days", type=int, default=None,
+                   help="Override gc.grace_days (physical delete after archive).")
+    p.add_argument("--stale-days", type=int, default=None,
+                   help="Override gc.stale_days (deprioritize after this disuse).")
+    p.add_argument("--gc-candidate-days", type=int, default=None,
+                   help="Override gc.gc_candidate_days (archive candidate after this disuse).")
+    p.add_argument("--archive-after-days", type=int, default=None,
+                   help="Override gc.archive_after_days (archive after this disuse, any value).")
+    p.add_argument("--snapshot-max-age-days", type=int, default=None,
+                   help="Override gc.snapshot_max_age_days.")
+    p.add_argument("--snapshot-max-count", type=int, default=None,
+                   help="Override gc.snapshot_max_count.")
+    p.add_argument("--snapshot-max-bytes", type=int, default=None,
+                   help="Override gc.snapshot_max_bytes (0 = unlimited).")
     p.add_argument("--json", action="store_true")
 
     p = sub.add_parser("config")

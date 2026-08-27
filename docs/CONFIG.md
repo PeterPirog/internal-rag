@@ -125,21 +125,28 @@ ephemeral:
   max_record_bytes: 65536    # 64 KB per observation
 ```
 
-## GC / retention (v1.8.0)
+## GC / retention (v1.8.0, canonical shape v1.8.1)
 
 ```yaml
 gc:
-  stale_days: 90             # reduce retrieval priority after 90d disuse
-  gc_candidate_days: 180     # archive candidate after 180d disuse
-  archive_after_days: 365    # archive after 1 year
   grace_days: 30             # physical delete 30d after archiving
+  stale_days: 90             # deprioritize after 90d disuse (value < 0.5)
+  gc_candidate_days: 180     # archive candidate after 180d disuse (value < 0.3)
+  archive_after_days: 365    # archive after 1 year disuse (any value)
+  snapshot_max_age_days: 30  # session snapshot max age
+  snapshot_max_count: 20     # session snapshot max count
+  snapshot_max_bytes: 0      # 0 = unlimited
 ```
+
+`gc_cli_cmd` reads the effective `load_config()`; explicit CLI flags
+(`--grace-days`, `--stale-days`, `--gc-candidate-days`, `--archive-after-days`,
+`--snapshot-max-age-days`, `--snapshot-max-count`, `--snapshot-max-bytes`)
+have higher priority than the config.
 
 ## Session snapshot GC (v1.8.0)
 
-```yaml
-snapshots:
-  max_age_days: 30
-  max_count: 20
-  max_bytes: 0               # 0 = unlimited
-```
+Canonical shape is the `gc.snapshot_*` keys above. The top-level `snapshots:`
+section from published v1.8.0 docs is a **deprecated alias**: it fills in the
+corresponding `gc.snapshot_*` values ONLY when they are still at their built-in
+defaults (an explicit `gc.snapshot_*` always wins). Do not mix the two —
+`gc.*` is the single source of truth.

@@ -138,6 +138,22 @@ Deterministic, **read-only** knowledge-consolidation report. `--dry-run` is the 
 
 `--json` also emits a `plan` array with deterministic recommended actions (e.g. `merge_or_supersede`, `resolve_conflicts`, `review_stale`) intended for an OpenCode agent to review and decide — `consolidate` itself never executes them.
 
+### `observe [--source S] [--command C] [--exit-code N] [--file PATH | --stdin] [--json]`
+Store a raw tool output as an ephemeral observation (TTL-bounded, never durable). Content, command, and metadata are secret-scanned and redacted before storage.
+
+### `promote --observation-id N [--type T] [--scope SC] [--force] [--verified] [--json]`
+Distill an ephemeral observation into durable memory (admission-gated), with provenance.
+
+### `gc [--dry-run | --apply] [--json] [--cleanup-ephemeral] [--grace-days N] [--stale-days N] [--gc-candidate-days N] [--archive-after-days N] [--snapshot-max-age-days N] [--snapshot-max-count N] [--snapshot-max-bytes N]`
+Retention/GC: non-aggressive lifecycle management.
+
+- `--dry-run` (default) is **read-only**: it reports the plan and does not modify any file, snapshot, or SQLite database (the ephemeral expired count is reported, not deleted).
+- `--apply` executes the plan under `ProjectWriteLock` and also runs the ephemeral TTL cleanup.
+- `--cleanup-ephemeral` is the explicit path that runs ephemeral TTL cleanup.
+- Policy values come from the effective `.irag.yml` `gc` section (`grace_days`, `stale_days`, `gc_candidate_days`, `archive_after_days`, `snapshot_max_age_days`, `snapshot_max_count`, `snapshot_max_bytes`); explicit CLI flags override the config, which overrides built-in defaults.
+- Staging: `archive_after_days` archives any memory beyond that disuse regardless of value; `gc_candidate_days` archives only low-value (value < 0.3) memories; `stale_days` deprioritizes. Archived memories are physically deleted only after `grace_days`.
+- Snapshot GC keeps the active recovery point (most recent snapshot) and enforces the byte budget by removing the minimal sufficient set of oldest snapshots.
+
 ### `export`
 Export all memories + WORKING_STATE to `INTERNAL_RAG/exports/irag-export-<timestamp>.json`.
 

@@ -212,12 +212,24 @@ def gc_plan(rag_dir: Path,
             memory_files: List[Tuple[Path, Dict[str, Any]]],
             grace_days: int = DEFAULT_GRACE_DAYS,
             stale_days: int = DEFAULT_STALE_DAYS,
-            gc_candidate_days: int = DEFAULT_GC_CANDIDATE_DAYS,
+            max_age_days: Optional[int] = None,
+            gc_candidate_days: Optional[int] = None,
+            archive_after_days: int = DEFAULT_ARCHIVE_AFTER_DAYS,
             now_ts: Optional[float] = None,
             ) -> Dict[str, Any]:
     """Build a non-destructive GC plan (dry-run by design).
 
     `memory_files` is a list of (path, frontmatter) tuples from the caller.
+
+    Staging thresholds (canonical config `gc.*`):
+      - `stale_days`: disuse beyond this reduces retrieval priority.
+      - `max_age_days` (aka `gc_candidate_days`, deprecated alias): disuse
+        beyond this makes a low-value memory an archive candidate.
+      - `archive_after_days`: ANY memory not accessed in this many days is an
+        archive candidate (the value floor does not apply). This is the
+        `gc.archive_after_days` policy value and actually drives staging.
+      - `grace_days`: physical deletion only for archived memories older
+        than this.
 
     Returns a dict with:
       - candidates: list of {path, id, type, status, value, reason, action}
@@ -227,6 +239,10 @@ def gc_plan(rag_dir: Path,
       - would_delete: count (only after grace period)
       - would_deprioritize: count
     """
+    if max_age_days is None:
+        max_age_days = (gc_candidate_days
+                        if gc_candidate_days is not None
+                        else DEFAULT_GC_CANDIDATE_DAYS)
     if now_ts is None:
         now_ts = time.time()
 
@@ -290,9 +306,17 @@ def gc_plan(rag_dir: Path,
                     })
             continue
 
-        if age_days > gc_candidate_days and value < 0.3:
+        if age_days > archive_after_days:
+            # Hard retention floor: disuse beyond archive_after_days archives
+            # the memory regardless of its computed value.
             action = "archive"
-            reason = f"not accessed in {age_days:.0f}d, value={value:.2f}, type={mtype}"
+            reason = (f"not accessed in {age_days:.0f}d > archive_after_days "
+                      f"{archive_after_days}d, value={value:.2f}, type={mtype}")
+            would_archive += 1
+        elif age_days > max_age_days and value < 0.3:
+            action = "archive"
+            reason = (f"not accessed in {age_days:.0f}d > max_age {max_age_days}d, "
+                      f"value={value:.2f}, type={mtype}")
             would_archive += 1
         elif age_days > stale_days and value < 0.5:
             action = "deprioritize"
@@ -482,38 +506,53 @@ def snapshot_gc_plan(rag_dir: Path,
         return {"candidates": [], "total": 0, "would_delete": 0}
 
     snapshots = sorted(snap_dir.glob("*.md"), key=lambda p: p.stat().st_mtime,
-                       reverse=True)
+                        reverse=True)
     # The most recent snapshot is the active recovery point — never delete it
     if not snapshots:
         return {"candidates": [], "total": 0, "would_delete": 0}
 
     active = snapshots[0]
     now_ts = time.time()
-    candidates: List[Dict[str, Any]] = []
     total_bytes = sum(s.stat().st_size for s in snapshots)
 
-    for i, snap in enumerate(snapshots[1:]):  # skip active
+    selected: List[Tuple[Path, float, int, str]] = []  # (snap, age, size, reason)
+    picked = set()
+
+    def _pick(snap: Path, reason: str) -> None:
+        nonlocal picked
+        if snap in picked:
+            return
         age_days = (now_ts - snap.stat().st_mtime) / 86400.0
-        reason = ""
-        should_delete = False
+        selected.append((snap, age_days, snap.stat().st_size, reason))
+        picked.add(snap)
 
+    for i, snap in enumerate(snapshots[1:]):  # skip active, oldest first
+        age_days = (now_ts - snap.stat().st_mtime) / 86400.0
         if age_days > max_age_days:
-            reason = f"age {age_days:.0f}d > max_age {max_age_days}d"
-            should_delete = True
-        elif i + 1 > max_count - 1:  # -1 for the active snapshot
-            reason = f"count {i+2} > max_count {max_count}"
-            should_delete = True
-        elif max_bytes > 0 and total_bytes > max_bytes:
-            reason = f"total_bytes {total_bytes} > max_bytes {max_bytes}"
-            should_delete = True
+            _pick(snap, f"age {age_days:.0f}d > max_age {max_age_days}d")
+        elif i + 1 > max_count - 1:
+            # max_count applies to non-active snapshots (the active recovery
+            # point is always kept in addition)
+            _pick(snap, f"count {i + 2} > max_count {max_count}")
 
-        if should_delete:
-            candidates.append({
-                "path": str(snap),
-                "age_days": round(age_days, 1),
-                "size_bytes": snap.stat().st_size,
-                "reason": reason,
-            })
+    # Byte budget: decrement the remaining budget as files are selected and
+    # stop as soon as the remaining set fits (minimal sufficient set, oldest
+    # first). The active recovery point is never selected.
+    if max_bytes > 0:
+        selected_bytes = sum(s for (_, _, s, _) in selected)
+        remaining = total_bytes - selected_bytes
+        for snap in reversed(snapshots[1:]):  # oldest first (list is newest-first)
+            if remaining <= max_bytes:
+                break
+            if snap in picked:
+                continue
+            _pick(snap, f"byte budget: remaining {remaining} > max_bytes {max_bytes}")
+            remaining -= snap.stat().st_size
+
+    candidates = [
+        {"path": str(s), "age_days": round(a, 1), "size_bytes": sz, "reason": r}
+        for (s, a, sz, r) in sorted(selected, key=lambda t: (t[1], -t[2]))
+    ]
 
     return {
         "candidates": candidates,
