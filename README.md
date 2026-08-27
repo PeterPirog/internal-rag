@@ -280,11 +280,11 @@ Two retrieval profiles (see `docs/EMBEDDINGS.md`):
 
 ```bash
 python pack.py --with-embeddings --profile english-fast
-# -> mcp-light-memory-offline-1.8.0.zip
+# -> internal-rag-offline-1.8.1.zip   (name from pack.py; 1.8.1 = VERSION file)
 # On the air-gapped machine:
-unzip mcp-light-memory-offline-*.zip -d mcp-light-memory-offline
+unzip internal-rag-offline-*.zip -d internal-rag-offline
 pip install --no-index --find-links wheels/ -r requirements-optional.txt
-python install.py "/path/to/project"
+python install.py "/path/to/project" --client <warp|opencode|opencode2|jetbrains>
 ```
 
 See `docs/OFFLINE.md` for details.

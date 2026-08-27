@@ -1,4 +1,4 @@
-# Offline / air-gapped usage (v1.7.0)
+# Offline / air-gapped usage (v1.8.1)
 
 INTERNAL_RAG is designed to work **fully offline** — the core (BM25+MMR) has zero external dependencies. For air-gapped environments with self-hosted models, you can also pre-package optional embeddings.
 
@@ -24,7 +24,8 @@ python pack.py --with-embeddings --profile multilingual
 python pack.py --with-embeddings --model all-MiniLM-L6-v2
 ```
 
-This creates `internal-rag-offline-<version>.zip` containing:
+This creates `internal-rag-offline-1.8.1.zip` (name from `pack.py`; the version
+suffix always equals the `VERSION` file) containing:
 - The full INTERNAL_RAG package.
 - `wheels/` — `sentence-transformers` + `numpy` as `.whl` files.
 - `models/` — the embeddings model pre-downloaded and saved.

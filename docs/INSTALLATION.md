@@ -183,6 +183,81 @@ project binding.**
 If you need **one global MCP endpoint for many repositories**, use the
 multi-project router — see [MCP-MULTI-PROJECT.md](MCP-MULTI-PROJECT.md).
 
+## Agent installation contract
+
+Deterministic rules for agents (Warp / OpenCode / any CLI agent) that must
+translate a natural-language request into an exact `install.py` invocation.
+Do not guess — apply these rules in order.
+
+### 1. TARGET_PROJECT (first argument, always)
+
+- If the user gives a project path (e.g. `C:\Projects\App`), **always** use it
+  as the first argument to `install.py`.
+- Never use `.` unless `git rev-parse --show-toplevel` confirms the current
+  working directory **is** the target project.
+- All `mlm.py` verification commands must run with **cwd = TARGET_PROJECT**
+  (or `Push-Location` / `cd` equivalent).
+
+### 2. CLIENT (deterministic mapping, no version guessing)
+
+| User says | Flag |
+|---|---|
+| "Warp" | `--client warp` |
+| "OpenCode", "OpenCode stable", "OpenCode V1" | `--client opencode` |
+| "OpenCode 2", "OpenCode V2", "opencode2", "OpenCode beta" | `--client opencode2` |
+| "PyCharm", "JetBrains AI Assistant" | `--client jetbrains` |
+
+OpenCode V1 runs as `opencode`; OpenCode 2 runs as a separate `opencode2`.
+If the requesting agent **is** the OpenCode 2 runtime itself, that runtime
+selects `opencode2`. Otherwise map by the words above — never guess a version.
+
+### 3. SCOPE
+
+- "projektowo", "dla projektu", "project" without "global" → **no** `--global`.
+- "globalnie", "global" → `--global`.
+- **"globalnie dla projektu C:\X"** means: global **client config**, server
+  bound to `C:\X`. It does **NOT** mean the multi-project router.
+- Choose the router only when the user explicitly says: "wiele projektów",
+  "multi-project", "jeden endpoint dla kilku repozytoriów", or lists several
+  projects.
+
+### 4. Exact examples (PL / EN)
+
+| Request | Command |
+|---|---|
+| PL: "Zainstaluj w Warp server mcp-light-memory globalnie dla projektu C:\Work\App" | `python <tool>/install.py "C:\Work\App" --client warp --global` |
+| EN: "Install mcp-light-memory for OpenCode for project C:\Work\App" | `python <tool>/install.py "C:\Work\App" --client opencode` |
+| EN: "Install for OpenCode 2, global, for project C:\Work\App" | `python <tool>/install.py "C:\Work\App" --client opencode2 --global` |
+| PL: "Przygotuj mcp-light-memory dla PyCharm globalnie dla projektu C:\Work\App" | `python <tool>/install.py "C:\Work\App" --client jetbrains --global` + manual JetBrains UI step (Server level = Global) |
+
+### 5. Agent workflow
+
+a. verify TARGET_PROJECT exists and is a Git repo;
+b. clone/pull `mcp-light-memory` once into a **stable location outside** the
+   target project (e.g. `~/mcp-light-memory`);
+c. run the exact `install.py` with client + scope + target from above;
+d. **never** reset or force-overwrite an existing client config — the
+   installer is fail-closed on unparseable configs and preserves valid ones;
+e. verify **with cwd = TARGET_PROJECT**:
+   `mlm.py --version`, `mlm.py status`, `mlm.py guard`;
+f. for Warp/OpenCode, confirm the target config file contains
+   `mcp-light-memory` **and** the target project path;
+g. report success **only after** the real registration is confirmed;
+h. if a final step needs UI/approval, say so explicitly.
+
+### 6. Warp: config vs activation
+
+Writing the Warp config is automatic. Project-scoped Warp servers may still
+require activation/approval inside the client (toggle in Warp settings) —
+do not describe project-scoped Warp as unconditionally "fully automatic".
+
+### 7. OpenCode JSONC
+
+If the installer prints **MANUAL EDIT REQUIRED (JSONC)** for an existing
+`opencode.jsonc`, the MCP install is **not** complete. Perform a safe manual
+edit if you have file-editing tools; otherwise clearly report
+"manual action required" and stop.
+
 ## Client-specific notes
 
 - **Warp** — file-based servers auto-spawn when global; project-scoped

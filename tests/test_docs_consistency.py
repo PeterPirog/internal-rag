@@ -378,5 +378,152 @@ class TestInstallDocsMatrix(unittest.TestCase):
         self.assertIn("enabled: true", v1_section)
 
 
+class TestTopLevelInstallDocs(unittest.TestCase):
+    """INSTALL.md / START_HERE.md must not suggest `install.py PROJECT`
+    (without --client) is a complete Warp/OpenCode MCP installation."""
+
+    def _read(self, rel: str) -> str:
+        return (PROJECT_ROOT / rel).read_text(encoding="utf-8")
+
+    def test_install_md_exists_and_links_to_canonical(self):
+        text = self._read("INSTALL.md")
+        self.assertIn("docs/INSTALLATION.md", text,
+                       "INSTALL.md must link to the canonical guide")
+
+    def test_install_md_lists_all_clients(self):
+        text = self._read("INSTALL.md")
+        for client in ("--client warp", "--client opencode",
+                       "--client opencode2", "--client jetbrains"):
+            self.assertIn(client, text, f"INSTALL.md missing {client}")
+
+    def test_install_md_explains_project_global_scope(self):
+        text = self._read("INSTALL.md")
+        self.assertIn("--global", text)
+        self.assertRegex(text, r"(?i)global.*?client config|client config.*?global")
+        self.assertRegex(text, r"(?i)target project|project.*?first argument")
+        self.assertRegex(text, r"(?i)not a multi-project router|multi-project router",
+                         "INSTALL.md must clarify --global != router")
+
+    def test_install_md_warns_bare_install_is_incomplete(self):
+        text = self._read("INSTALL.md")
+        self.assertRegex(text, r"(?i)does \*\*not\*\*\s*\n?register|not.*register",
+                         "INSTALL.md must state that bare install.py is not a full MCP install")
+
+    def test_start_here_never_shows_client_install_without_client_flag(self):
+        """Any install.py invocation line in START_HERE.md that mentions a
+        client (warp/opencode/jetbrains) must carry --client; and the doc
+        must not present a bare `install.py <path>` line as the primary
+        Warp/OpenCode install command."""
+        text = self._read("START_HERE.md")
+        for line in text.splitlines():
+            if "install.py" in line and re.search(r"(?i)warp|opencode|jetbrains|pycharm", line):
+                self.assertIn("--client", line,
+                              f"client-mentioning install line lacks --client: {line.strip()}")
+        # The primary install command must carry --client.
+        m = re.search(r"`?\s*(?:python3?\.? ?\\?install\.py)[^\n]*`(.*?)\n", text)
+        install_lines = [l for l in text.splitlines() if "install.py" in l and "unregister" not in l]
+        self.assertTrue(any("--client" in l for l in install_lines),
+                        "START_HERE.md primary install command lacks --client")
+
+    def test_start_here_uses_mlm_py_not_legacy_irag_py(self):
+        text = self._read("START_HERE.md")
+        self.assertIn("mlm.py", text, "START_HERE.md must use primary mlm.py")
+        self.assertNotIn("irag.py", text,
+                         "START_HERE.md must not promote legacy irag.py as the main path")
+
+
+class TestAgentInstallContract(unittest.TestCase):
+    """The canonical Agent installation contract (docs/INSTALLATION.md)."""
+
+    def _contract(self) -> str:
+        text = (PROJECT_ROOT / "docs" / "INSTALLATION.md").read_text(encoding="utf-8")
+        m = re.search(r"(?s)## Agent installation contract.*?(?=\n## )", text)
+        self.assertIsNotNone(m, "docs/INSTALLATION.md missing '## Agent installation contract'")
+        return m.group(0)
+
+    def test_contract_exists(self):
+        self.assertTrue(self._contract())
+
+    def test_target_project_rule_is_exact(self):
+        c = self._contract()
+        self.assertIn("first argument", c)
+        self.assertIn("git rev-parse --show-toplevel", c)
+        self.assertIn("cwd = TARGET_PROJECT", c)
+
+    def test_generic_opencode_maps_to_opencode_flag(self):
+        c = self._contract()
+        self.assertIn('"OpenCode", "OpenCode stable", "OpenCode V1"', c)
+        self.assertIn("`--client opencode`", c)
+
+    def test_opencode2_maps_to_opencode2_flag(self):
+        c = self._contract()
+        self.assertIn('"OpenCode 2", "OpenCode V2", "opencode2"', c)
+        self.assertIn("`--client opencode2`", c)
+
+    def test_global_does_not_mean_router(self):
+        c = self._contract()
+        self.assertIn("globalnie dla projektu", c)
+        self.assertRegex(c, r"(?i)does \*\*NOT\*\* mean the multi-project router")
+
+    def test_polish_example_with_windows_path(self):
+        c = self._contract()
+        self.assertIn("Zainstaluj w Warp server mcp-light-memory globalnie", c)
+        self.assertIn("C:\\Work\\App", c)
+        self.assertIn('install.py "C:\\Work\\App" --client warp --global', c)
+
+    def test_en_openCode_examples(self):
+        c = self._contract()
+        self.assertIn('install.py "C:\\Work\\App" --client opencode', c)
+        self.assertIn('install.py "C:\\Work\\App" --client opencode2 --global', c)
+        self.assertIn('install.py "C:\\Work\\App" --client jetbrains --global', c)
+
+    def test_agent_workflow_steps(self):
+        c = self._contract()
+        for token in ("verify TARGET_PROJECT", "stable location outside",
+                      "never", "mlm.py --version", "mlm.py status", "mlm.py guard",
+                      "report success", "UI/approval"):
+            self.assertIn(token, c, f"agent workflow missing step: {token!r}")
+
+    def test_warp_activation_noted(self):
+        c = self._contract()
+        self.assertRegex(c, r"(?i)activation|approval",
+                         "contract must note Warp project-scoped activation")
+
+    def test_jsonc_manual_required_noted(self):
+        c = self._contract()
+        self.assertIn("MANUAL EDIT REQUIRED (JSONC)", c)
+
+
+class TestOfflineDocsConsistency(unittest.TestCase):
+    """README offline archive name must match pack.py's actual naming, and
+    docs/OFFLINE.md must not carry a stale version pin."""
+
+    def _pack_naming(self) -> str:
+        pack = (PROJECT_ROOT / "pack.py").read_text(encoding="utf-8")
+        m = re.search(r'internal-rag-offline-\{VERSION\}\.zip', pack)
+        self.assertIsNotNone(m, "pack.py default ZIP naming not found")
+        return "internal-rag-offline-"
+
+    def test_readme_offline_archive_name_matches_pack(self):
+        readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn(self._pack_naming(), readme,
+                      "README offline archive must use pack.py's internal-rag-offline-<version> naming")
+        self.assertNotIn("mcp-light-memory-offline-", readme,
+                         "README must not use a drifted offline archive name")
+
+    def test_offline_md_version_matches_canonical(self):
+        v = _load_irag_version()
+        off = (PROJECT_ROOT / "docs" / "OFFLINE.md").read_text(encoding="utf-8")
+        m = re.search(r"^\s*#.*?\((v?[0-9]+\.[0-9]+\.[0-9]+)\)", off)
+        self.assertIsNotNone(m, "OFFLINE.md title version not found")
+        self.assertEqual(m.group(1).lstrip("v"), v,
+                         f"OFFLINE.md version {m.group(1)} != canonical {v}")
+
+    def test_offline_md_archive_name_matches_pack(self):
+        off = (PROJECT_ROOT / "docs" / "OFFLINE.md").read_text(encoding="utf-8")
+        self.assertIn("internal-rag-offline-", off)
+        self.assertNotIn("mcp-light-memory-offline-", off)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
