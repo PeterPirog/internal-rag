@@ -166,11 +166,13 @@ class TestDocsConsistency(unittest.TestCase):
         self.assertIsNotNone(m, "README version badge not found")
         self.assertEqual(m.group(1), v,
                          f"README badge version {m.group(1)} != canonical {v}")
-        # "**Version:** 1.6.0"
+        # A "**Version:** X.Y.Z" line, when present, must match the canonical
+        # version. (The current README points at the VERSION file instead —
+        # both forms are accepted.)
         m2 = re.search(r"\*\*Version:\*\*\s*([0-9]+\.[0-9]+\.[0-9]+)", readme)
-        self.assertIsNotNone(m2, "README Version: line not found")
-        self.assertEqual(m2.group(1), v,
-                         f"README Version: {m2.group(1)} != canonical {v}")
+        if m2 is not None:
+            self.assertEqual(m2.group(1), v,
+                             f"README Version: {m2.group(1)} != canonical {v}")
 
     def test_docs_protocol_versions_include_all_supported(self):
         supported = set(_load_supported_versions())
@@ -260,6 +262,120 @@ class TestDocsConsistency(unittest.TestCase):
             if "mcp" in text or "irag" in text:
                 self.assertIn("python", text.lower(),
                               f"{p.name} MCP example does not reference python")
+
+
+class TestInstallDocsMatrix(unittest.TestCase):
+    """Canonical installation contract (v1.8.1 docs alignment).
+
+    One unambiguous contract: client x scope matrix, `--global` semantics,
+    no version drift, correct OpenCode V1/V2 config shapes, JetBrains is
+    assisted (never "the installer writes the config").
+    """
+
+    INSTALL_DOCS = ("README.md", "docs/INSTALLATION.md",
+                    "docs/ZERO-SHOT-SETUP-PROMPTS.md", "docs/WARP-SETUP.md",
+                    "docs/OPENCODE.md", "docs/MCP-MULTI-PROJECT.md")
+
+    def _read(self, rel: str) -> str:
+        return (PROJECT_ROOT / rel).read_text(encoding="utf-8")
+
+    # ------------------------------------------------------------------ #
+
+    def test_no_stale_version_expectations(self):
+        """Installation docs must not instruct users to expect a specific
+        old version (e.g. 'expect 1.7.0' / 'expect 1.8.0'); the canonical
+        version comes from the VERSION file."""
+        for rel in self.INSTALL_DOCS:
+            text = self._read(rel)
+            bad = re.findall(r"(?i)expect(?:ed)?\s*:?\s*1\.[678]\.0", text)
+            self.assertFalse(bad, f"{rel} contains stale version expectations: {bad}")
+            self.assertNotIn("Wersja: 1.7", text,
+                             f"{rel} pins a stale version banner")
+
+    def test_readme_shows_all_three_automatic_clients(self):
+        readme = self._read("README.md")
+        for client in ("--client warp", "--client opencode ", "--client opencode2"):
+            self.assertIn(client, readme, f"README missing install command: {client!r}")
+
+    def test_project_and_global_commands_documented(self):
+        """Both scopes must be documented with real flags."""
+        readme = self._read("README.md")
+        install = self._read("docs/INSTALLATION.md")
+        for client in ("warp", "opencode", "opencode2", "jetbrains"):
+            self.assertIn(f"--client {client}", readme,
+                          f"README matrix missing client: {client}")
+            self.assertIn(f"--client {client}", install,
+                          f"INSTALLATION.md missing client: {client}")
+            if client != "opencode2":
+                self.assertIn(f"--client {client} --global", readme,
+                              f"README missing --global for {client}")
+        self.assertIn("--client opencode2 --global", readme)
+        self.assertIn("--global", install)
+
+    def test_opencode_v1_example_is_flat_mcp(self):
+        """examples/opencode-legacy.example.json must be real OpenCode V1:
+        flat mcp.<name> (NO 'servers' sub-key), type local, command array,
+        enabled: true."""
+        data = json.loads(self._read("examples/opencode-legacy.example.json"))
+        mcp = data["mcp"]
+        self.assertNotIn("servers", mcp,
+                         "V1 example must be flat mcp.<name> (no 'servers')")
+        entry = mcp["mcp-light-memory"]
+        self.assertEqual(entry["type"], "local")
+        self.assertIsInstance(entry["command"], list)
+        self.assertTrue(entry["enabled"])
+
+    def test_opencode_v2_example_is_mcp_servers(self):
+        """examples/opencode-v2.example.jsonc must be real OpenCode V2:
+        mcp.servers.<name>, command array, and NO 'enabled' field."""
+        text = self._read("examples/opencode-v2.example.jsonc")
+        data = json.loads(_strip_jsonc(text))
+        mcp = data["mcp"]
+        self.assertIn("servers", mcp,
+                      "V2 example must use mcp.servers.<name>")
+        entry = mcp["servers"]["mcp-light-memory"]
+        self.assertEqual(entry["type"], "local")
+        self.assertIsInstance(entry["command"], list)
+        self.assertNotIn("enabled", entry,
+                         "V2 must not use 'enabled' (V2 uses 'disabled')")
+
+    def test_jetbrains_docs_never_claim_auto_config_write(self):
+        """JetBrains/PyCharm docs must present the setup as assisted/manual:
+        the installer must not be described as writing the IDE config or
+        'fully automatic' for the IDE step."""
+        for rel in ("docs/INSTALLATION.md", "docs/ZERO-SHOT-SETUP-PROMPTS.md"):
+            text = self._read(rel)
+            self.assertNotIn("register the MCP server in ~/.jetbrains/mcp.json", text,
+                             f"{rel} claims the installer writes the JetBrains config")
+        install = self._read("docs/INSTALLATION.md")
+        self.assertIn("no automatic registration", install)
+        self.assertIn("Server level", install)
+        # Both IDE server levels must be documented.
+        self.assertIn("Project", install)
+        self.assertIn("Global", install)
+
+    def test_global_semantics_explained(self):
+        """--global must be explained as a CLIENT CONFIG scope: the server
+        stays bound to the target project, and multi-repo needs point to the
+        router."""
+        install = self._read("docs/INSTALLATION.md")
+        self.assertIn("--global", install)
+        self.assertRegex(install, r"(?i)client\s+config")
+        self.assertRegex(install, r"(?i)target\s+project")
+        self.assertIn("multi-project router", install)
+        readme = self._read("README.md")
+        self.assertRegex(readme, r"(?i)\-\-global.*?CLIENT CONFIG")
+
+    def test_readme_opencode_section_not_mcp_servers(self):
+        """README's OpenCode stable (V1) description must not show the V2
+        'mcp.servers' shape as if it were V1."""
+        readme = self._read("README.md")
+        m = re.search(r"### OpenCode stable \(V1\)(.*?)### OpenCode 2", readme, re.S)
+        self.assertIsNotNone(m, "README OpenCode V1 section not found")
+        v1_section = m.group(1)
+        self.assertNotIn("mcp.servers", v1_section,
+                         "README V1 section must not describe mcp.servers shape")
+        self.assertIn("enabled: true", v1_section)
 
 
 if __name__ == "__main__":

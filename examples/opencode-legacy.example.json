@@ -1,8 +1,11 @@
 {
-  "mcpServers": {
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
     "mcp-light-memory": {
-      "command": "python",
-      "args": [".agents/skills/internal-rag/irag.py", "mcp"]
+      "type": "local",
+      "command": ["python", ".agents/skills/internal-rag/mlm.py", "mcp"],
+      "cwd": "/abs/path/to/project",
+      "enabled": true
     }
   }
 }

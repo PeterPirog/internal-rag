@@ -59,9 +59,9 @@ When your agent starts a task, it calls `context` and gets back relevant past de
 - **Git** (the target project must be a git repo)
 - Optional: `pip install sentence-transformers numpy` for better semantic retrieval
 
-**Version:** 1.8.1
+The current version is defined by the [`VERSION`](VERSION) file — check it (or run `mlm.py --version`) instead of hard-coding an expected number.
 
-### Install + register in one command
+### Quick start
 
 Clone this repo once, then install into any project:
 
@@ -83,244 +83,61 @@ The installer:
 - auto-registers the MCP server in the client config (or prints manual instructions for JetBrains)
 - writes the **absolute path** to the verified Python interpreter (survives Windows PATH issues)
 
-### Verification
-
 ```powershell
-python .agents\skills\internal-rag\mlm.py --version   # expect: 1.8.0
+python .agents\skills\internal-rag\mlm.py --version   # reports the installed version
 python .agents\skills\internal-rag\mlm.py status       # expect: INTERNAL_RAG ready
 python .agents\skills\internal-rag\mlm.py guard        # expect: GUARD OK
 ```
 
----
+### Installation matrix
 
-## Configuration: Warp
+One installer, four clients, two config scopes. Full guide: [docs/INSTALLATION.md](docs/INSTALLATION.md).
 
-Warp reads MCP server configs from file-based JSON files. The installer writes the correct file automatically.
-
-### Zero-shot (agent does everything)
-
-Paste this prompt into Warp's agent:
-
-```
-Install and configure MCP Light Memory (mcp-light-memory) as an MCP server for this project, fully automatically.
-
-Steps:
-1. Clone: git clone https://github.com/PeterPirog/mcp-light-memory.git ~/mcp-light-memory
-   (if it exists: git -C ~/mcp-light-memory pull --ff-only)
-2. Install: python ~/mcp-light-memory/install.py . --client warp
-   (use python3 on Linux/macOS)
-3. Verify: python .agents/skills/internal-rag/mlm.py --version  (expect 1.8.0)
-           python .agents/skills/internal-rag/mlm.py guard      (expect GUARD OK)
-4. Report success or the exact error. Do not ask me anything.
-```
-
-### Manual setup in Warp
-
-According to the [Warp MCP documentation](https://docs.warp.dev/agents/capabilities/mcp/), Warp supports two config locations:
-
-| Scope | File path | Auto-spawn |
+| Client | Project scope | Global scope |
 |---|---|---|
-| **Global** | `~/.warp/.mcp.json` | On by default |
-| **Project-scoped** | `{repo_root}/.warp/.mcp.json` | Requires manual toggle in Settings |
+| **Warp** (automatic) | `install.py . --client warp` | `install.py . --client warp --global` |
+| **OpenCode stable (V1)** (automatic) | `install.py . --client opencode` | `install.py . --client opencode --global` |
+| **OpenCode 2 (V2, beta)** (automatic) | `install.py . --client opencode2` | `install.py . --client opencode2 --global` |
+| **JetBrains AI / PyCharm** (manual in IDE UI) | `install.py . --client jetbrains` | `install.py . --client jetbrains --global` |
 
-**Option A — using the installer (recommended):**
+- **`--global` changes the scope of the CLIENT CONFIG** (`~/.warp/.mcp.json` vs `{repo}/.warp/.mcp.json`, `~/.config/opencode/opencode.json` vs project `opencode.json`). The server still points at the **target project** you installed into.
+- **Need one global MCP endpoint for many repositories?** Use the multi-project router — [docs/MCP-MULTI-PROJECT.md](docs/MCP-MULTI-PROJECT.md).
+- **JetBrains/PyCharm is assisted, not fully automatic**: the installer prepares the JSON + Working Directory; you add the server in Settings → Tools → AI Assistant → MCP and choose Server level = Project or Global.
+- Manual setup (no installer) per client: [docs/INSTALLATION.md](docs/INSTALLATION.md) + client pages ([Warp](docs/WARP-SETUP.md) · [OpenCode](docs/OPENCODE.md)).
 
-```powershell
-python ~/mcp-light-memory/install.py . --client warp          # project-scoped (.warp/.mcp.json)
-python ~/mcp-light-memory/install.py . --client warp --global  # global (~/.warp/.mcp.json)
-```
+### Zero-shot (agent does it)
 
-The installer writes the absolute Python path, `command`, `args`, and `working_directory` automatically.
-
-**Option B — manual JSON:**
-
-Open **Settings → Agents → MCP servers** (or press `Ctrl+Shift+P` → search "Open MCP Servers"), click **+ Add**, and paste:
-
-```json
-{
-  "mcpServers": {
-    "mcp-light-memory": {
-      "command": "C:\\Python312\\python.exe",
-      "args": ["C:\\path\\to\\project\\.agents\\skills\\internal-rag\\mlm.py", "mcp"],
-      "working_directory": "C:\\path\\to\\project"
-    }
-  }
-}
-```
-
-> **Important:** Always set `working_directory` explicitly (per [Warp docs](https://docs.warp.dev/agents/capabilities/mcp/)) — the server resolves the memory store root from it. Use the absolute path to your real Python (not the WindowsApps stub).
-
-On Linux/macOS:
-
-```json
-{
-  "mcpServers": {
-    "mcp-light-memory": {
-      "command": "python3",
-      "args": ["/path/to/project/.agents/skills/internal-rag/mlm.py", "mcp"],
-      "working_directory": "/path/to/project"
-    }
-  }
-}
-```
-
-After adding, Warp auto-spawns global servers. Project-scoped servers require a manual toggle in **Settings → Agents → MCP servers**. The server should show a green status. MCP logs: `Help → Show Log in Explorer → mcp/` folder.
-
-**To unregister:**
-
-```powershell
-python ~/mcp-light-memory/install.py . --client warp --unregister
-```
+Paste a prompt into the client's agent — see [docs/ZERO-SHOT-SETUP-PROMPTS.md](docs/ZERO-SHOT-SETUP-PROMPTS.md).
 
 ---
 
-## Configuration: OpenCode
+## Configuration details
 
-OpenCode reads MCP server configs from `opencode.json` (or `.jsonc`) in the project root, or `~/.config/opencode/opencode.json` globally. See the [OpenCode MCP docs](https://opencode.ai/docs/mcp-servers/).
+### Warp
 
-### Zero-shot (agent does everything)
+Warp reads MCP server configs from `~/.warp/.mcp.json` (global, auto-spawns) or
+`{repo}/.warp/.mcp.json` (project, requires a manual toggle per [Warp docs](https://docs.warp.dev/agents/capabilities/mcp/)).
+Shape: `mcpServers.<name>` with `command`, `args`, `working_directory` (always set it — the memory store is resolved from it). See `examples/warp.example.json` and [docs/WARP-SETUP.md](docs/WARP-SETUP.md).
 
-Paste this prompt into OpenCode:
+### OpenCode stable (V1)
 
-```
-Install and configure MCP Light Memory (mcp-light-memory) as an MCP server for this project, fully automatically.
+OpenCode reads `opencode.json`/`.jsonc` in the project root, or
+`~/.config/opencode/opencode.json` globally. V1 servers are **flat** under
+`mcp.<name>` (no `servers` sub-key) with `enabled: true` and `command` as an
+array — see `examples/opencode-legacy.example.json` and [docs/OPENCODE.md](docs/OPENCODE.md).
 
-Steps:
-1. Clone: git clone https://github.com/PeterPirog/mcp-light-memory.git ~/mcp-light-memory
-   (if it exists: git -C ~/mcp-light-memory pull --ff-only)
-2. Install: python ~/mcp-light-memory/install.py . --client opencode
-   (use python3 on Linux/macOS)
-3. Verify: python .agents/skills/internal-rag/mlm.py --version  (expect 1.8.0)
-           python .agents/skills/internal-rag/mlm.py guard      (expect GUARD OK)
-4. Report success or the exact error. Do not ask me anything.
-```
+### OpenCode 2 (V2, beta)
 
-### Manual setup in OpenCode
+Same config files, different shape: `mcp.servers.<name>`, `command` as an
+array, and **no `enabled` field** (V2 disables via `disabled: true`) — see
+`examples/opencode-v2.example.jsonc` and [docs/OPENCODE.md](docs/OPENCODE.md).
 
-**Option A — using the installer (recommended):**
+### JetBrains AI Assistant / PyCharm
 
-```powershell
-python ~/mcp-light-memory/install.py . --client opencode
-```
-
-This writes `opencode.json` in the project root with the `mcp.servers` shape.
-
-**Option B — manual JSON:**
-
-Create or edit `opencode.json` (or `opencode.jsonc`) in your project root:
-
-```jsonc
-{
-  "$schema": "https://opencode.ai/config.json",
-  "mcp": {
-    "servers": {
-      "mcp-light-memory": {
-        "type": "local",
-        "command": ["C:\\Python312\\python.exe", "C:\\path\\to\\project\\.agents\\skills\\internal-rag\\mlm.py", "mcp"],
-        "cwd": "C:\\path\\to\\project",
-        "enabled": true
-      }
-    }
-  }
-}
-```
-
-On Linux/macOS:
-
-```jsonc
-{
-  "$schema": "https://opencode.ai/config.json",
-  "mcp": {
-    "servers": {
-      "mcp-light-memory": {
-        "type": "local",
-        "command": ["python3", "/path/to/project/.agents/skills/internal-rag/mlm.py", "mcp"],
-        "cwd": "/path/to/project",
-        "enabled": true
-      }
-    }
-  }
-}
-```
-
-Per the [OpenCode config docs](https://opencode.ai/docs/config/), the `command` field is an array of `[executable, ...args]`, `cwd` sets the working directory, and `enabled` controls whether the server starts on launch. Config files are merged (global + project).
-
-**To unregister:**
-
-```powershell
-python ~/mcp-light-memory/install.py . --client opencode --unregister
-```
-
----
-
-## Configuration: JetBrains AI Assistant / PyCharm
-
-PyCharm does **NOT** auto-read any MCP config file from disk. MCP servers are managed exclusively through the IDE UI. The installer prints ready-to-paste instructions instead of writing a file.
-
-### Zero-shot (agent does everything)
-
-Paste this prompt into PyCharm's AI Assistant chat:
-
-```
-Install and configure MCP Light Memory (mcp-light-memory) as an MCP server for this project, fully automatically.
-
-Steps:
-1. Clone: git clone https://github.com/PeterPirog/mcp-light-memory.git ~/mcp-light-memory
-   (if it exists: git -C ~/mcp-light-memory pull --ff-only)
-2. Install: python ~/mcp-light-memory/install.py . --client jetbrains --global
-   (use python3 on Linux/macOS)
-   The installer will print a JSON block + Working Directory to paste into the IDE.
-3. In PyCharm: Settings (Ctrl+Alt+S) → Tools → AI Assistant → MCP → Add → STDIO
-   Paste the JSON from step 2. Set Working Directory to the project path.
-   Set Server level = Global or Project. OK → Apply.
-4. Verify: python .agents/skills/internal-rag/mlm.py --version  (expect 1.8.0)
-           python .agents/skills/internal-rag/mlm.py guard      (expect GUARD OK)
-5. Report success or the exact error. Do not ask me anything.
-```
-
-### Manual setup in PyCharm
-
-According to the [JetBrains AI Assistant MCP documentation](https://www.jetbrains.com/help/ai-assistant/mcp.html):
-
-1. Go to **Settings** (`Ctrl+Alt+S`) → **Tools** → **AI Assistant** → **Model Context Protocol (MCP)**.
-2. Click **+ Add**.
-3. Select **STDIO** as the connection type.
-4. Paste this JSON configuration:
-
-```json
-{
-  "mcpServers": {
-    "mcp-light-memory": {
-      "command": "C:\\Python312\\python.exe",
-      "args": ["C:\\path\\to\\project\\.agents\\skills\\internal-rag\\mlm.py", "mcp"]
-    }
-  }
-}
-```
-
-On Linux/macOS:
-
-```json
-{
-  "mcpServers": {
-    "mcp-light-memory": {
-      "command": "python3",
-      "args": ["/path/to/project/.agents/skills/internal-rag/mlm.py", "mcp"]
-    }
-  }
-}
-```
-
-5. **Working directory** (in the same dialog): set to your project root (e.g. `C:\path\to\project`). **This is critical** — without it, the memory store will be created in the IDE's default cwd, not your project.
-6. **Server level**: Global (all projects) or Project (current only).
-7. Click **OK → Apply**. The server should start — green status = connected. If not, click **Reconnect** in the Status column.
-8. To verify tools: click the icon in the Status column to see available tools (`context`, `search`, `remember`, `guard`, etc.).
-
-**MCP logs**: `Help → Show Log in Explorer` → open the `mcp/` folder.
-
-> **Note:** PyCharm also supports importing from Claude Desktop (Settings → MCP → Import from Claude). If you already have the server configured there, you can reuse it.
-
-**To remove**: go to **Settings → Tools → AI Assistant → MCP** and remove the server from the list.
+PyCharm does **NOT** auto-read any MCP config file. The installer prints
+ready-to-paste JSON + Working Directory; you add the server in
+Settings → Tools → AI Assistant → MCP (STDIO) and choose **Server level =
+Project or Global**. See `examples/jetbrains.example.json`.
 
 ---
 

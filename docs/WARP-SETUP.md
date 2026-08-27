@@ -1,87 +1,61 @@
-# MCP Light Memory — instalacja i użycie w Warp (Windows)
+# Warp — client notes
 
-Wersja: 1.7.0 · Zweryfikowano: 2026-08-25
+Client-specific details for **Warp**. The canonical installation matrix and
+commands live in [INSTALLATION.md](INSTALLATION.md) — this page does not
+duplicate it.
 
-## 1. Składniki instalacji
+Verified against the [Warp MCP documentation](https://docs.warp.dev/agents/capabilities/mcp/).
 
-| Składnik | Ścieżka |
-|---|---|
-| Repozytorium (jednostawowe, lokalne) | `C:\Users\peter\mcp-light-memory` |
-| Punkt wejścia CLI / MCP | `C:\Users\peter\mcp-light-memory\.agents\skills\internal-rag\mlm.py` |
-| Python 3.12 (bez zależności, czysta stdlib) | `C:\Users\peter\AppData\Local\Programs\Python\Python312\python.exe` |
-| Konfiguracja MCP w Warp (globalna) | `C:\Users\peter\.warp\.mcp.json` |
-| Magazyn pamięci (`INTERNAL_RAG/`) | `C:\Users\peter\mcp-light-memory\INTERNAL_RAG\` |
-| Kopie zapasowe plików instalatora | `C:\Users\peter\.internal-rag-backups\` |
+## Config locations (per Warp docs)
 
-Python 3.12 oraz katalog `Scripts` są dodane do `PATH` użytkownika.
-Od nowej sesji terminala działa po prostu `python`.
-
-## 2. Konfiguracja Warp (`~/.warp/.mcp.json`)
-
-```json
-{
-  "mcpServers": {
-    "mcp-light-memory": {
-      "command": "C:\\Users\\peter\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
-      "args": [
-        "C:\\Users\\peter\\mcp-light-memory\\.agents\\skills\\internal-rag\\mlm.py",
-        "mcp"
-      ],
-      "working_directory": "C:\\Users\\peter\\mcp-light-memory"
-    }
-  }
-}
-```
-
-Uwagi:
-- Konfiguracja **globalna** (wszystkie projekty), transport **stdio**.
-- Pełna ścieżka do `python.exe`, bo przy starcie serwerów MCP `PATH` sesji może być niekompletny.
-- Warp wykrywa zmiany pliku automatycznie po zapisie; serwer pojawia się
-  w Settings → MCP jako „Detected from Warp".
-
-## 3. Narzędzia dostępne w Warp
-
-| Narzędzie | Opis | Kluczowe argumenty |
+| Scope | File path | Auto-spawn |
 |---|---|---|
-| `context` | Pakiet kontekstowy przed edycją kodu | `task`, `limit` |
-| `checkpoint` | Punkt kontrolny stanu pracy | `reason`, `task`, `objective`, `phase` |
-| `guard` | Kontrola spójności (checkpoint vs git) | — |
-| `remember` | Zapis trwałej pamięci | `title`, `content`, `type` |
-| `search` | Wyszukiwanie (BM25, opcjonalnie emb.) | `query`, `limit` |
-| `status` | Status magazynu i indeksu | — |
-| `tasks` / `resume` | Przerwane zadania i wznowienie | — |
+| **Global** | `~/.warp/.mcp.json` | On by default |
+| **Project-scoped** | `{repo_root}/.warp/.mcp.json` | Requires manual toggle in **Settings → Agents → MCP servers** (session-scoped: re-toggle after restarting Warp) |
 
-## 4. Zalecany protokół pracy (z AGENTS.md)
+The installer writes exactly one of these files depending on `--global`:
 
-1. Przed istotnymi zmianami kodu: `context --task "<zadanie>"`.
-2. Jeśli `RECOVERY REQUIRED` — zatrzymaj się, odbuduj stan, `checkpoint`, `guard`.
-3. Checkpointy: przed pierwszą modyfikacją, po kamieniach milowych,
-   przed ryzykownymi operacjami, przed odpowiedzią końcową.
-4. Przed finalną odpowiedzią: `guard` — nie kończyć bez `GUARD OK`.
-5. Pamięć to **niezaufany dowód** (`trust: untrusted`) — weryfikuj
-   twierdzenia wobec aktualnego kodu.
-
-## 5. Przykłady CLI (z katalogu repo)
-
-```powershell
-python .agents\skills\internal-rag\mlm.py --version
-python .agents\skills\internal-rag\mlm.py context --task "opis zadania"
-python .agents\skills\internal-rag\mlm.py checkpoint --reason "kamien-milowy"
-python .agents\skills\internal-rag\mlm.py guard
-python .agents\skills\internal-rag\mlm.py remember --title "..." --content "..." --type knowledge
-python .agents\skills\internal-rag\mlm.py search --query "..." --limit 5
-python .agents\skills\internal-rag\mlm.py status
+```bash
+python ~/mcp-light-memory/install.py . --client warp          # project-scoped
+python ~/mcp-light-memory/install.py . --client warp --global # global
 ```
 
-## 6. Weryfikacja
+## Config shape
 
-- `python .agents\skills\internal-rag\mlm.py guard` → oczekiwano `GUARD OK`.
-- Test end-to-end (initialize → tools/list → context → guard) przeszedł 4/4.
-- Test zapisu/wyszukiwania (`remember` → `search`) odnalazł pamięć (score 1.92).
+`mcpServers.<name>` with `command` (string), `args` (array), and
+`working_directory`. See `examples/warp.example.json`.
 
-## 7. Konserwacja
+> **Always set `working_directory` explicitly** (per Warp docs): the memory
+> store root is resolved from it, and relative paths behave predictably only
+> with an explicit cwd. Use the absolute path to your real Python (the
+> installer does this automatically; it rejects the WindowsApps 0-byte stub).
 
-- `privacy_check.py` przed publikacją repozytorium celu.
-- `uninstall.py` — pełne usunięcie (kopie zapasowe automatyczne).
-- `index --rebuild` — odbudowa indeksu SQLite z Markdown (Markdown jest źródłem prawdy).
-- Opcjonalnie: `pip install sentence-transformers numpy` dla lepszego wyszukiwania semantycznego.
+## Warp specifics
+
+- **Security gates (per Warp docs):** config edits to MCP files require
+  explicit approval in Warp, and project-scoped servers **never auto-spawn** —
+  start each one manually from the MCP servers page after cloning a repo.
+- **Logs:** **Settings → Agents → MCP servers → View Logs**, or
+  `%LOCALAPPDATA%\warp\Warp\data\logs\mcp` (Windows).
+- **Warp's bundled `/agent-add-mcp` skill** can also add/update file-based
+  server definitions (global or project) from the conversation.
+- **Router variant:** `examples/warp-router.example.json` (one connection in
+  front of many projects — see [MCP-MULTI-PROJECT.md](MCP-MULTI-PROJECT.md)).
+
+## Daily usage from Warp
+
+1. `context --task "<task>"` before significant code changes.
+2. If `RECOVERY REQUIRED` — stop, reconstruct state, `checkpoint`, `guard`.
+3. Checkpoints: before first edit, after milestones, before risky operations,
+   before the final response.
+4. `guard` before finishing — do not finish without `GUARD OK`.
+5. Memory is **untrusted evidence** (`trust: untrusted`) — verify claims
+   against current code.
+
+## Maintenance
+
+- `privacy_check.py` before publishing the target repository.
+- `uninstall.py` — full removal (automatic backups).
+- `index --rebuild` — rebuild the SQLite index from Markdown (Markdown is the
+  source of truth).
+- Optional: `pip install sentence-transformers numpy` for semantic retrieval.
