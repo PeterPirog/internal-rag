@@ -1,0 +1,88 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mcp-light-memory"
+dynamic = ["version"]
+description = "Local-first persistent memory and checkpoint/retrieval layer for coding agents and MCP clients."
+readme = "README.md"
+requires-python = ">=3.8"
+license = "MIT"
+authors = [
+  { name = "Peter Pirog" },
+]
+keywords = [
+  "mcp",
+  "model-context-protocol",
+  "ai-agents",
+  "coding-agents",
+  "memory",
+  "rag",
+  "local-first",
+  "opencode",
+  "warp",
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.8",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+  "Topic :: Software Development :: Version Control :: Git",
+]
+
+[project.urls]
+Homepage = "https://github.com/PeterPirog/mcp-light-memory"
+Repository = "https://github.com/PeterPirog/mcp-light-memory"
+Documentation = "https://github.com/PeterPirog/mcp-light-memory/tree/main/docs"
+Issues = "https://github.com/PeterPirog/mcp-light-memory/issues"
+Changelog = "https://github.com/PeterPirog/mcp-light-memory/blob/main/CHANGELOG.md"
+
+[project.scripts]
+mcp-light-memory = "mcp_light_memory.cli:main"
+mlm-install = "mcp_light_memory.cli:main"
+
+[tool.hatch.version]
+path = "VERSION"
+pattern = "(?P<version>\\d+\\.\\d+\\.\\d+)"
+
+[tool.hatch.build.targets.wheel]
+packages = ["mcp_light_memory"]
+
+# The existing installer intentionally resolves integration assets relative to
+# its own file. Package the same tested files under mcp_light_memory/ so the
+# PyPI CLI preserves the repository installer's behavior without duplicating
+# the implementation in a second code path.
+[tool.hatch.build.targets.wheel.force-include]
+"install.py" = "mcp_light_memory/install.py"
+"privacy_check.py" = "mcp_light_memory/privacy_check.py"
+"VERSION" = "mcp_light_memory/VERSION"
+".agents/skills/internal-rag" = "mcp_light_memory/.agents/skills/internal-rag"
+".opencode/tools" = "mcp_light_memory/.opencode/tools"
+".opencode/commands" = "mcp_light_memory/.opencode/commands"
+".opencode/plugins/internal-rag-resilience.ts" = "mcp_light_memory/.opencode/plugins/internal-rag-resilience.ts"
+".opencode/plugins/internal-rag-resilience-v2.ts" = "mcp_light_memory/.opencode/plugins/internal-rag-resilience-v2.ts"
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/pyproject.toml",
+  "/README.md",
+  "/LICENSE",
+  "/VERSION",
+  "/install.py",
+  "/privacy_check.py",
+  "/mcp_light_memory",
+  "/.agents/skills/internal-rag",
+  "/.opencode/tools",
+  "/.opencode/commands",
+  "/.opencode/plugins/internal-rag-resilience.ts",
+  "/.opencode/plugins/internal-rag-resilience-v2.ts",
+]
